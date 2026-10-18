@@ -1,0 +1,21 @@
+# v20.7.3 — ml-service Docker build context hygiene.
+# Without this, `COPY . .` bakes local runtime state (parquet store, trained
+# models, any locally placed .env) into the image layer — bloat + secret leak.
+store/
+models/*.pkl
+*.parquet
+*.pkl
+tests/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.env
+.env.*
+.venv/
+venv/
+.pytest_cache/
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+README.md

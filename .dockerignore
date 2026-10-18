@@ -1,0 +1,35 @@
+# ============================================================
+# .dockerignore — Jev Bot Lab v20.8.1
+# ------------------------------------------------------------
+# v20.8.1 FIX (H2 — SECRETY): `COPY app/ ./` used to bake host
+# node_modules (platform-mismatched binaries), any local .env
+# (SECRETS IN THE IMAGE), runtime state and test junk into the
+# image. Now excluded at build-context level.
+# ============================================================
+app/node_modules
+app/dist
+app/.env
+app/.env.*
+app/server/data
+app/data
+app/.test-data*
+app/coverage
+app/test
+# v20.8.4 FIX (H3 — context gaps): a host that ran `npm --prefix
+# telegram-bot install` or trained models locally would bake
+# platform-mismatched node_modules OVER the clean ci layer and leak
+# pkl/parquet store artifacts into the node image (exactly the class
+# this file exists to block).
+app/telegram-bot/node_modules
+app/telegram-bot/.env
+app/ml-service/store
+app/ml-service/__pycache__
+app/backups
+**/__pycache__
+**/*.pyc
+.git
+.github
+state
+cache
+*.zip
+download

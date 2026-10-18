@@ -1,0 +1,68 @@
+{
+  "name": "SmartAI Pro Trading Terminal",
+  "short_name": "SmartAI",
+  "description": "India Intraday (NSE) + CoinDCX + JEV Bot Lab three-desk AI trading terminal",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "orientation": "any",
+  "categories": [
+    "finance",
+    "productivity",
+    "business"
+  ],
+  "lang": "en",
+  "dir": "ltr",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "India Intraday",
+      "short_name": "India",
+      "description": "India Intraday NSE desk",
+      "url": "/?tab=india",
+      "icons": [
+        {
+          "src": "/icon.svg",
+          "sizes": "any"
+        }
+      ]
+    },
+    {
+      "name": "CoinDCX Crypto",
+      "short_name": "Crypto",
+      "description": "CoinDCX crypto desk",
+      "url": "/?tab=crypto",
+      "icons": [
+        {
+          "src": "/icon.svg",
+          "sizes": "any"
+        }
+      ]
+    },
+    {
+      "name": "JEV Bot Lab",
+      "short_name": "Bots",
+      "description": "Bot Lab desk — 3-arm honest signal pipeline",
+      "url": "/?tab=bots",
+      "icons": [
+        {
+          "src": "/icon.svg",
+          "sizes": "any"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💎</text></svg>" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0" />
+    <meta name="description" content="SmartAI Pro v21.3 Trading Terminal — India Intraday (NSE) + CoinDCX FUTURES + Equity SIM + Jev/Laya dual-AI board confirmation. Real-time AI signals, local Ollama AI council, committee consensus, paper trading, auto-trader, honest dual-provider bot pipeline (Jev cloud + Laya local, consensus/auto arms)." />
+    <meta name="theme-color" content="#020617" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta property="og:title" content="SmartAI Pro v21 — Trading Terminal" />
+    <meta property="og:description" content="India Intraday + CoinDCX + JEV Bot Lab three-desk AI trading terminal." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="SmartAI Pro v21 — Trading Terminal" />
+    <meta name="twitter:description" content="India Intraday + CoinDCX + JEV Bot Lab three-desk AI trading terminal." />
+    <title>SmartAI Pro v21 — Trading Terminal</title>
+
+    <!-- Static-mirror guard: Vercel (and similar static-only hosts) deploy the
+         frontend WITHOUT the Express API server — every /api/* call would 404
+         ("Connect failed (404)" etc). Bounce such visits to the real,
+         API-backed deployment before the app even boots. -->
+    <script>
+      (function () {
+        try {
+          if (/\.vercel\.app$/i.test(window.location.hostname)) {
+            window.location.replace(
+              'https://smartai1.onrender.com' +
+              window.location.pathname + window.location.search + window.location.hash
+            );
+          }
+        } catch (e) { /* never block boot */ }
+      })();
+    </script>
+
+    <link rel="preconnect" href="https://scanner.tradingview.com" crossorigin />
+    <link rel="preconnect" href="https://api.coindcx.com" crossorigin />
+    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="dns-prefetch" href="https://data.tradingview.com" />
+    <link rel="dns-prefetch" href="https://s3.tradingview.com" />
+    <link rel="preconnect" href="https://stream.binance.com" crossorigin />
+    <link rel="preconnect" href="https://data.tradingview.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  </head>
+  <body class="bg-slate-950">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

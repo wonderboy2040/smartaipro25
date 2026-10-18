@@ -1,0 +1,4 @@
+# Dev/test dependencies for the ml-service (v18.1)
+# Install with:  pip install -r requirements-dev.txt
+-r requirements.txt
+pytest==8.2.2

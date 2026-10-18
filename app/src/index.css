@@ -1,0 +1,1140 @@
+/* ========================================
+   WEALTH AI — CLAYMORPHISM DESIGN SYSTEM v6.0
+   Soft · Puffy · Rounded · Tactile · Premium
+   Mobile + Desktop Responsive
+   ========================================
+   Claymorphism = clay-like 3D shapes with:
+   - Very rounded corners (20-30px)
+   - Puffy multi-layer shadows (inflated look)
+   - Top inner highlight (clay sheen)
+   - Slight border for clay edge
+   All existing class names preserved — zero
+   component changes needed.
+   ======================================== */
+
+@import "tailwindcss";
+
+/* ========================================
+   CLAY COLOR PALETTE
+   ======================================== */
+:root {
+  /* Clay Surface — deep warm dark */
+  --clay-bg: #1e1e2e;
+  --clay-bg-secondary: #181825;
+  --clay-surface: #1e1e2e;
+  --clay-surface-raised: #262637;
+  --clay-surface-inset: #15151f;
+
+  /* Clay Shadows — the puffy magic */
+  --clay-shadow-dark: rgba(0, 0, 0, 0.45);
+  --clay-shadow-darker: rgba(0, 0, 0, 0.6);
+  --clay-shadow-light: rgba(255, 255, 255, 0.06);
+  --clay-shadow-lighter: rgba(255, 255, 255, 0.1);
+  --clay-highlight: rgba(255, 255, 255, 0.08);
+
+  /* Primary — Electric Cyan */
+  --primary: #00f2ff;
+  --primary-dim: #00dbe7;
+  --primary-container: rgba(0, 242, 255, 0.12);
+  --on-primary: #001a1c;
+
+  /* Secondary — Purple */
+  --secondary: #b600f8;
+  --secondary-dim: #c026d3;
+  --secondary-container: rgba(182, 0, 248, 0.1);
+
+  /* Accent Colors */
+  --emerald: #10b981;
+  --red: #ef4444;
+  --amber: #f59e0b;
+  --blue: #3b82f6;
+
+  /* Text */
+  --text-primary: #e5e2e1;
+  --text-secondary: #a1a1b5;
+  --text-tertiary: #6b6b80;
+
+  /* Borders */
+  --clay-border: rgba(255, 255, 255, 0.06);
+  --clay-border-hover: rgba(0, 242, 255, 0.25);
+
+  /* Background */
+  --background: #1e1e2e;
+  --on-background: #e5e2e1;
+}
+
+/* ========================================
+   BASE TYPOGRAPHY
+   ======================================== */
+* {
+  font-family: 'Inter', 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+  box-sizing: border-box;
+  text-rendering: optimizeSpeed;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html { scroll-behavior: smooth; }
+
+/* ========================================
+   ACCESSIBILITY — KEYBOARD FOCUS (global)
+   Visible ring for keyboard users only; mouse clicks stay clean.
+   ======================================== */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(0, 242, 255, 0.55), 0 0 18px rgba(0, 242, 255, 0.25);
+  border-radius: 12px;
+}
+.quantum-input:focus-visible {
+  box-shadow:
+    inset 0 2px 6px var(--clay-shadow-dark),
+    inset 0 -1px 0 var(--clay-shadow-light),
+    0 0 0 3px rgba(0, 242, 255, 0.35),
+    0 0 18px rgba(0, 242, 255, 0.2);
+}
+
+/* ========================================
+   REDUCED MOTION — respect OS preference
+   ======================================== */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .ticker-content { animation: none !important; }
+  .animate-float, .animate-pulse-dot, .animate-shimmer { animation: none !important; }
+}
+
+/* ========================================
+   v6.3 PERFORMANCE GUARDS — kill the lag
+   1. transition: ALL on .quantum-panel repainted layout/shadows on
+      every hover/size change across dozens of panels (mobile jank).
+      Now only the cheap properties transition.
+   2. Mobile (<768px): single-layer shadows (5-layer clay shadows are
+      the most expensive paint on the page) + no infinite animations
+      except the tiny status dots. Biggest scroll-smoothness win.
+   ======================================== */
+@media (max-width: 768px) {
+  .ambient-orb { display: none !important; } /* 80px blur layers = mobile GPU killer */
+  .quantum-panel, .quantum-stat, .bento-item {
+    box-shadow:
+      0 4px 12px var(--clay-shadow-dark),
+      inset 0 1px 0 var(--clay-highlight);
+  }
+  .quantum-panel:hover, .quantum-stat:hover, .bento-item:hover {
+    box-shadow:
+      0 4px 12px var(--clay-shadow-dark),
+      inset 0 1px 0 var(--clay-highlight);
+  }
+  .animate-float, .animate-gradient, .animate-shimmer, .ticker-content { animation: none !important; }
+  .animate-pulse { animation-duration: 3s !important; }
+  .login-card, .quantum-modal { box-shadow: 0 8px 24px rgba(0,0,0,0.4) !important; }
+}
+
+/* ========================================
+   TOUCH DEVICES — no sticky hover physics
+   Hover lifts/glow only on devices with a real pointer.
+   ======================================== */
+@media (hover: none) {
+  .quantum-panel:hover,
+  .quantum-stat:hover,
+  .bento-item:hover,
+  .quantum-btn-primary:hover,
+  .quantum-btn-ghost:hover,
+  .trade-card-hover:hover {
+    transform: none;
+    box-shadow:
+      0 2px 4px var(--clay-shadow-dark),
+      0 8px 16px var(--clay-shadow-dark),
+      inset 0 1px 0 var(--clay-highlight);
+  }
+}
+
+.font-mono { font-family: 'JetBrains Mono', 'Space Grotesk', monospace; font-variant-numeric: tabular-nums; }
+.font-display { font-family: 'Space Grotesk', 'Outfit', 'Inter', sans-serif; }
+.font-h1, .font-h2, .font-display { font-family: 'Space Grotesk', sans-serif; }
+.font-body-md, .font-body-lg, .font-label-caps { font-family: 'Inter', sans-serif; }
+.font-mono-data { font-family: 'Space Grotesk', monospace; font-size: 14px; font-weight: 500; line-height: 1; letter-spacing: 0.05em; }
+
+.text-h1 { font-size: 32px; line-height: 1.2; letter-spacing: -0.01em; font-weight: 600; }
+.text-h2 { font-size: 24px; line-height: 1.3; font-weight: 600; }
+.text-display { font-size: 48px; line-height: 1.1; letter-spacing: -0.02em; font-weight: 700; }
+.text-body-lg { font-size: 18px; line-height: 1.6; font-weight: 400; }
+.text-body-md { font-size: 16px; line-height: 1.5; font-weight: 400; }
+.text-label-caps { font-size: 12px; line-height: 1; letter-spacing: 0.1em; font-weight: 600; text-transform: uppercase; }
+.text-mono-data { font-size: 14px; line-height: 1; letter-spacing: 0.05em; font-weight: 500; }
+
+/* ========================================
+   SCROLLBAR
+   ======================================== */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--clay-bg-secondary); }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(0, 242, 255, 0.35), rgba(182, 0, 248, 0.35));
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(0, 242, 255, 0.6), rgba(182, 0, 248, 0.6));
+}
+* { scrollbar-width: thin; scrollbar-color: rgba(0, 242, 255, 0.35) var(--clay-bg-secondary); }
+
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+
+/* ========================================
+   ANIMATIONS
+   ======================================== */
+@keyframes fade-in-up { 0% { opacity: 0; transform: translateY(24px) scale(0.98); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes fade-in { 0% { opacity: 0; } 100% { opacity: 1; } }
+@keyframes scale-in { 0% { opacity: 0; transform: scale(0.9); } 100% { opacity: 1; transform: scale(1); } }
+@keyframes slide-up-modal { 0% { opacity: 0; transform: translateY(100px) scale(0.95); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes slide-in-right { 0% { opacity: 0; transform: translateX(30px); } 100% { opacity: 1; transform: translateX(0); } }
+@keyframes float { 0%, 100% { transform: translateY(0px); } 50% { transform: translateY(-8px); } }
+@keyframes gradient-shift { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+@keyframes pulse-dot { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.8); } }
+@keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+@keyframes ticker-scroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+@keyframes ai-chip-rotate { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+@keyframes pnl-flash { 0% { transform: scale(1.1); filter: brightness(1.5); } 100% { transform: scale(1); filter: brightness(1); } }
+@keyframes flashUp { 0% { background: rgba(16, 185, 129, 0.35); } 100% { background: transparent; } }
+@keyframes flashDown { 0% { background: rgba(239, 68, 68, 0.35); } 100% { background: transparent; } }
+
+.animate-fade-in-up { animation: fade-in-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.animate-fade-in { animation: fade-in 0.4s ease both; }
+.animate-scale-in { animation: scale-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.animate-slide-up-modal { animation: slide-up-modal 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.animate-slide-right { animation: slide-in-right 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.animate-float { animation: float 3s ease-in-out infinite; }
+.animate-gradient { background-size: 200% 200%; animation: gradient-shift 4s ease infinite; }
+.animate-pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+.animate-shimmer {
+  background: linear-gradient(90deg, var(--clay-bg) 25%, var(--clay-surface-raised) 50%, var(--clay-bg) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+.delay-75 { animation-delay: 75ms; }
+.delay-100 { animation-delay: 100ms; }
+.delay-150 { animation-delay: 150ms; }
+.delay-200 { animation-delay: 200ms; }
+.delay-300 { animation-delay: 300ms; }
+.delay-400 { animation-delay: 400ms; }
+.delay-500 { animation-delay: 500ms; }
+
+/* ========================================
+   CLAYMORPHISM CORE — The Puffy Magic
+   ========================================
+   Clay elements have:
+   1. Rounded corners (20px+)
+   2. Multi-layer puffy shadow (dark + light)
+   3. Top inner highlight (clay sheen via inset)
+   4. Slight border for edge definition
+   ======================================== */
+
+/* ===== MAIN PANEL — clay raised card ===== */
+.quantum-panel {
+  background: var(--clay-surface);
+  border-radius: 24px;
+  border: 1px solid var(--clay-border);
+  box-shadow:
+    0 2px 4px var(--clay-shadow-dark),
+    0 8px 16px var(--clay-shadow-dark),
+    0 16px 32px var(--clay-shadow-darker),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+  position: relative;
+  overflow: hidden;
+  /* v6.3: was `transition: all` — transitioned EVERY property incl.
+     box-shadow/layout on each repaint (the #1 scroll-jank source). */
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.quantum-panel::before { display: none; }
+
+.quantum-panel:hover {
+  will-change: transform;
+  border-color: var(--clay-border-hover);
+  box-shadow:
+    0 4px 8px var(--clay-shadow-dark),
+    0 12px 24px var(--clay-shadow-dark),
+    0 24px 48px var(--clay-shadow-darker),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 0 30px rgba(0, 242, 255, 0.05);
+  transform: translateY(-1px);
+}
+
+/* ===== STAT CARD — clay tile ===== */
+.quantum-stat {
+  contain: content;
+  position: relative;
+  background: var(--clay-surface);
+  border: 1px solid var(--clay-border);
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow:
+    0 2px 4px var(--clay-shadow-dark),
+    0 6px 12px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.15);
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.quantum-stat:hover {
+  will-change: transform;
+  border-color: var(--clay-border-hover);
+  box-shadow:
+    0 4px 8px var(--clay-shadow-dark),
+    0 10px 20px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.15);
+  transform: translateY(-2px);
+}
+
+/* ===== PRIMARY BUTTON — clay pill, presses on click ===== */
+.quantum-btn-primary {
+  position: relative;
+  background: linear-gradient(135deg, rgba(0, 242, 255, 0.95) 0%, rgba(182, 0, 248, 0.9) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 16px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #000;
+  transition: color 0.25s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.25s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.3),
+    0 6px 16px rgba(0, 242, 255, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.15);
+}
+
+.quantum-btn-primary::before { display: none; }
+
+.quantum-btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 4px 8px rgba(0, 0, 0, 0.3),
+    0 10px 24px rgba(0, 242, 255, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.15);
+}
+
+.quantum-btn-primary:active {
+  transform: translateY(0);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    inset 0 2px 6px rgba(0, 0, 0, 0.25),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.1);
+}
+
+/* ===== GHOST BUTTON — clay outline ===== */
+.quantum-btn-ghost {
+  position: relative;
+  background: var(--clay-surface);
+  border: 1px solid var(--clay-border);
+  border-radius: 14px;
+  color: var(--primary);
+  transition: color 0.25s ease, background-color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, opacity 0.25s ease;
+  overflow: hidden;
+  box-shadow:
+    0 2px 4px var(--clay-shadow-dark),
+    0 4px 8px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight);
+}
+
+.quantum-btn-ghost::before { display: none; }
+
+.quantum-btn-ghost:hover {
+  border-color: var(--primary);
+  box-shadow:
+    0 4px 8px var(--clay-shadow-dark),
+    0 8px 16px var(--clay-shadow-dark),
+    0 0 20px rgba(0, 242, 255, 0.15),
+    inset 0 1px 0 var(--clay-highlight);
+  transform: translateY(-1px);
+}
+
+.quantum-btn-ghost:active {
+  box-shadow:
+    inset 0 2px 6px var(--clay-shadow-dark),
+    inset 0 -1px 0 var(--clay-shadow-light);
+  transform: translateY(0);
+}
+
+/* ===== INPUT — clay inset (pressed) ===== */
+.quantum-input {
+  background: var(--clay-surface-inset);
+  border: 1px solid var(--clay-border);
+  border-radius: 14px;
+  color: var(--text-primary);
+  transition: color 0.25s ease, background-color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, opacity 0.25s ease;
+  box-shadow:
+    inset 0 2px 6px var(--clay-shadow-dark),
+    inset 0 -1px 0 var(--clay-shadow-light);
+}
+
+.quantum-input:focus {
+  border-color: var(--primary-dim);
+  box-shadow:
+    inset 0 2px 6px var(--clay-shadow-dark),
+    inset 0 -1px 0 var(--clay-shadow-light),
+    0 0 0 3px rgba(0, 242, 255, 0.1),
+    0 0 16px rgba(0, 242, 255, 0.1);
+}
+
+.quantum-input::placeholder { color: var(--text-tertiary); }
+
+/* ===== BADGE — clay pill ===== */
+.quantum-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.3rem 0.8rem;
+  background: var(--clay-surface-raised);
+  border: 1px solid var(--clay-border);
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--primary);
+  box-shadow:
+    0 1px 3px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.1);
+}
+
+.quantum-badge-purple {
+  color: var(--secondary-dim);
+  border-color: rgba(182, 0, 248, 0.15);
+}
+
+/* ===== PROGRESS BAR — clay track ===== */
+.quantum-progress {
+  height: 8px;
+  background: var(--clay-surface-inset);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--clay-border);
+  box-shadow:
+    inset 0 2px 4px var(--clay-shadow-dark),
+    inset 0 -1px 0 var(--clay-shadow-light);
+}
+
+.quantum-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary), var(--secondary));
+  border-radius: 4px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 10px rgba(0, 242, 255, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+/* ===== APP BAR ===== */
+.quantum-appbar {
+  background: var(--clay-bg);
+  border-bottom: 1px solid var(--clay-border);
+  box-shadow: 0 4px 12px var(--clay-shadow-dark);
+}
+
+.quantum-appbar::after { display: none; }
+
+/* ===== TAB — clay pill button ===== */
+.quantum-tab {
+  position: relative;
+  padding: 0.625rem 1.25rem;
+  background: transparent;
+  border: none;
+  border-radius: 14px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  transition: color 0.25s ease, background-color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease, opacity 0.25s ease;
+}
+
+.quantum-tab::after { display: none; }
+
+.quantum-tab:hover {
+  color: var(--text-primary);
+  background: var(--clay-surface);
+  box-shadow:
+    0 2px 4px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight);
+}
+
+.quantum-tab.active {
+  color: var(--primary);
+  background: linear-gradient(135deg, rgba(0, 242, 255, 0.10), rgba(182, 0, 248, 0.10));
+  box-shadow:
+    0 2px 6px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -2px 0 rgba(0, 242, 255, 0.35),
+    0 0 18px rgba(0, 242, 255, 0.08);
+}
+.quantum-tab.active::before {
+  content: '';
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  bottom: 4px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--primary), var(--secondary));
+  box-shadow: 0 0 8px rgba(0, 242, 255, 0.5);
+}
+
+/* ===== MODAL — large clay card ===== */
+.quantum-modal {
+  position: relative;
+  background: var(--clay-surface);
+  border: 1px solid var(--clay-border);
+  border-radius: 28px;
+  box-shadow:
+    0 8px 16px var(--clay-shadow-dark),
+    0 24px 48px var(--clay-shadow-darker),
+    0 48px 96px var(--clay-shadow-darker),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+}
+
+.quantum-modal::before { display: none; }
+
+/* ===== TABLE ROW ===== */
+.quantum-table-row {
+  position: relative;
+  transition: color 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+  border-bottom: 1px solid var(--clay-border);
+}
+
+.quantum-table-row::before { display: none; }
+
+.quantum-table-row:hover {
+  background: var(--clay-surface-raised);
+  box-shadow: inset 0 0 0 1px var(--clay-border);
+}
+
+/* ===== SIGNAL INDICATORS ===== */
+.quantum-signal {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.75rem;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.quantum-signal-buy {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  color: var(--emerald);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.08), inset 0 1px 0 rgba(16, 185, 129, 0.1);
+}
+
+.quantum-signal-sell {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: var(--red);
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.08), inset 0 1px 0 rgba(239, 68, 68, 0.1);
+}
+
+.quantum-signal-hold {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  color: var(--amber);
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.08), inset 0 1px 0 rgba(245, 158, 11, 0.1);
+}
+
+/* ===== DIVIDER ===== */
+.quantum-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--clay-border), transparent);
+  margin: 1.5rem 0;
+}
+
+/* ===== CHIP — small clay pill ===== */
+.quantum-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.625rem;
+  background: var(--clay-surface-raised);
+  border: 1px solid var(--clay-border);
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--primary);
+  box-shadow:
+    0 1px 2px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.1);
+}
+
+/* ===== AI CHIP ===== */
+.quantum-ai-chip {
+  position: relative;
+  padding: 0.25rem 0.75rem;
+  background: linear-gradient(90deg, var(--primary), var(--secondary));
+  background-size: 200% 100%;
+  animation: ai-chip-rotate 3s ease infinite;
+  border-radius: 9999px;
+  box-shadow: 0 2px 6px rgba(0, 242, 255, 0.2);
+}
+
+.quantum-ai-chip::before {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  background: var(--clay-surface);
+  border-radius: inherit;
+}
+
+.quantum-ai-chip span { position: relative; z-index: 1; }
+
+/* ===== LIVE INDICATOR ===== */
+.quantum-live { display: inline-flex; align-items: center; gap: 0.5rem; }
+
+.quantum-live-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--emerald);
+  border-radius: 50%;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+/* ===== HEALTH SCORE RING ===== */
+.quantum-health {
+  position: relative;
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    var(--health-color, var(--primary)) var(--health-score, 0%),
+    var(--clay-surface-inset) 0%
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    0 4px 8px var(--clay-shadow-dark),
+    0 8px 16px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight);
+}
+
+.quantum-health::before {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  background: var(--clay-surface);
+  border-radius: 50%;
+  box-shadow:
+    inset 0 2px 6px var(--clay-shadow-dark),
+    inset 0 -1px 0 var(--clay-shadow-light);
+}
+
+.quantum-health-value {
+  position: relative;
+  z-index: 1;
+  font-family: 'Space Grotesk', monospace;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+/* ===== DATA DISPLAY ===== */
+.quantum-data {
+  font-family: 'Space Grotesk', monospace;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  font-variant-numeric: tabular-nums;
+}
+
+.quantum-data-lg {
+  font-family: 'Space Grotesk', monospace;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.quantum-label {
+  font-family: 'Inter', sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* ===== SECTION HEADER ===== */
+.quantum-section-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--clay-border);
+  margin-bottom: 1.5rem;
+}
+
+.quantum-section-header::before {
+  content: '';
+  width: 4px;
+  height: 24px;
+  background: linear-gradient(180deg, var(--primary), var(--secondary));
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgba(0, 242, 255, 0.3);
+}
+
+/* ===== CHART CONTAINER — clay inset ===== */
+.quantum-chart {
+  position: relative;
+  background: var(--clay-surface-inset);
+  border: 1px solid var(--clay-border);
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow:
+    inset 0 2px 6px var(--clay-shadow-dark),
+    inset 0 -1px 0 var(--clay-shadow-light);
+}
+
+.quantum-chart::before { display: none; }
+
+/* ===== TOOLTIP ===== */
+.quantum-tooltip { position: relative; }
+
+.quantum-tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  padding: 0.5rem 0.75rem;
+  background: var(--clay-surface-raised);
+  border: 1px solid var(--clay-border);
+  border-radius: 10px;
+  font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s ease;
+  z-index: 100;
+  box-shadow:
+    0 4px 8px var(--clay-shadow-dark),
+    0 8px 16px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight);
+}
+
+.quantum-tooltip:hover::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(-4px);
+}
+
+/* ===== TEXT EFFECTS ===== */
+.text-glow {
+  text-shadow: 0 0 20px rgba(0, 242, 255, 0.4), 0 0 40px rgba(0, 242, 255, 0.2);
+}
+
+.gradient-text-cyan {
+  background: linear-gradient(135deg, #00f2ff 0%, #b600f8 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.text-on-surface { color: var(--text-primary); }
+
+.quantum-selection::selection { background: rgba(0, 242, 255, 0.3); color: #fff; }
+
+/* ===== TICKER ===== */
+.ticker-wrapper { overflow: hidden; position: relative; }
+
+.ticker-content {
+  display: inline-flex;
+  animation: ticker-scroll 40s linear infinite;
+  white-space: nowrap;
+}
+
+.ticker-content:hover { animation-play-state: paused; }
+
+/* ===== LOGIN SCREEN ===== */
+.login-bg {
+  background: var(--clay-bg);
+  background-image: radial-gradient(circle at 20% 50%, rgba(0, 242, 255, 0.06), transparent 50%),
+                    radial-gradient(circle at 80% 50%, rgba(182, 0, 248, 0.06), transparent 50%);
+}
+
+.login-card {
+  background: var(--clay-surface);
+  border: 1px solid var(--clay-border);
+  border-radius: 32px;
+  box-shadow:
+    0 8px 16px var(--clay-shadow-dark),
+    0 24px 48px var(--clay-shadow-darker),
+    0 48px 96px var(--clay-shadow-darker),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+}
+
+.login-card::before { display: none; }
+
+/* ===== GLASS OVERRIDES → CLAY ===== */
+.glass-card, .glass-panel, .glass-ultra, .glass-premium,
+.glass-input {
+  background: var(--clay-surface);
+  border: 1px solid var(--clay-border);
+  border-radius: 20px;
+  box-shadow:
+    0 4px 8px var(--clay-shadow-dark),
+    0 12px 24px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.15);
+}
+
+.glass-card::before, .glass-panel::before { display: none; }
+.glass-card:hover, .glass-panel:hover { border-color: var(--clay-border-hover); }
+
+.neon-border {
+  box-shadow: 0 0 15px rgba(0, 242, 255, 0.1), inset 0 1px 0 var(--clay-highlight);
+  border: 1px solid rgba(0, 242, 255, 0.2);
+}
+
+/* ===== BENTO GRID → CLAY ===== */
+.bento-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 24px; }
+
+.bento-item {
+  background: var(--clay-surface);
+  contain: layout style paint;
+  border: 1px solid var(--clay-border);
+  border-radius: 22px;
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    0 4px 8px var(--clay-shadow-dark),
+    0 12px 24px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.15);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.25s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.bento-item::before { display: none; }
+
+.bento-item:hover {
+  will-change: transform;
+  border-color: var(--clay-border-hover);
+  transform: translateY(-3px);
+  box-shadow:
+    0 8px 16px var(--clay-shadow-dark),
+    0 20px 40px var(--clay-shadow-darker),
+    inset 0 1px 0 var(--clay-highlight);
+}
+
+/* ===== NAV ITEMS ===== */
+.quantum-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  color: var(--text-secondary);
+  transition: color 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+  border-left: 2px solid transparent;
+}
+
+.quantum-nav-item:hover { background: rgba(0, 242, 255, 0.05); transform: translateX(4px); }
+
+.quantum-nav-item.active {
+  background: rgba(0, 242, 255, 0.08);
+  border-left: 2px solid var(--primary);
+  box-shadow: inset 0 1px 0 var(--clay-highlight);
+}
+
+/* ===== QUANTUM RANGE ===== */
+.quantum-range { position: relative; height: 4px; background: var(--clay-surface-inset); border-radius: 2px; box-shadow: inset 1px 1px 3px var(--clay-shadow-dark); }
+.quantum-range-indicator { position: absolute; top: 50%; transform: translate(-50%, -50%); width: 14px; height: 14px; background: var(--primary); border-radius: 50%; box-shadow: 0 0 8px rgba(0, 242, 255, 0.4), 0 2px 4px rgba(0, 0, 0, 0.3); cursor: grab; }
+.quantum-range-fill { position: absolute; left: 0; top: 0; height: 100%; background: linear-gradient(90deg, rgba(239, 68, 68, 0.4), rgba(16, 185, 129, 0.4)); border-radius: 2px; }
+
+/* ===== SCAN EFFECT ===== */
+@keyframes scan-line { 0% { transform: translateY(-100%); } 100% { transform: translateY(100vh); } }
+
+.quantum-scan { position: relative; overflow: hidden; }
+.quantum-scan::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--primary), transparent);
+  animation: scan-line 3s linear infinite;
+  opacity: 0.3;
+}
+
+/* ===== FOCUS RING ===== */
+.quantum-focus:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(0, 242, 255, 0.5), 0 0 20px rgba(0, 242, 255, 0.2);
+}
+
+.quantum-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+.quantum-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.quantum-scrollbar::-webkit-scrollbar-thumb { background: var(--clay-surface-raised); border-radius: 2px; }
+
+/* ===== MODAL EXTRAS ===== */
+.modal-close:hover { background: rgba(239, 68, 68, 0.1); color: var(--red); }
+
+.modal-pro {
+  background: var(--clay-surface);
+  border: 1px solid var(--clay-border);
+  box-shadow:
+    0 12px 24px var(--clay-shadow-dark),
+    0 32px 64px var(--clay-shadow-darker),
+    inset 0 1px 0 var(--clay-highlight),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+}
+
+.modal-backdrop { background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px); }
+.modal-container { z-index: 100; }
+.modal-header { border-bottom: 1px solid var(--clay-border); }
+
+/* ===== TRADING SIGNALS ===== */
+.trade-signal-long { background: rgba(16, 185, 129, 0.06); border: 1px solid rgba(16, 185, 129, 0.12); border-radius: 14px; }
+.trade-signal-short { background: rgba(239, 68, 68, 0.06); border: 1px solid rgba(239, 68, 68, 0.12); border-radius: 14px; }
+.trade-signal-card { background: var(--clay-surface); border: 1px solid var(--clay-border); border-radius: 18px; box-shadow: 0 4px 12px var(--clay-shadow-dark), inset 0 1px 0 var(--clay-highlight); }
+.trade-price-ladder { background: var(--clay-surface-inset); border: 1px solid var(--clay-border); border-radius: 10px; box-shadow: inset 0 2px 4px var(--clay-shadow-dark); }
+.trade-conviction-gauge { background: radial-gradient(circle at center, rgba(0, 242, 255, 0.15), transparent 70%); }
+
+.trade-badge-strong-long { background: rgba(16, 185, 129, 0.12); color: var(--emerald); border-color: rgba(16, 185, 129, 0.25); box-shadow: 0 0 8px rgba(16, 185, 129, 0.1); }
+.trade-badge-long { background: rgba(16, 185, 129, 0.05); color: #34d399; border-color: rgba(16, 185, 129, 0.15); }
+.trade-badge-strong-short { background: rgba(239, 68, 68, 0.12); color: var(--red); border-color: rgba(239, 68, 68, 0.25); box-shadow: 0 0 8px rgba(239, 68, 68, 0.1); }
+.trade-badge-short { background: rgba(239, 68, 68, 0.05); color: #f87171; border-color: rgba(239, 68, 68, 0.15); }
+
+.trade-pnl-flash { animation: pnl-flash 1s ease-out forwards; }
+.trade-leverage-chip { background: rgba(139, 92, 246, 0.08); border: 1px solid rgba(139, 92, 246, 0.15); color: #a78bfa; border-radius: 8px; }
+.trade-card-hover { transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease; }
+.trade-card-hover:hover { will-change: transform; transform: translateY(-2px); box-shadow: 0 8px 24px var(--clay-shadow-dark); }
+
+/* ===== AMBIENT ORBS ===== */
+.ambient-orb {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.12;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.ambient-orb-cyan { background: var(--primary); }
+.ambient-orb-purple { background: var(--secondary); }
+
+/* ===== SPACING ===== */
+.spacing-xs { gap: 4px; }
+.spacing-sm { gap: 8px; }
+.spacing-md { gap: 16px; }
+.spacing-lg { gap: 24px; }
+.spacing-xl { gap: 40px; }
+.spacing-2xl { gap: 64px; }
+
+.container-quantum { max-width: 1440px; margin: 0 auto; padding: 0 24px; }
+
+/* ===== QUANTUM SIDENAV ===== */
+.quantum-sidenav {
+  background: var(--clay-surface);
+  border: 1px solid var(--clay-border);
+  border-radius: 20px;
+  box-shadow:
+    0 4px 8px var(--clay-shadow-dark),
+    0 12px 24px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight);
+}
+
+/* ===== RESPONSIVE ===== */
+@media (max-width: 768px) {
+  .hide-mobile { display: none !important; }
+  .quantum-panel { border-radius: 18px; }
+  .quantum-stat { border-radius: 16px; }
+  .quantum-modal { border-radius: 22px; }
+
+  /* Smaller shadows on mobile for performance */
+  .quantum-panel, .quantum-stat, .bento-item, .login-card {
+    box-shadow:
+      0 2px 6px var(--clay-shadow-dark),
+      0 8px 16px var(--clay-shadow-dark),
+      inset 0 1px 0 var(--clay-highlight);
+  }
+
+  .quantum-btn-primary, .quantum-btn-ghost {
+    box-shadow:
+      0 2px 4px var(--clay-shadow-dark),
+      0 4px 8px var(--clay-shadow-dark),
+      inset 0 1px 0 var(--clay-highlight);
+  }
+
+  .quantum-input {
+    box-shadow:
+      inset 0 2px 4px var(--clay-shadow-dark),
+      inset 0 -1px 0 var(--clay-shadow-light);
+  }
+}
+
+@media (min-width: 769px) {
+  .hide-desktop { display: none !important; }
+}
+
+/* ===== LIGHT THEME ===== */
+.light {
+  --clay-bg: #f0f0f5;
+  --clay-bg-secondary: #e8e8f0;
+  --clay-surface: #f5f5fa;
+  --clay-surface-raised: #ffffff;
+  --clay-surface-inset: #e8e8f0;
+  --clay-shadow-dark: rgba(180, 180, 200, 0.5);
+  --clay-shadow-darker: rgba(150, 150, 180, 0.6);
+  --clay-shadow-light: rgba(255, 255, 255, 0.9);
+  --clay-highlight: rgba(255, 255, 255, 0.8);
+  --clay-border: rgba(0, 0, 0, 0.06);
+  --clay-border-hover: rgba(8, 145, 178, 0.3);
+  --text-primary: #1a1a2e;
+  --text-secondary: #4a5568;
+  --text-tertiary: #718096;
+  --background: #f0f0f5;
+}
+
+.light .quantum-panel,
+.light .quantum-stat {
+  background: var(--clay-surface) !important;
+  box-shadow:
+    0 2px 4px var(--clay-shadow-dark),
+    0 8px 16px var(--clay-shadow-dark),
+    inset 0 1px 0 var(--clay-highlight) !important;
+  color: var(--text-primary) !important;
+}
+
+.light .quantum-panel::before { display: none !important; }
+
+.light .quantum-input {
+  background: var(--clay-surface-inset) !important;
+  color: var(--text-primary) !important;
+  box-shadow:
+    inset 0 2px 4px var(--clay-shadow-dark),
+    inset 0 -1px 0 var(--clay-shadow-light) !important;
+}
+
+.light .quantum-modal {
+  background: var(--clay-surface) !important;
+  color: var(--text-primary) !important;
+  box-shadow:
+    0 8px 16px var(--clay-shadow-dark),
+    0 24px 48px var(--clay-shadow-darker),
+    inset 0 1px 0 var(--clay-highlight) !important;
+}
+
+.light .quantum-appbar { background: var(--clay-bg) !important; }
+.light .quantum-tab { color: var(--text-secondary) !important; }
+.light .quantum-tab.active { color: #0891b2 !important; }
+
+.light .text-slate-100, .light .text-slate-200 { color: #1e293b !important; }
+.light .text-slate-300, .light .text-white { color: #334155 !important; }
+.light .text-slate-400, .light .text-slate-500 { color: #64748b !important; }
+.light .text-cyan-300\/50, .light .text-cyan-300\/80 { color: #0e7490 !important; }
+.light .bg-black\/10, .light .bg-black\/20, .light .bg-black\/30 { background: rgba(0, 0, 0, 0.04) !important; }
+.light .bg-white\/5, .light .hover\:bg-white\/10:hover { background: rgba(15, 23, 42, 0.05) !important; }
+.light .border-white\/5, .light .border-white\/10 { border-color: rgba(15, 23, 42, 0.08) !important; }
+.light .border-white\/\[0\.03\], .light .divide-white\/\[0\.03\] > * { border-color: rgba(0, 0, 0, 0.08) !important; }
+.light.bg-gradient-to-br { background: #f0f0f5 !important; }
+
+/* ===== LIVE PRICE FLASH ===== */
+.live-price { border-radius: 4px; padding: 0 2px; transition: color 0.2s ease; }
+.live-price.flash-up { animation: flashUp 0.6s ease-out; }
+.live-price.flash-down { animation: flashDown 0.6s ease-out; }
+
+/* ===== SELECTION ===== */
+::selection { background: rgba(0, 242, 255, 0.25); color: #fff; }
+
+/* ========================================
+   MISSING ANIMATIONS + UTILITY CLASSES
+   ======================================== */
+
+/* Fix #13: message animation */
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+.animate-message-in { animation: message-in 0.3s ease both; }
+
+/* Fix #14: undefined utility classes */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.stat-card {
+  background: var(--clay-surface, #1e1e2e);
+  border: 1px solid var(--clay-border, rgba(255,255,255,0.06));
+  border-radius: 16px;
+  padding: 1rem;
+}
+
+.black-swan-alert {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 14px;
+  padding: 0.75rem 1rem;
+}
+
+.alert-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Fix #15: bento-grid responsive */
+@media (max-width: 768px) {
+  .bento-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+
+@media (max-width: 480px) {
+  .bento-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Fix #16: Black swan alert wrap on mobile */
+@media (max-width: 480px) {
+  .black-swan-alert {
+    flex-wrap: wrap;
+  }
+}
+
+/* Fix #17: intermediate breakpoint for tight panels */
+@media (max-width: 640px) {
+  .quantum-panel { padding: 0.875rem !important; }
+  .quantum-tab { padding: 0.5rem 0.75rem !important; }
+}

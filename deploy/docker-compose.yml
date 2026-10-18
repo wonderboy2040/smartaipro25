@@ -1,0 +1,75 @@
+# ============================================================
+# deploy/docker-compose.yml — Jev Bot Lab v20.8.1 (plan §12)
+# ------------------------------------------------------------
+# Usage (repo root):
+#   cp deploy/.env.example deploy/.env   # fill keys, chmod 600
+#   docker compose -f deploy/docker-compose.yml up -d --build
+# v20.8.1 FIX (H2): volumes now match the ACTUAL runtime paths.
+# The old compose mounted /app/state + /app/cache, but the code writes
+# everything under app/server/data (bot state, kill switches, jev
+# cache, candle store) — those two mounts were dead. BOT_STATE_DIR
+# is honored by the server since v20.8.1; we point it at the
+# persisted volume and mount ONE path.
+# restart: always — but "Started" != "running": verify with
+# `docker compose ps` + `docker compose logs app | grep ping`.
+# v20.9.3 FIX (M — ownership note): the image runs as `node` (uid 1000)
+# and the bind mount ../app/server/data OVERLAYS the in-image chown. On a
+# Linux host where the clone owner's uid != 1000 (or Docker creates the
+# dir fresh as root), every write fails — and store.js catches + returns
+# false ("read-only FS => memory-only mode"): app looks green, healthcheck
+# passes, but NOTHING persists (restart wipes trading state). Fix BEFORE
+# first `up`:
+#   sudo chown -R 1000:1000 app/server/data
+# (or `user: "$(id -u):$(id -g)"` in compose if you run a single-user box)
+# ============================================================
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: always
+    ports:
+      - "8080:8080"
+    # Oracle Cloud note (plan §12): do firewalls kholne padte hain —
+    # instance iptables AND cloud Security List. Local first:
+    #   curl localhost:8080/api/ping
+    # Phir Security List, phir: iptables -L INPUT -n
+    env_file:
+      - .env
+    environment:
+      # bot state (accounts, kill switches, jev cache, candle store)
+      # on the persisted volume — matches the mount below + the image's
+      # ENV default (v20.8.2; code default outside Docker is app/data/bots)
+      BOT_STATE_DIR: /app/server/data/bots
+    volumes:
+      - ../app/server/data:/app/server/data
+    # v20.9.0 (E — audit hardening): healthcheck — "Started" != "running"
+    # ko compose khud track karta hai; unhealthy → restart policy revive
+    # karti hai. /api/ping lightweight hai (version JSON, no auth).
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8080/api/ping').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    # v20.9.0 (E): daily state backup sidecar — accounts/kill-switches/
+    # journal ka snapshot backups/ me (14-din rotation, gunzip-able).
+    # Koi restore automation nahi (intentional — restore manual review
+    # ke bina kabhi nahi).
+  backup:
+    image: node:20-alpine
+    restart: always
+    volumes:
+      - ../app/server/data:/data
+    # v20.9.1 [H3]: ai-trading-config.json bhi snapshot me — kill switch,
+    # LIVE mode, daily caps isi file me hain; sidecar-only restore unhe
+    # defaults pe reset kar deta tha (user ko laga full recovery hui).
+    # tar failures ab || true ke piche nahi chhupe — log me dikhte hain.
+    command: >
+      sh -c "while true; do
+        cd /data &&
+        echo \"[backup] $(date -u +%FT%TZ) snapshot start\" &&
+        tar -czf backups/smartai-state-$$(date +%Y%m%d-%H%M).tar.gz bots protrader-auto-journal.json protrader-auto-config.json ai-trading-config.json 2>&1 || echo \"[backup] tar FAILED (files missing?)\";
+        ls -1t backups/smartai-state-*.tar.gz 2>/dev/null | tail -n +15 | xargs -r rm;
+        sleep 86400;
+      done"
