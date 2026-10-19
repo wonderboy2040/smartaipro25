@@ -73,6 +73,16 @@ export const BreadthStrip = memo(function BreadthStrip({ board }: { board: Signa
         <div className="bg-slate-600/60" style={{ width: `${flatPct}%` }} />
         <div className="bg-red-500/80" style={{ width: `${bearPct}%` }} />
       </div>
+      {/* v21.23.4 WRONG-SIGNAL-REMOVAL banner: data-degraded symbols ka
+          signal REMOVE hua (15m/1h series missing — daily-fallback
+          "90% opposite" disease). Ye banner hi honest answer hai: "kyun
+          itne kam signals?" / "kyun kuch symbols gayab?" — fabricated
+          ulta-direction nahi, honest suppress. */}
+      {(board?.degraded?.count ?? 0) > 0 && (
+        <div className="mt-2 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/35 text-amber-200 text-[10px] font-bold leading-relaxed" title={(board?.degraded?.symbols || []).map(s => `${s.symbol}: ${s.reason}`).join('\n')}>
+          ⚠ {board!.degraded!.count} SYMBOL{(board!.degraded!.count ?? 0) === 1 ? '' : 'S'} SUPPRESSED — {board!.degraded!.note || 'intraday data unavailable (daily-fallback opposite-trend signals removed by design)'}
+        </div>
+      )}
     </div>
   );
 });

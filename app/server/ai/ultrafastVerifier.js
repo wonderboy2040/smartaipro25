@@ -67,6 +67,11 @@ import { fetchCoinDcxCandles, fetchBinanceKlines } from './data.js';
 // fallback served the CRYPTO desk against an IN_ INR tick). Futures
 // candles are the SAME USDT domain as the FUT_ tick — fetch those.
 import { fetchFuturesCandles, futuresPairFor } from './futures.js';
+// v21.23.5 CoinDCX Ultrafast WS live-bar overlay — the verifier's 1m/5m
+// candles stop freezing for the REST TTL; the forming bar tracks the WS
+// book print (~1s). Binance fallback legs stay UN-overlaid (cross-domain
+// by design — the same rule as mtf.js). See cxWsCandles.js probe + contract.
+import { cxFutOverlayCandles, cxSpotOverlayCandles } from './cxWsCandles.js';
 import { ema, rsi, atr as atrOf } from './lib/indicators.js';
 // v20.9.2: the LIVE tick store (dependency-free module — the same store
 // cxRtStream/cryptoStream write into and signalRecheck reads from).
@@ -438,12 +443,16 @@ async function _candlesFor(symbol, market, tf) {
     if (market === 'FUTURES') {
       const res = tf === '1m' ? '1' : '5';
       const a = await fetchFuturesCandles(futuresPairFor(base), res, 120).catch(() => null);
-      if (Array.isArray(a) && a.length >= 25) return a;
+      // v21.23.5: futures WS book ka ~1s mark/last print live bar pe —
+      // the realtime verifier ka micro-trend ab tick-fresh.
+      if (Array.isArray(a) && a.length >= 25) return cxFutOverlayCandles(base, tf, a);
       return await fetchBinanceKlines(base, tf).catch(() => null);
     }
     if (market === 'CRYPTO') {
       const a = await fetchCoinDcxCandles(base, tf).catch(() => null);
-      if (Array.isArray(a) && a.length >= 25) return a;
+      // v21.23.5: spot WS book ka live INR print overlay (official REST
+      // series hi anchor rehta hai — forming bar only).
+      if (Array.isArray(a) && a.length >= 25) return cxSpotOverlayCandles(base, tf, a);
       // v20.9.3: Binance fallback is USDT while the CRYPTO tick (IN_<SYM>)
       // is INR — a ~98% denomination gap. Only use it when we have NO
       // fresh INR tick (check 8's |tickPct|>20 guard is the safety net).

@@ -34,6 +34,12 @@ import { fetchCoinDcxCandles, fetchBinanceKlines } from './data.js';
 import { fetchFuturesCandles, futuresPairFor } from './futures.js';
 import { usdInrFallback } from './lib/usdinr.js';
 import { computeIndicatorsFromCandles, atr as atrOf } from './lib/indicators.js';
+// v21.23.5 CoinDCX Ultrafast WS candle overlay — the REST chain stays the
+// series anchor (official OHLCV + volume); the live forming bar tracks
+// the WS price books (~1s) instead of freezing for the REST TTL
+// (15m=180s · 1h/4h/1d=300s · India Yahoo 15m=120s). See cxWsCandles.js
+// for the live probe + domain-safety + zero-regression contract.
+import { cxSpotOverlayCandles, indiaOverlayCandles, cxFutOverlayCandles } from './cxWsCandles.js';
 
 const TFS = ['1m', '5m', '15m', '1h', '4h', '1d'];
 const TF_WEIGHT = { '1d': 3.0, '4h': 2.4, '1h': 1.8, '15m': 1.3, '5m': 1.0, '1m': 0.6 };
@@ -126,7 +132,10 @@ async function _indiaCandles(symbol, tf, market = 'INDIA') {
   const key = `yf:${market}:${symbol}:${tf}`;
   const hit = _yfCache.get(key);
   const ttl = YF_TTL[tf] || 120_000;
-  if (hit && Date.now() - hit.at < ttl) return hit.payload;
+  // v21.23.5: the CACHE holds the RAW Yahoo series; the live-bar overlay
+  // (Groww liveFeed print) is applied per-READ so the forming bar never
+  // bakes a stale live close into the shared cache.
+  if (hit && Date.now() - hit.at < ttl) return indiaOverlayCandles(symbol, tf, hit.payload);
   let out = null;
   if (tf === '4h') {
     // 4h resampled from the cached 1h series — zero extra Yahoo call
@@ -143,7 +152,7 @@ async function _indiaCandles(symbol, tf, market = 'INDIA') {
     if (k === undefined) break;
     _yfCache.delete(k);
   }
-  return out;
+  return indiaOverlayCandles(symbol, tf, out);
 }
 
 /** Bucket candles into `minutes`-wide bars (open/high/low/close/volume). */
@@ -180,7 +189,11 @@ async function _candlesFor(symbol, market, tf) {
       // stop converts itself via the close-ratio, so a USDT-sourced
       // candle set can still price an INR stop correctly.
       const c = await fetchCoinDcxCandles(base, tf, { noCache: false }).catch(() => null);
-      if (Array.isArray(c) && c.length >= 30) return c;
+      // v21.23.5: CoinDCX leg ab ULTRAFAST — WS spot book ka live INR print
+      // last bar pe overlay hota hai (candles official REST series hi rehte
+      // hain). Binance USDT fallback pe overlay NAHI (cross-domain risk —
+      // USDT candles ko INR tick kabhi nahi milega, v20.9.3 lesson).
+      if (Array.isArray(c) && c.length >= 30) return cxSpotOverlayCandles(base, tf, c);
       return await fetchBinanceKlines(base, tf).catch(() => null);
     }
     if (market === 'GLOBALFUTURES') {
@@ -589,7 +602,9 @@ export async function rawTfCandlesUsdt(symbol, tf, opts = {}) {
     if (res) {
       const fc = await fetchFuturesCandles(futuresPairFor(base), res, 240).catch(() => null);
       if (Array.isArray(fc) && fc.length >= 30) {
-        return { candles: fc, ccy: 'USDT', src: 'coindcx-fut-usdt', fx: null, base };
+        // v21.23.5: futures WS book ka ~1s mark/last print live bar pe —
+        // dual-board crypto rows ki 15m — D1 ladder tick-fresh.
+        return { candles: cxFutOverlayCandles(base, tf, fc), ccy: 'USDT', src: 'coindcx-fut-usdt', fx: null, base };
       }
     }
   } catch { /* fall through */ }
@@ -605,7 +620,9 @@ export async function rawTfCandlesUsdt(symbol, tf, opts = {}) {
     const cdc = await fetchCoinDcxCandles(base, tf).catch(() => null);
     if (Array.isArray(cdc) && cdc.length >= 30) {
       const fx = Number(opts.fx) > 40 && Number(opts.fx) < 150 ? Number(opts.fx) : usdInrFallback();
-      const scaled = cdc.map(c => ({
+      // v21.23.5: overlay INR domain me PEHLE (spot WS ka INR print), phir
+      // ÷fx USDT scaling — tick/candle domain hamesha matched.
+      const scaled = cxSpotOverlayCandles(base, tf, cdc).map(c => ({
         ...c,
         open: c.open / fx, high: c.high / fx, low: c.low / fx, close: c.close / fx,
         // volume ratio-invariant hai (indicators sirf relative use karte hain)

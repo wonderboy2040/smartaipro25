@@ -216,6 +216,9 @@ import { getDualMtfBoard, buildDualRow, dualAutoCandidates, peekDualMtfBoards, T
 import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isGenuinelyTradedEntry } from './mtfAutoLink.js';
 // v21.23.1: cross-engine direction-lock release-on-close sweeper (directionLock.js)
 import { reconcileDirectionLocks } from './directionLock.js';
+// v21.23.4: runtime direction certificate (user demand: "accurately fix
+// karo, concrete level pe" — rising→LONG/BUY · falling→SHORT/SELL proof)
+import { runDirectionSelfTest } from './directionSelfTest.js';
 // v13.2 B6: bandwidth telemetry view
 import { bandwidthView } from './bandwidth.js';
 // v13.2 A5: MCP tool-call audit view
@@ -367,6 +370,20 @@ export function registerAITradingRoutes(app, deps) {
     // v21.22.0: EQUITY_SIM maps to GLOBALFUTURES
     return m === 'CRYPTO' ? 'CRYPTO' : m === 'FUTURES' ? 'FUTURES' : (m === 'GLOBALFUTURES' || m === 'EQUITY_SIM') ? 'GLOBALFUTURES' : m === 'METALS' ? 'METALS' : 'INDIA';
   };
+
+  // ---------------- v21.23.4: RUNTIME DIRECTION CERTIFICATE ----------------
+  // Synthetic ground-truth candles se lekar exchange order body tak ka
+  // end-to-end proof — "mera build direction ulti compute kar raha hai?"
+  // ka EK on-demand jawab. FAIL = computation bug (code inspect karo),
+  // PASS = computation sahi (live me ulta dikhe to data-feed/stale-build).
+  app.get('/api/ai/direction-selftest', (_req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store');
+      res.json(runDirectionSelfTest());
+    } catch (e) {
+      jsonError(res, 500, 'direction selftest failed', e);
+    }
+  });
 
   // ---------------- v18.7: AI ENGINE SENTINEL (status + recheck) ----------------
   // The "AI language engines offline" fix: the user finally SEES every

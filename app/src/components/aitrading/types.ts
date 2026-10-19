@@ -571,6 +571,15 @@ export interface AISignal {
   summary: string;
   aiNote: AINote | null;
   executable: boolean;
+  /** v21.23.4 — data-degradation stamp. "FRESH-TAPE-ABSENT": 15m fresh
+   *  tape missing, committee sirf lagging 1h trend seats se bana
+   *  (replay-proven 29% WR degenerate mode) — auto-trade BLOCKED,
+   *  sirf reference signal. "INTRADAY-TF-UNAVAILABLE": aise signals
+   *  board se hi REMOVE hote hain (yahan kabhi nahi aane chahiye —
+   *  agar aaya to server/client version mismatch hai). */
+  dataDegraded?: string | null;
+  /** v21.23.4 — the human-readable reason chip text for dataDegraded. */
+  degradedReason?: string | null;
   generatedAt: number;
 }
 
@@ -607,6 +616,10 @@ export interface SignalBoard {
   sessionPhase?: SessionPhaseInfo;
   regime?: { niftyChange?: number | null; indiaVix?: number | null; btcChange?: number | null; niftyTrend?: string | null; btcTrend?: string | null };
   breadth?: MarketBreadth;
+  /** v21.23.4 WRONG-SIGNAL-REMOVAL: data-degraded (daily-fallback
+   *  "90% opposite" disease class) symbols ka signal board se REMOVE
+   *  hua — count + reasons UI banner isi se banata hai. 0 = sab fresh. */
+  degraded?: { count: number; symbols: Array<{ symbol: string; reason: string; market?: string }>; note: string | null };
   /** v9 SUPERINTELLIGENCE: what got scanned + the 80+/85+ counts. */
   superIntelMeta?: SuperIntelMeta;
   /** v6.9: full-universe composite TOP-5 (ranked, scored, reason'd). */

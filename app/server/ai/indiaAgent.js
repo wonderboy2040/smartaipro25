@@ -688,6 +688,10 @@ async function _tick(deps, sendTelegram) {
       // taught us the guard belongs HERE too — ordering can silently
       // change in future refactors.
       if (!s?.plan || !s.side) continue;
+      // v21.23.4 WRONG-SIGNAL-REMOVAL: data-degraded signal (15m tape
+      // absent / TF-thin) kabhi auto-enter nahi hota — daily-fallback
+      // "90% opposite" disease class, remove karo (v21.23.4).
+      if (s.dataDegraded) continue;
       if (_INDEX_SYMBOLS.has(String(s.symbol || '').toUpperCase())) continue; // v21.0.2
       if (!qualifies(s)) continue;
       if ((s.plan.riskPct ?? 0) > (trading.maxRiskPct || 5)) continue;

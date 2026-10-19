@@ -775,7 +775,11 @@ function intradayTape(ctx) {
   // 29% win-rate / avgR −0.35. This seat is the counterweight.)
   const t = ctx.tape;
   if (!t || typeof t !== 'object') {
-    return vote(0, 0, ['15m tape unavailable — model abstains (honest degrade)']);
+    // v21.23.4 WRONG-SIGNAL-REMOVAL: data-absent abstain ab explicit flag
+    // carry karta hai — aggregateVotes isse FRESH-TAPE-ABSENT detect karta hai
+    // (lagging 1h seats ka 29%-WR degenerate mode, models.js header ground
+    // truth). Data-missing ≠ market-neutral: dono alag cheez hain.
+    return { ...vote(0, 0, ['15m tape unavailable — model abstains (honest degrade)']), tapeDataAbsent: true };
   }
   return tapeVote(t, '15m');
 }
@@ -816,7 +820,8 @@ function intradayTapeMTF(ctx) {
   const m = ctx.tapeMTF;
   if (!m || typeof m !== 'object' || !m.m15) {
     if (ctx.tape) return intradayTape(ctx);
-    return vote(0, 0, ['MTF tape unavailable — model abstains (honest degrade)']);
+    // v21.23.4: same data-absent marker as the plain seat
+    return { ...vote(0, 0, ['MTF tape unavailable — model abstains (honest degrade)']), tapeDataAbsent: true };
   }
 
   const perTf = {};

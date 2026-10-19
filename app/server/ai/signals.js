@@ -590,6 +590,18 @@ async function buildIndiaStockCtx(row, regime, preloadedCandles = null) {
   const dailyInd = tvToInd(row, ltp); // the DAILY view — the HTF reference
   let ind = dailyInd;
   let h1Candles = null;
+  // v21.23.4 WRONG-SIGNAL-REMOVAL (user: "sab ke sab opposite jaa rahe hai"):
+  // 15m/1h series missing → pehle committee SILENTLY daily view pe vote karti
+  // thi — in-repo documented live-proven "90% opposite" disease (RELIANCE daily
+  // RSI 41.8/SHORT jabki 15m RSI 83/rally). Aise signals hi "wrong direction"
+  // lagte the. Ab ctx degraded stamp hota hai → board path inhe SUPPRESS
+  // karta hai (signal remove, honest reason surface) — fabricated intraday
+  // direction NAHI. Daily view sirf HTF-context rahega, signal nahi.
+  let __tfDegraded = null;
+  let __tfDataThin = false;
+  if (!candles15) {
+    __tfDegraded = 'INTRADAY-TF-UNAVAILABLE (15m series missing — daily-fallback would vote yesterday\'s trend — the documented "90% opposite" disease)';
+  }
   if (candles15) {
     // v21.13: the committee votes the 1H view — 15m series resampled to
     // 1h (1mo of 15m ≈ 500 bars → ~125 1h bars; a thin fixture/history
@@ -599,6 +611,11 @@ async function buildIndiaStockCtx(row, regime, preloadedCandles = null) {
     // fetch + __ltfInd). A coherent pair: ind 1h + candles 1h.
     const h1 = resampleCandles(candles15, 60);
     h1Candles = (Array.isArray(h1) && h1.length >= 30) ? h1 : null;
+    // v21.23.4: THIN ≠ missing. 15m series PRESENT hai — tape seat (w 1.6
+    // counterweight) + SMC revival is 15m pe zinda; sirf main ind daily-view
+    // pe hai. Suppress nahi — sirf DATA-DEGRADED stamp (auto-trade BLOCK,
+    // reference display). Full-missing case (__tfDegraded) hi suppress hota hai.
+    if (!h1Candles) __tfDataThin = true;
     const ci = h1Candles ? computeIndicatorsFromCandles(h1Candles) : null;
     if (ci) {
       ind = {
@@ -618,6 +635,7 @@ async function buildIndiaStockCtx(row, regime, preloadedCandles = null) {
     // honestly abstain exactly as before.
     ind, candles: h1Candles || candles15 || null,
     __dailyInd: dailyInd,
+    __tfDegraded, __tfDataThin,
     options: _stockOptionsSnapshot(row.symbol), regime,
   };
   // v21.13: attach moved INSIDE (board + deep path both get __tv/__ltfInd
@@ -661,9 +679,17 @@ export async function buildIndiaIndexCtx(idx, regime, optionsCtx = null) {
   // the 1H committee view (stocks ki exact mirror)
   let ind = dailyInd;
   let h1Candles = null;
+  // v21.23.4: index ctx me bhi same data-degradation stamp (stocks mirror)
+  let __tfDegraded = null;
+  let __tfDataThin = false;
+  if (!has15) {
+    __tfDegraded = 'INTRADAY-TF-UNAVAILABLE (index 15m series missing — daily-fallback would vote yesterday\'s trend — the documented "90% opposite" disease)';
+  }
   if (has15) {
     const h1 = resampleCandles(candles15, 60);
     h1Candles = (Array.isArray(h1) && h1.length >= 30) ? h1 : null;
+    // v21.23.4: THIN ≠ missing (stock mirror) — stamp, suppress nahi
+    if (!h1Candles) __tfDataThin = true;
     const ci = h1Candles ? computeIndicatorsFromCandles(h1Candles) : null;
     if (ci) {
       ind = {
@@ -698,7 +724,7 @@ export async function buildIndiaIndexCtx(idx, regime, optionsCtx = null) {
     market: 'INDIA', symbol: idx, ltp, changePct,
     isIndex: true, volume: 0,
     ind, candles: h1Candles || (has15 ? candles15 : daily) || null,
-    __dailyInd: dailyInd, options: optionsCtx, regime,
+    __dailyInd: dailyInd, __tfDegraded, __tfDataThin, options: optionsCtx, regime,
   };
   // __tv = null (no TV scanner row for indexes — the chase guard + tape
   // VWAP already handle a null row honestly); __ltfInd = the 15m view.
@@ -1855,6 +1881,10 @@ async function _computeBoard(mkt, deps, opts = {}) {
   if (regimeLabel) superMeta.regimeLabel = regimeLabel;
   const candidates = [];
   const breadth = { bull: 0, bear: 0, flat: 0, avgConf: 0 };
+  // v21.23.4: data-degraded (daily-fallback) symbols ka honest ledger —
+  // inka signal REMOVE hota hai (user demand: "wrong signals remove karo")
+  // par reason board payload par surface hota hai ("kyun gayab?" ka jawab).
+  const degradedSymbols = [];
   let confSum = 0;
   for (const ctx of contexts) {
     // v11.6: mesh-seat gating FIRST (shadow weight-0 + correlation
@@ -1924,6 +1954,25 @@ async function _computeBoard(mkt, deps, opts = {}) {
       }
     }
     const consensus = aggregateVotes(_rediscountRevivedVotes(votes), gatesFor(depsSafe));
+    // v21.23.4 WRONG-SIGNAL-REMOVAL (the "sab ke sab opposite" fix):
+    // intraday 15m/1h series missing/thin → committee YESTERDAY's daily
+    // trend pe vote karti — live-proven "90% opposite" disease. Ye signal
+    // kaabhi emit hi nahi hota ab: symbol suppress + honest reason payload.
+    // remember() FLAT continuity rakhta hai (pinned-card flip detection
+    // intact). Ye "kuch nahi" nahi — DATA ABSENT = NO SIGNAL, by design.
+    if (ctx.__tfDegraded) {
+      degradedSymbols.push({ symbol: ctx.symbol, reason: ctx.__tfDegraded, market: mkt });
+      remember(mkt, ctx.symbol, { side: 'FLAT', confidence: 0, grade: 'NEUTRAL', ltp: ctx.ltp });
+      breadth.flat++;
+      continue;
+    }
+    // v21.23.4 THIN stamp: 15m series present hai (tape counterweight zinda)
+    // par 1h resample <30 bars — signal emit hota hai with DATA-DEGRADED mark
+    // (executable false + agent skip + UI chip). Suppress sirf full-missing pe.
+    if (ctx.__tfDataThin) {
+      consensus.dataDegraded = 'INTRADAY-TF-THIN';
+      consensus.degradedReason = '15m series present par 1h resample thin (<30 bars) — main ind daily-view hybrid. Auto-trade BLOCKED, reference only (v21.23.4).';
+    }
     if (consensus.dir > 0) breadth.bull++;
     else if (consensus.dir < 0) breadth.bear++;
     else breadth.flat++;
@@ -2765,6 +2814,16 @@ async function _computeBoard(mkt, deps, opts = {}) {
     sessionPhase: { phase: ses.phase, tradeable: ses.tradeable, note: ses.note },
     regime,
     breadth,
+    // v21.23.4 WRONG-SIGNAL-REMOVAL: suppressed (data-degraded) symbols ka
+    // honest ledger — intraday-TF missing symbols ka signal REMOVE hua
+    // (daily-fallback "90% opposite" disease), UI banner isi se banta hai.
+    degraded: {
+      count: degradedSymbols.length,
+      symbols: degradedSymbols.slice(0, 50),
+      note: degradedSymbols.length > 0
+        ? `${degradedSymbols.length} symbol${degradedSymbols.length === 1 ? '' : 's'} suppressed — intraday 15m/1h data unavailable (daily-fallback opposite-trend signals removed by design). Yahoo feed source check karo / thodi der me retry.`
+        : null,
+    },
     // v9 SUPERINTELLIGENCE PRO TRADER ENGINE meta — what got scanned,
     // through which price chain, and how many signals cleared the 80+
     // STRONG / 85+ ELITE bars.

@@ -157,10 +157,23 @@ export function aggregateVotes(votes, gates = DEFAULT_GATES, opts = {}) {
   const applicable = (votes || []).filter(v => v && (v.weight || 0) > 0 && !v.na);
   const allWeight = applicable.reduce((a, v) => a + v.weight, 0);
 
+  // v21.23.4 WRONG-SIGNAL-REMOVAL (the "sab opposite" root-cause layer):
+  // fresh-tape (15m) data ABSENT hone par committee ke sirf lagging 1h
+  // trend seats bachte hain — in-repo documented live ground truth: wo
+  // degenerate mode AFTER-the-move vote karta tha, replay-measured 29%
+  // win-rate / avgR −0.35 (models.js intradayTape header). Aise signals
+  // ko "normal consensus" ki tarah treat karna hi tha "sab ke sab opposite"
+  // jaisa experience. Ab aggregate hi ko flag milta hai — downstream
+  // (buildSignal executable gate + agent entry gates + UI chip) isse
+  // data-degraded non-actionable bana dete hain. Data-missing vs
+  // market-neutral alag: neutral tape (vote 0 with data) flag NAHI deta.
+  const freshTapeAbsent = (votes || []).some(v => v && v.tapeDataAbsent === true);
+
   if (votingWeight <= 0) {
     return {
       side: 'FLAT', dir: 0, confidence: 0, agreement: 0, participation: 0,
       grade: 'NEUTRAL', participating: 0, totalModels: applicable.length || (votes || []).length,
+      ...(freshTapeAbsent ? { freshTapeAbsent: true } : {}),
       summary: 'No model found a tradeable edge',
     };
   }
@@ -181,6 +194,7 @@ export function aggregateVotes(votes, gates = DEFAULT_GATES, opts = {}) {
       structuralAbsent: (votes || []).filter(v => v?.na).length,
       bullWeight: r2(bull), bearWeight: r2(bear), tie: true,
       voters: valid.length,
+      ...(freshTapeAbsent ? { freshTapeAbsent: true } : {}),
       summary: `Committee exactly split (bull weight ${r2(bull)} = bear weight ${r2(bear)}) — no edge`,
     };
   }
@@ -250,7 +264,10 @@ export function aggregateVotes(votes, gates = DEFAULT_GATES, opts = {}) {
     applicableModels: applicable.length,
     structuralAbsent: (votes || []).filter(v => v?.na).length,
     bullWeight: r2(bull), bearWeight: r2(bear),
-    summary: `${side} ${confidence}% · ${valid.length}/${applicable.length} models voting · ${Math.round(agreement * 100)}% agreement · ${Math.round(participation * 100)}% quorum${quorumCapped ? ' · quorum-capped (few voters)' : ''}${mtfCapped ? ' · MTF-capped (timeframes disagree)' : ''}`,
+    // v21.23.4: degenerate-mode stamp — consumers (executable gate /
+    // agents / UI chip) isse read karte hain, silent lagging-vote nahi
+    ...(freshTapeAbsent ? { freshTapeAbsent: true } : {}),
+    summary: `${side} ${confidence}% · ${valid.length}/${applicable.length} models voting · ${Math.round(agreement * 100)}% agreement · ${Math.round(participation * 100)}% quorum${quorumCapped ? ' · quorum-capped (few voters)' : ''}${mtfCapped ? ' · MTF-capped (timeframes disagree)' : ''}${freshTapeAbsent ? ' · FRESH-TAPE-ABSENT (lagging 1h seats only — replay-proven 29% WR mode)' : ''}`,
   };
 }
 
@@ -692,7 +709,13 @@ export function buildSignal({ symbol, market, ctx, votes, consensus, plan, aiNot
     ...((consensus.source === 'meta' || consensus.source === 'meta-capped')
       ? { meta: { source: consensus.source, label: consensus.metaLabel ?? null } }
       : {}),
-    executable: (market === 'CRYPTO' || market === 'FUTURES' || market === 'GLOBALFUTURES') && consensus.grade === 'STRONG' && !!plan,
+    // v21.23.4: DATA-DEGRADED signals non-actionable hain — FRESH-TAPE-ABSENT
+    // (lagging 1h seats AFTER-the-move, documented 29% WR) ya INTRADAY-TF-THIN
+    // (daily-ind hybrid). Inko auto-trade EXecute karna hi tha "opposite jaa
+    // raha hai" experience. Reference display only.
+    ...(consensus.dataDegraded ? { dataDegraded: consensus.dataDegraded, degradedReason: consensus.degradedReason || null } : {}),
+    ...(consensus.freshTapeAbsent ? { dataDegraded: consensus.dataDegraded || 'FRESH-TAPE-ABSENT', degradedReason: consensus.degradedReason || '15m fresh tape missing — committee sirf lagging 1h trend seats se bana (replay-proven 29% win-rate degenerate mode). Auto-trade BLOCKED — signal sirf reference.' } : {}),
+    executable: (market === 'CRYPTO' || market === 'FUTURES' || market === 'GLOBALFUTURES') && consensus.grade === 'STRONG' && !!plan && !consensus.freshTapeAbsent && !consensus.dataDegraded,
     // v12.4 SIGNAL TRUST wire fields (attached by applySignalTrustGuards
     // on both the board and deep paths — see signalMemory.js):
     //   signalAge — when this direction FIRST appeared + last confirm

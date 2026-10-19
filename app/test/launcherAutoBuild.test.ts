@@ -415,12 +415,12 @@ describe('v20.8.3 frontend stale-build visibility', () => {
     const m = VERSION_TS.match(/APP_VERSION = '([^']+)'/);
     expect(m).toBeTruthy();
     expect(m![1]).toBe(PKG.version);
-    expect(PKG.version).toBe('21.23.3'); // v21.23.3 bump (honesty completion — OLLAMA chip honestLabel, telegram ?? 88/?? 8 fabrications, 95% header claims, TradePlanPanel ?? 7, latency || 18 leak)
+    expect(PKG.version).toBe('21.23.5'); // v21.23.5 bump (CoinDCX Ultrafast WS live-candle overlay — REST anchor + WS live forming bar, the Yahoo-15m staleness cure)
   });
 
   it('Watchdog bat: v20.8.3 title + auto-build line', () => {
     const bat = readFileSync(path.join(APP_ROOT, 'Start-SmartAI-Watchdog.bat'), 'utf8');
-    expect(bat).toContain('v21.23.3');
+    expect(bat).toContain('v21.23.5');
     expect(bat).toContain('AUTO npm install');
   });
 

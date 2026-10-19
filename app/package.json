@@ -1,7 +1,7 @@
 {
   "name": "advance-pro-intelligence",
   "private": true,
-  "version": "21.23.3",
+  "version": "21.23.5",
   "type": "module",
   "scripts": {
     "dev": "vite",

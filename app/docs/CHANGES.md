@@ -1,5 +1,75 @@
 # Changelog
 
+## v21.23.5 — COINDCX ULTRAFAST WS LIVE-CANDLE OVERLAY (Yahoo 15m → live-exchange prints) (2026-10-20)
+
+**User ask: "ye Yahoo 15m विशेष रूप से — D1 isko direct CoinDCX Ultrafast websockets se replace nhi kar sakte kya — hota hai tho kardo accurately."**
+
+### LIVE-PROBE REALITY CHECK (pehle fact-check, phir implementation)
+- CoinDCX ke DONO documented public sockets (`stream-spot.coindcx.com` + `stream.coindcx.com`, EIO=4) healthy hain — price books flow karte hain (`currentPrices@spot@1s` ~1s/INR ~10s bursts + `currentPrices@futures@rt` ~1s)
+- Lekin 6 candidate candlestick channel formats (`candlestick@B-BTC_USDT_15m`, `candlestick_15m_B-BTC_USDT`, `candlestick_15m_B-BTC_INR`, …) × dono endpoints × 130s (2+ candle-close windows) → **ZERO events. CoinDCX PUBLIC sockets sirf ultrafast PRICE BOOKS push karte hain — candles NAHI.**
+- Isliye "direct replace" ka ACCURATE matlab: **REST chain (Yahoo .NS / CoinDCX spot / CoinDCX futures) SERIES ANCHOR ban ke rehta hai (official OHLCV + volume + history) — aur Ultrafast WS books SIRF the LIVE FORMING BAR overlay karte hain.**
+
+### THE STALENESS CURE (ye kya fix karta hai)
+- PEHLE: har indicator vote jo mid-TTL compute hota tha wo LAST CLOSE ko dekhta tha **jaisa wo minutes pehle tha** (REST TTL: 15m bars 180s, 1h/4h/1d 300s, India Yahoo 15m 120s) — the exact "signal feels wrong / late" experience
+- AB: forming bar ka close/high/low exchange print ko **~1s** me track karta hai (spot INR ~10s bursts) — EMA/RSI/MACD/ROC votes LIVE price pe fire hote hain; bar roll pe ek fresh live bar APPEND hota hai (volume 0 — next REST anchor self-heal)
+
+### WIRED (7 sites — the 15m — D1 ladder + verifier 1m/5m legs)
+1. **mtf.js `_indiaCandles`** (dono paths): cache-hit per-READ overlay + fresh-path overlay — **CACHE-SAFETY ORDER**: `_yfCache.set` RAW series store karta hai, overlay return pe apply hota hai (stale live close kabhi shared cache me bake nahi hota). Yahoo .NS 15m — D1 ab Groww liveFeed (the India desk ka ultrafast quote) se tick-fresh. GLOBALFUTURES rows isi path pe ride karte hain (US tickers ka IN_ row nahi → honest no-op)
+2. **mtf.js `_candlesFor` CRYPTO branch**: CoinDCX spot REST → `cxSpotOverlayCandles` (WS spot book INR print)
+3. **mtf.js `rawTfCandlesUsdt` Leg-1**: futures REST → `cxFutOverlayCandles` (WS futures book mark/last)
+4. **mtf.js `rawTfCandlesUsdt` Leg-3**: overlay INR domain me PEHLE, phir ÷fx USDT scaling — tick/candle domain always matched
+5. **ultrafastVerifier.js `_candlesFor`** (both REST branches): FUTURES + CRYPTO — the realtime verifier ka micro-trend ab tick-fresh (Binance fallback legs UN-overlaid)
+6. `chartCandles` inhi chains pe ride karta hai — auto-covered
+7. **Binance fallback legs KABHI overlay nahi** (cross-domain by design — USDT candles ko INR tick kabhi nahi milega, the v20.9.3 −98%-crash lesson)
+
+### DOMAIN SAFETY (hard locks)
+- INR candles ← spot WS book `BTCINR` rows ONLY · USDT perp candles ← futures WS book `B-BTC_USDT` rows ONLY · India .NS candles ← liveFeed `IN_<SYM>` ONLY
+- **±35% sanity gate**: a tick that far from the last close = domain error / hostile input (INR-tick-on-USDT class) — IGNORED, never a market move
+
+### CONTRACT BUG CAUGHT (WIP me) — ROLL = APPEND
+- Pehle implementation roll pe last REST bar ko REPLACE kar deti thi (uska partial-final OHLC + volume LOST) jabki documented contract "appends" tha → FIX: roll ab APPEND karta hai (stale anchor bar apni jagah rakhta hai, live print next REST-grid slot OPEN karta hai — contiguous, kabhi fabricated gap nahi); reads hamesha anchor se restart (pure core) → max ONE roll per read
+
+### ZERO-REGRESSION CONTRACT (v10.11 discipline)
+- Overlay ONLY applies jab domain-matched book me FRESH tick ho; books demand-driven hain (koi fresh book nahi → REST series BYTE-IDENTICAL)
+- Hermetic by construction: `NODE_ENV=test` (vitest) me default OFF — har existing suite ko exactly pre-overlay behavior dikhta hai; `AI_CX_CANDLE_OVERLAY=1/0` manual override
+- PURE CORE kabhi caller ka array mutate nahi karta (REST chain shared cache slices serve karta hai — mutation poison hoti)
+
+### TESTS
+- Naya `cxWsCandles.test.ts` — **27 locks**: pure core (same-bar update/extremes/roll-APPENDS+anchor-retention/no-double-append/pre-history/±35%+30% edge/non-mutation/counters), enable matrix (vitest-default-OFF byte-identical, disabled+tick pass-through, no-tick no-op, spot/fut/india domain keys, FUT_/GLOB_ prefix strips, CROSS-DOMAIN lock — India tick can never overlay crypto series & vice versa), wiring pins (mtf 5 sites + UCV 2 branches + CACHE-SAFETY ORDER + Binance-unwrapped occurrence counts + TF_MS ladder)
+- **218 files / 3982 tests PASS** (3955 + 27), tsc 0, lint 0, dist 21.23.5, check:routes PASS
+
+## v21.23.4 — WRONG-SIGNAL SOURCES REMOVED ("sab ke sab opposite" — 3rd round root-cause) (2026-10-19)
+
+**User ask: "site me jo bhi trade signals de rahe hai sab ke sab wrong direction me hai sab opposite jaa rahe hai — jo bhi wrong signals de rahe hai unko REMOVE karo, concrete level pe fix hona chahiye."
+Remote ca42800 (user ka v21.23.3 port) 100% identical verify hua — matlab fixes ke BAAD bhi complaint continued. 3 parallel fresh-eyes deep audits (data layer + sign conventions + UI) chalaye — order layer, data layer, sign conventions, UI labels SAB VERIFIED SAHI. Root cause mila: DO documented DEGENERATE MODE jo signals ko systematically opposite dikha rahe the.**
+
+### AUDIT EXONERATIONS (sab layers verified correct — ye proof bhi concrete deliverable hai)
+- **Candle data chain**: har feed adapter sorted oldest-first (CoinDCX/Bybit newest-first API bhi sort hoti), candle store dedupeSort har read pe, har indicator ascending assume karta hai, har price delta `new − old` — data layer EXONERATED
+- **Dir sign conventions**: 14+ indicators + aggregation + final side derivation me +1 = bullish UNIFORM — zero reversed ternaries (grep-proof)
+- **UI labels**: har side→label/color/icon mapping verified — LONG hamesha 🟢/emerald/▲ dikhta hai, koi swap nahi
+
+### ROOT CAUSES (in-repo documented, silently active)
+- **D1 — India daily-fallback (signals.js "90% opposite" disease)**: Yahoo 15m series fail hone par committee SILENTLY YESTERDAY'S daily trend pe vote karti thi (RELIANCE daily RSI 41.8/SHORT jabki 15m RSI 83/rally). Intraday reversals me ye signals EXACTLY "sab opposite" lagte the.
+- **D2 — Crypto fresh-tape-absent (models.js 29% WR disease)**: 15m tape missing par tape seat abstain karti par 4 lagging 1h trend seats AFTER-the-move vote karte rehte — replay-measured 29% win-rate / avgR −0.35.
+
+### FIXED — wrong-signal sources REMOVED (concrete)
+1. **D1 FULL-MISSING → SIGNAL REMOVED**: `buildIndiaStockCtx`/index ctx me 15m series missing → `__tfDegraded` stamp → board path symbol SUPPRESS karta hai (signal kabhi emit nahi hota) + `degraded` ledger payload (count + symbols + reasons) + BreadthStrip amber banner (dono desks) — "kyun gayab?" ka honest jawab
+2. **D1 THIN (15m present, 1h resample <30 bars) → DATA-DEGRADED stamp**: tape counterweight zinda hai isliye suppress nahi — par `INTRADAY-TF-THIN` stamp → executable:false + agent skip + UI chip (auto-trade BLOCKED, reference only)
+3. **D2 FRESH-TAPE-ABSENT → DATA-DEGRADED stamp**: tape seat abstain par explicit `tapeDataAbsent` flag → `aggregateVotes` detect → consensus `freshTapeAbsent` + summary tag → buildSignal `dataDegraded` + executable NEVER true; data-missing ≠ market-neutral (neutral tape ko flag NAHI milta)
+4. **Agent gates (Engine A + C)**: `s.dataDegraded` signals auto-trade candidate pool se REMOVE (agent.js logged skip + indiaAgent.js hard continue)
+5. **SignalCard**: "⚠ DATA-DEGRADED · <reason> · NO-TRADE" chip (sabse pehle dikhe) + PAPER/NOTIFY/LIVE SAB buttons disabled (SimpleTradeTicket component bhi — `!!signal.dataDegraded` direct)
+6. **superIntel SIDE-ALIAS SAFETY**: `!== 'SHORT'` silent-default-LONG hazard removed — `sideSignOf()` alias map (LONG/BUY/BULL/B→+1, SHORT/SELL/BEAR/S→−1), unknown side = null (honest refuse) — buildSuperBlueprint + intradayExpertFactors me unknown side kabhi LONG scoring nahi karega
+7. **RUNTIME DIRECTION CERTIFICATE** (naya `directionSelfTest.js`): synthetic ground-truth candles se end-to-end proof — rising→LONG + SL<entry, falling→SHORT + SL>entry, dhan LONG→BUY/SHORT→SELL/SL-exit-cover matrix, CoinDCX futures buy/sell, sideSignOf aliases — **boot pe log + `/api/ai/direction-selftest` on-demand**. "Signals ulte hai?" ka runtime jawab: FAIL = computation bug, PASS = data-feed/stale-build inspect karo
+8. **Store invariants (audit S1/S2)**: candleStore first-write pe sort (descending adapter ab file kabhi reverse nahi kar sakta) + Binance legs local sort (API-contract-free)
+
+### TESTS
+- Naya `wrongSignalRemoval2124.test.ts` — **17 locks**: D2 detection (flag vs neutral-tape), buildSignal stamps, D1 source pins, agent gates, sideSignOf matrix, blueprint refuse, certificate end-to-end, route+boot wiring, UI pins, store invariant (hostile reversed save → ascending disk)
+- Pehla attempt me 3 harness bugs fix (dhan SL needs triggerPrice, futures order.side nested, loadCandles {bars,meta} destructure) — certificate 12/12
+- THIN-suppression pehle THODA zyada aggressive tha (repo ke designed hybrid path — daily ind + live 15m tape counterweight — ko bhi maar raha tha, 6 tests fail) → split: full-missing=suppress, thin=stamp only → **217 files / 3955 tests PASS** (3938 + 17)
+
+### AT v21.23.4
+- tsc 0 errors · lint 0 · **217 files / 3955 tests PASS** · dist stamp 21.23.4 · check:routes PASS
+
 ## v21.23.3 — HONESTY COMPLETION: 7 residual fabrications swept (fresh-eyes deep audit) (2026-10-19)
 
 **User ask: "latest repo pull karo + full site deep pro Advance level pe recheck + issues fix."

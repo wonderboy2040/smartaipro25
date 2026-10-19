@@ -1598,6 +1598,14 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
           }
         }
       }
+      // v21.23.4 WRONG-SIGNAL-REMOVAL: data-degraded signals (FRESH-TAPE-
+      // ABSENT — sirf lagging 1h seats, replay-proven 29% WR degenerate mode)
+      // auto-trade ke liye eligible hi nahi. Ye hi "opposite jaa raha hai"
+      // class thi — remove, reference-only.
+      if (s.dataDegraded) {
+        maybeLogSkip('data-degraded', `${s.symbol} — ${s.dataDegraded} — auto-trade BLOCKED${s.degradedReason ? ` (${String(s.degradedReason).slice(0, 120)})` : ''}`);
+        continue;
+      }
       if (qualifies(s)) { candidates.push(s); continue; }
       const nm = nearMissEntryGate(cfg, s);
       if (nm) nearMissPool.push({ signal: s, nm });

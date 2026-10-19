@@ -1086,17 +1086,18 @@ function SimpleTradeTicket({ signal, busy, gatePaper, onExecute, onExecuteIndia,
       {/* ONE-CLICK execute — v7.0.1: disabled while the budget box is
           empty/below-min so a half-typed amount can never fire */}
       <div className="mt-3 flex flex-wrap gap-2">
-        <button onClick={() => exec('paper')} disabled={busy || invalid}
+        <button onClick={() => exec('paper')} disabled={busy || invalid || !!signal.dataDegraded}
+          title={signal.dataDegraded ? (signal.degradedReason || 'DATA-DEGRADED — execute blocked') : undefined}
           className={`quantum-btn-primary px-4 py-2 rounded-xl text-xs font-black disabled:opacity-50 ${futures ? 'bg-gradient-to-r from-violet-600 to-fuchsia-600' : crypto ? 'bg-gradient-to-r from-cyan-600 to-indigo-600' : 'bg-gradient-to-r from-orange-600 to-amber-600'}`}>
           🧪 PAPER EXECUTE{leveraged && lev > 1 ? ` · ${lev}x` : ''}
         </button>
-        <button onClick={() => exec('notify')} disabled={busy || invalid}
-          title="NOTIFY (v6.11) — poora gauntlet chalega, par output sirf Telegram alert + journal audit hoga. Koi order nahi, koi position nahi."
+        <button onClick={() => exec('notify')} disabled={busy || invalid || !!signal.dataDegraded}
+          title={signal.dataDegraded ? 'DATA-DEGRADED — execute blocked (15m fresh tape missing)' : "NOTIFY (v6.11) — poora gauntlet chalega, par output sirf Telegram alert + journal audit hoga. Koi order nahi, koi position nahi."}
           className="px-4 py-2 rounded-xl text-xs font-black bg-gradient-to-r from-sky-600 to-blue-600 text-white hover:from-sky-500 hover:to-blue-500 disabled:opacity-50 transition-colors">
           🔔 NOTIFY
         </button>
         {signal.grade === 'STRONG' && (leveraged ? signal.executable : true) && (
-          <button onClick={() => exec('live')} disabled={busy || !canLiveHere || invalid}
+          <button onClick={() => exec('live')} disabled={busy || !canLiveHere || invalid || !!signal.dataDegraded}
             title={canLiveHere ? 'REAL order — saare gates server-side re-verify honge' : 'STRONG hai — console me LIVE arm karo (Dhan connect for India)'}
             className="px-4 py-2 rounded-xl text-xs font-black bg-gradient-to-r from-emerald-600 to-teal-600 text-white hover:from-emerald-500 hover:to-teal-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
             ⚡ LIVE EXECUTE{leveraged && lev > 1 ? ` · ${lev}x` : ''}
@@ -1333,6 +1334,10 @@ export const SignalCard = memo(function SignalCard({ signal, busy, onExecute, on
   const [pendingPaper, setPendingPaper] = useState<null | (() => void)>(null);
   const g = gradeBadge(signal.grade);
   const long = signal.side === 'LONG';
+  // v21.23.4 WRONG-SIGNAL-REMOVAL: data-degraded signal (15m fresh tape
+  // absent / TF-thin) — ye replay-proven 29%-WR degenerate class hai.
+  // Execute buttons (paper bhi) BLOCK — sirf reference display.
+  const degraded = !!signal.dataDegraded;
   const actionable = signal.grade === 'STRONG' || signal.grade === 'ACTION';
   const plan = signal.plan;
   const overCap = !!(plan && riskCapPct && plan.riskPct > riskCapPct);
@@ -1367,6 +1372,15 @@ export const SignalCard = memo(function SignalCard({ signal, busy, onExecute, on
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-base font-black text-white font-mono tracking-wide">{signal.symbol}</span>
             {isNew && <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 text-[9px] font-black border border-cyan-500/30">NEW</span>}
+            {/* v21.23.4 — data-degradation banner (sabse pehle dikhe): 15m
+                fresh tape absent / intraday-TF missing = ye signal committee ke
+                LAGGING seats se bana — auto-trade server-side BLOCKED hai,
+                execute buttons bhi band. Reference-only. */}
+            {degraded && (
+              <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-200 text-[9px] font-black border border-amber-500/40" title={signal.degradedReason || 'Data degraded — fresh timeframe missing'}>
+                ⚠ DATA-DEGRADED · {signal.dataDegraded} · NO-TRADE
+              </span>
+            )}
             <span className={`text-sm font-black ${sideColor(signal.side)}`}>{long ? '▲ LONG' : '▼ SHORT'}</span>
             <span className={`px-2 py-0.5 rounded-md text-[10px] font-black tracking-wider ${isStale && signal.grade === 'ACTION' ? 'bg-amber-500/15 text-amber-300 border border-amber-500/40' : g.cls}`}>{gLabel}</span>
             {/* v13.1 SVA-v1 — THE final-call chip. Reads FIRST, before

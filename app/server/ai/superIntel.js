@@ -159,6 +159,20 @@ export function exitClock({ market, atrPctLtp = null, now = Date.now(), sqOffBy 
 }
 
 // ---------------- the blueprint ----------------
+// v21.23.4 SIDE-ALIAS SAFETY: 'BUY'/'SELL'/'BULLISH'/'B'/'S' jaise
+// exchange-vocab side aliases pehle `!== 'SHORT'` me atak kar SILENT
+// LONG ban jate the (unknown side = guessed LONG scoring — a silent
+// directional bias). Ab known aliases map hote hain, unknown = null
+// (honest refuse, koi direction guess nahi).
+const SIDE_SIGN_ALIASES = new Map([
+  ['LONG', 1], ['BUY', 1], ['BULL', 1], ['BULLISH', 1], ['B', 1], ['1', 1],
+  ['SHORT', -1], ['SELL', -1], ['BEAR', -1], ['BEARISH', -1], ['S', -1], ['-1', -1],
+]);
+export function sideSignOf(side) {
+  if (side === 1 || side === -1) return side;
+  const k = String(side ?? '').trim().toUpperCase();
+  return SIDE_SIGN_ALIASES.has(k) ? SIDE_SIGN_ALIASES.get(k) : null;
+}
 /**
  * Full SUPERINTELLIGENCE trade blueprint for one signal.
  * Pure math: prices arrive as numbers, time as `now`.
@@ -176,7 +190,9 @@ export function buildSuperBlueprint({
   atrPctLtp = null, now = Date.now(), sqOffBy = null, changePct: _changePct = null,
 }) {
   if (!(ltp > 0) || !Number.isFinite(stopLoss) || !Number.isFinite(target1)) return null;
-  const long = String(side || 'LONG').toUpperCase() !== 'SHORT';
+  const _sgn = sideSignOf(side);
+  if (_sgn == null) return null; // unknown side — honest refuse (v21.23.4)
+  const long = _sgn === 1;
   const sgn = long ? 1 : -1;
   const mkt = String(market || 'CRYPTO').toUpperCase();
   const a = (atr != null && atr > 0) ? atr : ltp * 0.012;
@@ -245,7 +261,9 @@ export function buildSuperBlueprint({
  */
 export function intradayExpertFactors(sig, regime = null) {
   if (!sig) return null;
-  const long = String(sig.direction || 'LONG').toUpperCase() !== 'SHORT';
+  const _sigSgn = sideSignOf(sig.direction);
+  if (_sigSgn == null) return null; // unknown side — honest refuse (v21.23.4)
+  const long = _sigSgn === 1;
   const sgn = long ? 1 : -1;
   const ltp = num(sig.ltp) || 0;
   if (!(ltp > 0)) return null;

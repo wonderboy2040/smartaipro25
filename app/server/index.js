@@ -3359,7 +3359,7 @@ try {
 
 // v10.13 (deep-recheck L-8): capture the server so graceful shutdown can
 // drain in-flight responses before exiting.
-_httpServer = app.listen(PORT, () => {
+_httpServer = app.listen(PORT, async () => {
   const ready = Object.entries(KEYS).filter(([, v]) => v).map(([k]) => k);
   console.log(`[smartai] server on :${PORT} — providers: ${ready.join(', ') || 'NONE'}`);
   console.log('[smartai] Authentication: enabled (server-side PIN + httpOnly session cookie)');
@@ -3370,6 +3370,16 @@ _httpServer = app.listen(PORT, () => {
   // dikh rahe hain" waale confusion ka end. Watchdog logs me ab hamesha
   // dikhega ki board par EXACTLY kaun-kaun kitne seats baithte hain.
   try { console.log(committeeBanner()); } catch { /* banner never fatal */ }
+
+  // v21.23.4: RUNTIME DIRECTION CERTIFICATE — har boot pe synthetic
+  // ground-truth proof (rising→LONG/BUY · falling→SHORT/SELL). "Signals
+  // opposite" complaint pe sabse PEHLE ye line dekho: FAIL = computation
+  // bug (build galat/gadbad code), PASS = computation sahi (data-feed
+  // inspect karo). /api/ai/direction-selftest se on-demand bhi.
+  try {
+    const { logDirectionSelfTestAtBoot } = await import('./ai/directionSelfTest.js');
+    logDirectionSelfTestAtBoot((lvl, line) => console.log(line));
+  } catch { /* certificate never fatal at boot */ }
 
   // v21.3.0 (Issue-1): a previous successful boot clears the refusal marker.
   try { const m = path.join(__dirname, 'data', 'BOOT-REFUSED.txt'); if (fs.existsSync(m)) fs.rmSync(m); } catch { /* noop */ }

@@ -161,6 +161,14 @@ export function saveCandles(stateDir, desk, symbol, interval, newBars, meta = {}
 
   const prevMeta = loadMeta(stateDir, desk, symbol, interval) || {};
   if (!fs.existsSync(p)) {
+    // v21.23.4 (audit S1) — store-order invariant: first-write path me
+    // caller-order AS-IS likha jata tha. Aaj ke saare callers ascending
+    // hi dete hain, par tail-append logic + dedupeSort ka keep-newest
+    // semantics FILE ke last line = newest bar assume karte hain —
+    // future ka koi descending adapter is store me reversed file
+    // likh deta. Sort karke likho — contract-free invariant (reads
+    // phir bhi dedupeSort karte hain, ye sirf on-disk sanity hai).
+    norm.sort((a, b) => a.t - b.t);
     const tmp = `${p}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, norm.map(b => JSON.stringify(b)).join('\n') + '\n');
     fs.renameSync(tmp, p);

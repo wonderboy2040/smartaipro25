@@ -344,7 +344,13 @@ export async function fetchBinanceKlines(base, tf = '1h', opts = {}) {
         open: Number(k[1]), high: Number(k[2]), low: Number(k[3]),
         close: Number(k[4]), volume: Number(k[5]) || 0,
       })).filter(c => Number.isFinite(c.close) && c.close > 0);
-      if (candles.length >= 30) { _candleCacheSet(cacheKey, candles); return candles.slice(); } // already oldest-first
+      if (candles.length >= 30) {
+        // v21.23.4 (audit S2) — Binance ascending deta hai, par ab sort
+        // bhi — API-contract ki guarantee local code ho (koi future API
+        // change/param flip isko ghar na kare). Cheap invariant.
+        candles.sort((a, b) => a.time - b.time);
+        _candleCacheSet(cacheKey, candles); return candles.slice();
+      }
     } catch { /* next leg */ }
   }
   // Leg 3: Bybit public spot klines (newest-first → re-sort).
