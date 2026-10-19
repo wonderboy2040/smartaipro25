@@ -415,12 +415,12 @@ describe('v20.8.3 frontend stale-build visibility', () => {
     const m = VERSION_TS.match(/APP_VERSION = '([^']+)'/);
     expect(m).toBeTruthy();
     expect(m![1]).toBe(PKG.version);
-    expect(PKG.version).toBe('21.24.0'); // v21.24.0 bump (direction-guards audit: cross-engine direction conflict blocks + honest win-rate + direction lock + scorecard)
+    expect(PKG.version).toBe('21.23.1'); // v21.23.1 bump (direction-lock release-on-close + SAPTA lock acquire + honest P(win) — no fabricated 95/92)
   });
 
   it('Watchdog bat: v20.8.3 title + auto-build line', () => {
     const bat = readFileSync(path.join(APP_ROOT, 'Start-SmartAI-Watchdog.bat'), 'utf8');
-    expect(bat).toContain('v21.23.0');
+    expect(bat).toContain('v21.23.1');
     expect(bat).toContain('AUTO npm install');
   });
 

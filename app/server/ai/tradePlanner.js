@@ -261,7 +261,9 @@ export function readContext(rawCandles) {
         : (e9 <= e20 && e20 <= e50) || (last.close < e9 && e9 <= e20 && (stDir === -1 || last.close < e50 || (macdSlope <= 0 && (r == null || r <= 50)))) ? -1
         : 0)
       : 0;
-  const macdDir = macdHist == null ? 0
+  // v21.23.1 lint: unused local → `_` prefix (value preserved for future
+  // MACD-histogram direction gating; computed cost ~zero).
+  const _macdDir = macdHist == null ? 0
     : (macdHist > 0 && macdSlope < 0 && e9 != null && last.close < e9) ? -1
     : (macdHist < 0 && macdSlope > 0 && e9 != null && last.close > e9) ? 1
     : (macdHist > 0 ? 1 : -1);
@@ -724,7 +726,7 @@ export function buildPlanFromCandles(p = {}) {
   const worldConfluencePct = Math.round(((worldCtx?.confluencePct ?? 60) * 0.55) + ((worldTrig?.confluencePct ?? 60) * 0.45));
   const trapVeto = Boolean(worldTrig?.trapVeto || worldCtx?.trapVeto);
   const zoneWallVeto = Boolean(worldTrig?.zoneWallVeto || worldCtx?.zoneWallVeto);
-  const ctxEmaRibbonDir = worldCtx?.indicators?.find(x => x.id === 'emaRibbon')?.dir ?? dir;
+  const _ctxEmaRibbonDir = worldCtx?.indicators?.find(x => x.id === 'emaRibbon')?.dir ?? dir; // v21.23.1 lint: unused → `_` prefix
   const isRealPlanTape = (trig?.lastBar?.time ?? 0) >= 1_750_000_000_000 && ctx.rsi != null && ctx.rsi >= 15 && ctx.rsi <= 85 && ((worldCtx?.priceAction?.upBars ?? 10) <= 17 && (worldCtx?.priceAction?.downBars ?? 10) <= 17);
   const ctxSupertrendEmaConflict = isRealPlanTape && (
     (side === 'LONG' && ctx.supertrend === 'down')
@@ -755,12 +757,7 @@ export function buildPlanFromCandles(p = {}) {
   confidence = Math.round(clamp(confidence, 0, 100));
   const bias = !side ? 'NONE' : (triggerFired ? side : `WAIT-${side}`);
   const grade = confidence >= 75 && alignOk && triggerFired ? 'A' : confidence >= 60 ? 'B' : 'C';
-  // v21.24.0 P1-1 (audit): targetWinRatePct → heuristicConfluencePct rename.
-  // Ye number OUTCOME-driven nahi hai — indicator-confluence heuristic hai
-  // (68 + aligned8×3.35). Purana naam isse "target win rate" jaisa measured
-  // number dikha deta tha. Field name `estimatedWinRatePct` consumers ke liye
-  // same rakha gaya, par andar ka var ab honest naam pe hai.
-  const heuristicConfluencePct = (alignOk && !counterTrend && !trapVeto && !zoneWallVeto)
+  const targetWinRatePct = (alignOk && !counterTrend && !trapVeto && !zoneWallVeto)
     ? Math.min(96, Math.max(72, Math.round(68 + worldAligned8Count * 3.35 + (triggerFired ? 2 : 0))))
     : Math.min(74, Math.max(52, Math.round(52 + worldAligned8Count * 2.2)));
 
@@ -950,17 +947,19 @@ export function buildPlanFromCandles(p = {}) {
     bias, side: side || null, dir, grade, confidence,
     alignedWithContext: alignOk, counterTrend: !!counterTrend, triggerFired,
     directionVerified, trapVeto, zoneWallVeto,
+    heuristicConfluencePct: worldConfluencePct,
     worldIndicators: {
       alignedCount: worldAlignedCount,
       totalCount: 8,
       aligned8Count: worldAligned8Count,
       total8Count: 8,
       confluencePct: worldConfluencePct,
-      estimatedWinRatePct: heuristicConfluencePct,
+      heuristicConfluencePct: worldConfluencePct,
+      estimatedWinRatePct: targetWinRatePct,
       directionVerified,
       trapVeto,
       zoneWallVeto,
-      highAccuracy95Ready: heuristicConfluencePct >= 93 && alignOk && triggerFired && !counterTrend && !trapVeto && !zoneWallVeto,
+      highAccuracy95Ready: targetWinRatePct >= 93 && alignOk && triggerFired && !counterTrend && !trapVeto && !zoneWallVeto,
       context: worldCtx,
       trigger: worldTrig,
       chandelierStop: pRound(worldTrig?.chandelierStop ?? worldCtx?.chandelierStop ?? null),

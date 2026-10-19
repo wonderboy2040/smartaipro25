@@ -45,8 +45,12 @@ import { fileURLToPath } from 'node:url';
 import { isNseMarketOpen, freshEntriesAllowedFor, dayKeyFor, istDayKey } from '../intraday/time.js';
 import { dualAutoCandidates } from './mtfDualBoard.js';
 import { SUPER_TIERS } from './superIntel.js';
-import { directionLockGate, lockDirection, __resetDirectionLockForTests } from './directionLock.js';
 import { walletLeverageForEquityINR, feeBreakevenFloor, evaluateFeeAwareReversalExit } from '../exec/sizing.js';
+// v21.23.1: `releaseDirectionLock` yahan se HATA diya — release ab DO authoritative
+// jagah se hota hai: (1) paperTrading.js `_closePart` central close hook (har paper
+// trade close pe immediate, symbol-flat check ke saath), (2) routes.js 60s watcher
+// `reconcileDirectionLocks()` sweep (ALL books — live/journal/SAPTA — se flat detect).
+import { acquireDirectionLock, checkDirectionLock, __resetDirectionLocksForTests } from './directionLock.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
@@ -86,9 +90,6 @@ export const MTF_AUTO_DEFAULTS = {
   //   • feeAwareReversalExit: confirmed reversal exits ONLY when round-trip fees are covered
   executionMode: 'paper',
   autoSyncSiteLive: true,
-  // v21.24.0 P2-2 (audit): LIVE consensus gate — live auto me board side
-  // match + SVA CONFIRM (ya SVA data absent) chahiye. Paper mode untouched.
-  liveConsensusGate: true,
   walletAmountINR: 10000,
   walletDeployPct: 100,            // v21.22.0: 100% of CoinDCX Wallet deployed into trade with Leverage
   belowTenKLeverage: 10,
@@ -151,7 +152,6 @@ function _sanitizeCfg(cfg) {
   out.autoSyncSiteLive = cfg.autoSyncSiteLive !== false;
   out.feeAwareReversalExit = cfg.feeAwareReversalExit !== false;
   out.deepMonitorEnabled = cfg.deepMonitorEnabled !== false;
-  out.liveConsensusGate = cfg.liveConsensusGate !== false; // v21.24.0 P2-2
   return out;
 }
 
@@ -1044,24 +1044,6 @@ export async function mtfAutoTick(p = {}) {
         || ((Number(b.superScore) || 0) - (Number(a.superScore) || 0))
       );
     }
-    // v21.24.0 P2-2 (audit) LIVE CONSENSUS GATE: live auto me sirf wahi
-    // rows jo board ensemble ki side se CONFLICT me nahi hain AUR SVA
-    // verdict CONFIRM/STRONG_*/ absent hai (paper mode ye gate skip karta hai).
-    if (isLiveExecActive && eligible.length > 0 && cfg.liveConsensusGate !== false) {
-      const before = eligible.length;
-      eligible = eligible.filter(r => {
-        const boardSide = String(r.signals?.board?.side || r.boardSide || '').toUpperCase();
-        if ((boardSide === 'LONG' || boardSide === 'SHORT') && String(r.side || '').toUpperCase() !== boardSide) return false;
-        const svaAct = String(r.aiAgents?.svaAction || '').toUpperCase();
-        const svaOk = !svaAct || svaAct === 'CONFIRM'
-          || (r.side === 'LONG' && svaAct === 'STRONG_BUY')
-          || (r.side === 'SHORT' && svaAct === 'STRONG_SELL');
-        return svaOk;
-      });
-      if (eligible.length < before) {
-        out.skipped.push(`${market}: live consensus gate ne ${before - eligible.length} row(s) hatai (board/SVA verdict against)`);
-      }
-    }
     // v21.22.0 ANTI-LATE-ENTRY FIX: Never bypass `triggerFired` or `postPeakTrap`!
     // Even in Live Auto mode when 0 trades are open, require `r.triggerFired === true`,
     // `!r.trigger?.overextended`, and `!r.trigger?.postPeakTrap` so Auto-Trade NEVER enters
@@ -1071,6 +1053,10 @@ export async function mtfAutoTick(p = {}) {
         (r.side === 'LONG' || r.side === 'SHORT')
         && r.directionVerified === true
         && r.triggerFired === true
+        // P0-3 FIX: fallback MUST NOT bypass quality blockers (cost≥0.5R, netRR<0, grade C,
+        // winProb NO-EDGE, direction conflict, SVA FLIP, AI council hard disagree).
+        && (r.autoBlockers || []).length === 0
+        && !r.boardSideConflict
         && (r.tier === 'ELITE' || r.tier === 'STRONG' || Number(r.superScore) >= 80)
         && !r.reversalRisk
         && !r.trigger?.reversalRisk
@@ -1083,8 +1069,6 @@ export async function mtfAutoTick(p = {}) {
         && !r.zoneWallVeto
         && !r.counterTrend
         && r.dualAligned !== false
-        && (r.autoBlockers || []).length === 0   // P0: live fallback ab quality blockers (cost>=0.5R, netRR<0, grade C, NO-EDGE, direction conflict) bypass nahi karta
-        && !r.boardSideConflict
         && (r.tfFit === 'GOOD' || r.tfFit === 'OK' || r.tfFit == null)
         && Number(r.superScore) >= Math.max(75, Number(cfg.minScore) || 75)
         && Number(r.plan?.entry) > 0
@@ -1100,14 +1084,9 @@ export async function mtfAutoTick(p = {}) {
       if (_openLinked().length >= effectiveMaxOpenPositions) break;
       const sym = normalizeLinkSymbol(row.symbol, market);
       if (!sym || openSymbols.has(sym)) { out.skipped.push(`${sym}: already open`); continue; }
-      // v21.24.0 P2-1 (audit) CROSS-ENGINE DIRECTION LOCK: agar koi doosre
-      // engine (Auto-Agent / PRO AUTO) ne is symbol par opposite-side trade
-      // khola hai (<4h), to MTF auto-link us side ki entry BLOCK karega —
-      // "one coin, one direction" across engines.
-      const dLock = directionLockGate({ symbol: sym, market, side: row.side });
-      if (!dLock.allowed) {
-        out.skipped.push(`${sym}: ${dLock.reason}`);
-        _logEvent('direction-lock-block', `DIRECTION LOCK BLOCK ${sym} ${row.side} — ${dLock.reason}`);
+      const dirLock = checkDirectionLock(sym, row.side, { now });
+      if (dirLock && !dirLock.allowed) {
+        out.skipped.push(`${sym}: ${dirLock.reason}`);
         continue;
       }
       const entry = Number(row.plan?.entry);
@@ -1202,9 +1181,6 @@ export async function mtfAutoTick(p = {}) {
         out.skipped.push(`${sym}: ${res?.error || 'openPaperTrade unavailable'}`);
         continue;
       }
-      // v21.24.0 P2-1: trade khul gaya — cross-engine direction lock stamp
-      // (dusra engine is symbol par ab opposite side open nahi kar sakta).
-      lockDirection({ symbol: sym, market, side: row.side, source: 'mtf-auto' });
 
       // v21.22.0 STRICT TRADED-ONLY GUARD ("entry without traded bhi isme add ho rahe hai inko bhi theek kardo"):
       // When wantLiveOrder is true, execute the LIVE order using 100% of the fetched CoinDCX Wallet.
@@ -1313,6 +1289,7 @@ export async function mtfAutoTick(p = {}) {
       stx.dayCount += 1;
       stx.perSymbolLast[sym] = now;
       _persistState();
+      acquireDirectionLock({ symbol: sym, side: row.side, source: 'mtf-auto', now });
       openSymbols.add(sym);
       out.opened.push(rec);
       openedThisDesk += 1;
@@ -1587,7 +1564,7 @@ export function __resetMtfAutoForTests(seed = null) {
   _cfg = null;
   _state = null;
   _mtfAutoTickInFlight = false;
-  __resetDirectionLockForTests(); // v21.24.0: direction lock state bhi reset (cross-test pollution zero)
+  __resetDirectionLocksForTests();
   try { fs.unlinkSync(CFG_FILE()); } catch { /* absent */ }
   try { fs.unlinkSync(STATE_FILE()); } catch { /* absent */ }
   if (seed?.config) { _cfg = _sanitizeCfg({ ...MTF_AUTO_DEFAULTS, ...seed.config, desks: { ...MTF_AUTO_DEFAULTS.desks, ...(seed.config.desks || {}) } }); _save(CFG_FILE(), _cfg); }

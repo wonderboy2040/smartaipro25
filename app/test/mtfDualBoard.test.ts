@@ -16,10 +16,7 @@
 import { describe, it, expect } from 'vitest';
 import { fuseDualTf, dualAutoCandidates, DUAL_FUSE_WEIGHTS, __clearDualBoardCaches } from '../server/ai/mtfDualBoard.js';
 
-/** A clean, fully-confirmed LONG plan fixture (planner-shaped).
- *  v21.24.0 (audit P2-4): production planner hamesha `worldIndicators`
- *  deta hai — fixture me bhi. Fuse ab missing worldInd par GUESSED counts
- *  use nahi karta (null → directionVerified=false). */
+/** A clean, fully-confirmed LONG plan fixture (planner-shaped). */
 function planFixture(over = {}) {
   return {
     ok: true, symbol: 'TESTCO', market: 'INDIA', mode: 'INTRADAY',
@@ -30,7 +27,6 @@ function planFixture(over = {}) {
     plan: { entry: 100, stopLoss: 99.2, t1: 100.8, t2: 101.6, netRR: { t1: 0.8, t2: 1.7 } },
     tfFit: { verdict: 'OK', ratioT1: 1.1, note: 'ok' },
     costs: { costR: 0.15, roundTripPct: 0.08 },
-    worldIndicators: { alignedCount: 8, totalCount: 8, aligned8Count: 8, total8Count: 8, confluencePct: 100, trapVeto: false, zoneWallVeto: false, institutional8: [] },
     checklist: [], warnings: [], timePlan: {},
     ...over,
   };

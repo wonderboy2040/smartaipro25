@@ -37,11 +37,10 @@ import { isNseHoliday } from '../intraday/time.js';
 // v20.9.0 (H1 — audit): SAPTA ab SHARED HARD RISK GATE se guzarta hai
 // (wahi jo Bot Lab use karta hai) + event-day guard + cost-aware ranking.
 import { hardGateCheck, currentLossStreak, drawdownFromPeakPct as _drawdownFromPeakPct } from '../risk/hardGate.js';
-// v21.24.0 P2-1 (audit/direction-guards): cross-engine per-symbol direction lock
-import { directionLockGate, lockDirection } from './directionLock.js';
 import { eventGuardCheck } from './eventGuard.js';
 import { estimateRoundTripCost } from './tradingCosts.js';
 import { walletLeverageForEquityINR, feeBreakevenFloor } from '../exec/sizing.js';
+import { acquireDirectionLock, checkDirectionLock } from './directionLock.js';
 
 export const PROTRADER_TICK_SEC = 30;
 const CFG_FILE = 'protrader-auto-config.json';
@@ -334,6 +333,10 @@ export function proTraderGate(sig, cfg = PROTRADER_DEFAULTS) {
   // liye India desk kabhi trade hi nahi kar pata tha. INDIA ke liye gate
   // grade STRONG + plan + side (upar enforce) par chalta hai.
   if (sig?.executable === false && String(sig?.market || '').toUpperCase() !== 'INDIA') reasons.push('not-executable');
+  if (sig?.symbol && (side === 'LONG' || side === 'SHORT')) {
+    const dirLock = checkDirectionLock(sig.symbol, side);
+    if (dirLock && !dirLock.allowed) reasons.push(`direction-lock:${dirLock.lockedSide}`);
+  }
   return { pass: reasons.length === 0, reasons, score: { ai, conf, verified: vScore } };
 }
 
@@ -838,15 +841,6 @@ async function _tryEntry(deps, cfg, sig, sendTelegram) {
       return { ok: false, error: 'browser tab not available' };
     }
 
-    // v21.24.0 P2-1 (audit) CROSS-ENGINE DIRECTION LOCK: MTF Auto-Link ya
-    // Auto-Agent ne is symbol par opposite-side trade khola hai (<4h) →
-    // PRO AUTO entry YAHIN block (Engine D vs C/E conflict zero).
-    const dLock = directionLockGate({ symbol: sig.symbol, market, side: sig.side });
-    if (!dLock.allowed) {
-      _log('skip', `DIRECTION LOCK ${sig.symbol} — ${dLock.reason}`);
-      return { ok: false, error: dLock.reason };
-    }
-
     const trade = {
       id: `PTA-${Date.now().toString(36).toUpperCase()}`,
       ts: Date.now(), day: _todayIST(),
@@ -922,9 +916,15 @@ async function _tryEntry(deps, cfg, sig, sendTelegram) {
       _log('entry', `ORDER PLACED ${sig.symbol} ${sig.side} @ ${sig.plan.entry} (browser) — fill verify agla tick`);
     }
     _saveTrade(trade);
-    // v21.24.0 P2-1: trade journal ho gaya — cross-engine direction lock stamp
-    // (dusra engine is symbol par ab opposite side open nahi karega).
-    lockDirection({ symbol: sig.symbol, market, side: sig.side, source: 'protrader-auto' });
+    // v21.23.1 FIX: SAPTA ab entry par cross-engine direction lock ACQUIRE karta hai.
+    // Pehle proTraderGate sirf CHECK karta tha (L337) — SAPTA ki trades doosre engines
+    // (agent / MTF auto / india-agent) ko direction-lock me dikhti hi nahi thi, isliye
+    // koi bhi engine usi symbol par opposite side trade khol sakta tha. Ab entry ke saath
+    // lock lagta hai; close hone par routes.js 60s sweeper (`reconcileDirectionLocks`) release
+    // karta hai — post-entry flip cooldown preserved.
+    if (trade.status === 'MONITORING' || trade.status === 'PLACED') {
+      acquireDirectionLock({ symbol: trade.symbol, side: trade.side, source: 'protrader-auto', cooldownMin: 240 });
+    }
     _log('entry', `NEW TRADE ${sig.symbol} ${sig.side} | AI ${g.score.ai} conf ${g.score.conf} verified ${g.score.verified} | entry ${sig.plan.entry} SL ${sig.plan.stopLoss} | mode ${cfg.mode}`);
     return { ok: true, trade };
   } finally { _s.busyPlacing = false; }
@@ -1559,3 +1559,7 @@ export async function proTraderTestRun(deps = {}) {
 function useMarginText(cfg) { return Number(cfg.cryptoLeverage) > 1 ? `Margin tab + leverage ~${cfg.cryptoLeverage}x` : 'Spot order (no leverage)'; }
 
 export function proTraderWalletLeverage(walletINR) { return walletLeverageForEquityINR(walletINR); }
+
+// v21.23.1: test seam — `_tryEntry` internal hai; direction-lock acquire wiring
+// regression tests isse direct call kar sakein (paper mode → no browser touch).
+export const __internals = { _tryEntry };

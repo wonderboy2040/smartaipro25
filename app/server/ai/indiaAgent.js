@@ -41,6 +41,7 @@ import { isNseOpen, fetchTVIndiaBatch } from './data.js';
 import { dhanConnected, dhanPlaceOrder, dhanCancelOrder } from './dhan.js';
 import { loadConfig, loadJournal, saveJournal, withJournalLock, pushEntry, todayIST } from './coindcxOrders.js';
 import { executeIndiaSignal, closeIndiaPosition, istHM, IST_SQUAREOFF, IST_ENTRY_LAST, IST_ENTRY_FIRST } from './indiaOrders.js';
+import { acquireDirectionLock, checkDirectionLock } from './directionLock.js';
 // v10.15 GAP 3: the Dhan L2 read for the patient pullback level.
 import { readDepth } from './orderFlowDepth.js';
 // v10.2 parity: V2 model flag exposure in the status view
@@ -833,6 +834,12 @@ async function _tick(deps, sendTelegram) {
   );
   log('info', `SIZING ${best.symbol}: ₹${r2(riskINR)} risk (${cfg.riskPerTradePct}% of ₹${r2(equityINR)}) → ₹${r2(budgetINR)} order @ ₹${r2(Number(best.plan.entry))}`);
 
+  const crossLock = checkDirectionLock(best.symbol, best.side);
+  if (crossLock && !crossLock.allowed) {
+    log('info', `SKIP ${best.symbol}: ${crossLock.reason}`);
+    persistState(); return;
+  }
+
   // ---- entry via the SAME gauntlet a manual click passes ----
   const { getDeepSignal } = await import('./signals.js');
   const out = await executeIndiaSignal({
@@ -850,6 +857,7 @@ async function _tick(deps, sendTelegram) {
   if (out?.ok) {
     _state.lastEntryAt = Date.now();
     _state.lastEntrySymbol = best.symbol;
+    acquireDirectionLock({ symbol: best.symbol, side: best.side, source: 'india-agent', cooldownMin: cfg.flipReentryBlockMin || 240 });
     const f = out.filled || {};
     // v10.15 GAP 3: journal the ENTRY MODE — the weekly review's
     // "did patience pay?" join key (immediate vs patient).

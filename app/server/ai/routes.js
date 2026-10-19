@@ -47,9 +47,7 @@ import { wireBoardAccountability } from './boardAccountability.js';
 // tab jab process ne kabhi live rate nahi dekha.
 import { usdInrFallback } from './lib/usdinr.js';
 // v20.2: candle data for the signal-card / deep-modal price charts.
-import { chartCandles, rawTfCandles, rawTfCandlesUsdt } from './mtf.js';
-// v21.24.0 Phase 3 (audit/direction-guards): MTF row ledger + direction scorecard
-import { logMtfRows, resolvePendingMtfRows, mtfRowLedgerStatus, mtfDirectionScorecard } from './mtfLedger.js';
+import { chartCandles } from './mtf.js';
 // v21.15.0 MTF TRADE PLAN ENGINE (user spec: 15m→5m intraday / 1h→15m swing
 // top-down plan + honest TF-fit verdict + cost-in-R reality check)
 import { getTradePlan, planModeList } from './tradePlanner.js';
@@ -215,7 +213,9 @@ import { dhanConnect, dhanDisconnect, dhanConnected, dhanProfile, scripMasterSta
 import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 // v21.16.0 + v21.20.0 MTF SIGNALS BOARD (Dual-Timeframe) + AUTO-LINK engine
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
-import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor } from './mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isGenuinelyTradedEntry } from './mtfAutoLink.js';
+// v21.23.1: cross-engine direction-lock release-on-close sweeper (directionLock.js)
+import { reconcileDirectionLocks } from './directionLock.js';
 // v13.2 B6: bandwidth telemetry view
 import { bandwidthView } from './bandwidth.js';
 // v13.2 A5: MCP tool-call audit view
@@ -805,27 +805,10 @@ export function registerAITradingRoutes(app, deps) {
         fx: await mtfLiveFx(),
         fresh: req.query.fresh === '1' || req.query.fresh === 'true',
       });
-      // v21.24.0 Phase 3 (audit): top rows ko direction-scorecard ledger me
-      // log karo (dedupe per symbol+mode+30m — non-fatal, board response
-      // kabhi block nahi hota). Outcome resolution mtfAutoLoop 60s me hoti hai.
-      try { logMtfRows({ market: out.market || market, mode: out.mode || cfg.mode || 'INTRADAY', rows: out.rows || [] }); } catch { /* non-fatal */ }
       res.set('Cache-Control', 'no-store');
       res.json(out);
     } catch (e) {
       jsonError(res, 500, 'mtf dual board failed', e);
-    }
-  });
-
-  /** v21.24.0 Phase 3 (audit) — ledger-measured DIRECTION SCORECARD.
-   *  "95% winrate" claims ki jagah asli measured numbers (n < 30 →
-   *  "insufficient data", koi % claim nahi). */
-  app.get('/api/ai/mtf-dual/scorecard', (req, res) => {
-    try {
-      const windowDays = req.query.days != null ? Math.min(90, Math.max(1, Number(req.query.days) || 30)) : 30;
-      res.set('Cache-Control', 'no-store');
-      res.json({ ok: true, scorecard: mtfDirectionScorecard({ windowDays }), ledger: mtfRowLedgerStatus() });
-    } catch (e) {
-      jsonError(res, 500, 'mtf scorecard failed', e);
     }
   });
 
@@ -2949,6 +2932,30 @@ export function registerAITradingRoutes(app, deps) {
         console.log(`[ai] watcher closed ${closures.length} position(s): ${closures.map(c => `${c.pair} ${c.pnlINR}`).join(', ')}`);
       }
     } catch { /* non-fatal */ }
+    // v21.23.1 CROSS-ENGINE DIRECTION-LOCK RELEASE SWEEP (60s, ALWAYS-ON):
+    // `acquireDirectionLock()` ke baad release kabhi nahi hota tha → ek trade
+    // khulte hi us symbol par opposite side restart tak block rehti thi.
+    // Ab har minute ALL open-position books se open-symbol set ban kar
+    // `reconcileDirectionLocks()` flat symbols ke ACTIVE locks release karta
+    // hai (post-entry flip cooldown preserved — immediate whipsaw flip phir
+    // bhi blocked). Books: paper engine, MTF auto book (live+paper mirror),
+    // shared journal (agent/india-agent/manual), SAPTA pro-trader journal.
+    try {
+      const openNow = [];
+      for (const t of (getPaperSummaryExec()?.open || [])) openNow.push(String(t.symbol || '').toUpperCase());
+      for (const b of (mtfAutoStatus()?.book || [])) {
+        if (b?.status === 'OPEN' && isGenuinelyTradedEntry(b)) openNow.push(String(b.symbol || '').toUpperCase());
+      }
+      for (const p of (loadJournal()?.positions || [])) {
+        const st = String(p?.status || '').toUpperCase();
+        if (st === 'OPEN' || st === 'UNKNOWN') openNow.push(String(p?.symbol || '').toUpperCase());
+      }
+      for (const t of (proTraderStatusView()?.positions || [])) openNow.push(String(t?.symbol || '').toUpperCase());
+      const sweep = reconcileDirectionLocks(openNow);
+      if (sweep.released.length > 0) {
+        console.log(`[ai] direction-lock released (position flat, flip-cooldown kept): ${sweep.released.join(', ')}`);
+      }
+    } catch { /* sweep best-effort — never blocks the watcher */ }
   }, 60_000);
   if (watcher.unref) watcher.unref();
 
@@ -3059,19 +3066,7 @@ export function registerAITradingRoutes(app, deps) {
         if (market === 'INDIA' && !isNseOpen() && !hasOpenIndia) continue;
         const base = await getSignals(market, deps, { warmOnly: true }).catch(() => null);
         boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: base?.signals || [], fx: fxLive });
-        // v21.24.0 Phase 3: rows ledger me log + pending outcomes resolve
-        try { logMtfRows({ market, mode: cfg.mode || 'INTRADAY', rows: boards[market]?.rows || [] }); } catch { /* non-fatal */ }
       }
-      // v21.24.0 Phase 3: 60s me ek baar pending MTF rows ko 5m candles se
-      // resolve karo (T1/SL/TIMEOUT + MFE/MAE) — direction scorecard ka fuel.
-      try {
-        resolvePendingMtfRows({
-          max: 20,
-          candlesFor: (symbol, tf, market) => (market === 'INDIA'
-            ? rawTfCandles(symbol, market, tf)
-            : rawTfCandlesUsdt(symbol, tf).then(c => (c?.candles || []))),
-        });
-      } catch { /* non-fatal */ }
       await mtfAutoTick({
         boards,
         paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, getPaperSummary: getPaperSummaryExec },

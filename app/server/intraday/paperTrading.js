@@ -29,6 +29,12 @@ import { bsPrice, yearsToExpiry } from '../ai/lib/blackScholes.js';
 import { costsForPaperTrade } from '../ai/tradingCosts.js';
 // v11.1 GAP 2 — adverse-circuit risk for open equity positions
 import { adverseCircuitRisk } from '../ai/circuitGuard.js';
+// v21.23.1 DIRECTION-LOCK RELEASE-ON-CLOSE: har paper trade ka close (SL/T1/T2/
+// trail/EOD/manual/stale) EXACTLY yahan `_closePart` me land karta hai — yahi
+// cross-engine direction lock release karne ka central hook hai (pehle
+// `releaseDirectionLock()` kahin call hi nahi hota tha → opposite side restart
+// tak block). directionLock.js zero-import PURE module hai → koi cycle nahi.
+import { releaseDirectionLock, normalizeLockSymbol } from '../ai/directionLock.js';
 
 const FILE = 'paper-trades.json';
 const MAX_TRADES = 500;
@@ -446,6 +452,16 @@ function _closePart(trade, qty, price, reason) {
     // manual/stale) lands here exactly once. Pure data capture;
     // the AI review runs later (EOD cron / on-demand endpoint).
     try { recordTradeClose(trade); } catch { /* journal optional */ }
+    // v21.23.1 CROSS-ENGINE DIRECTION LOCK RELEASE-ON-CLOSE (cooldown preserved):
+    // sirf tab release karo jab is symbol par KOI AUR open paper trade na bachi ho —
+    // doosre engine ka trade khula ho to lock hold rahega (wrong-way protection).
+    // Live/journal-only books (SAPTA, agent, India) routes.js ke 60s sweeper se reconcile hote hain.
+    try {
+      const norm = normalizeLockSymbol(trade.symbol);
+      const stillOpenElsewhere = norm
+        && _state.trades.some(t => t !== trade && t.status !== 'CLOSED' && normalizeLockSymbol(t.symbol) === norm);
+      if (norm && !stillOpenElsewhere) releaseDirectionLock(norm);
+    } catch { /* lock release best-effort — close accounting kabhi block nahi hoga */ }
   }
 }
 

@@ -1,74 +1,64 @@
 # Changelog
 
-## v21.24.0 — DIRECTION-GUARDS AUDIT IMPLEMENTATION (2026-10-19)
+## v21.23.1 — DIRECTION-LOCK RELEASE-ON-CLOSE + SAPTA LOCK ACQUIRE + HONEST P(WIN) (2026-10-19)
 
-**User ask: "repo pull karo, direction-accuracy audit (P0 patch + Phase 1/2/3 plan) accurately implement karo"**
+**User ask: latest repo pull kiya ("direction lock guard, MTF dual board improvements") — plan ka zyadatar hissa apply hua, par 2 adhoori cheezein + 1 naya bug. Ye release unhe fix karta hai.**
 
-### PHASE 0 — cross-engine direction conflicts BAND (patch verbatim applied)
-- **`mtfDualBoard.js` `fuseDualTf()`**: teen direction-engines ab ek doosre ko VETO karte hain —
-  (a) board ensemble opposite side → score −12 + cap 64 + blocker "direction conflict";
-  (b) SVA verifier FLIP/opposite finalCall → score −8 + cap 64 + blocker;
-  (c) AI council AVOID/DISAGREE/SKIP → hard blocker. `directionVerified` ab in teeno ka AND,
-  label `CONFLICT-LONG/SHORT` surface hota hai (`boardSideConflict` + `boardSide` fields).
-- **`mtfAutoLink.js` live fallback**: `autoBlockers.length === 0` + `!boardSideConflict` —
-  live-mode 0-open fallback ab quality blockers (cost≥0.5R, netRR<0, grade C, NO-EDGE,
-  direction conflict) ko bypass NAHI karta.
-- **`test/directionConflict.test.ts`** (naya, patch included): P0 regression — board-opposite /
-  SVA-FLIP rows kabhi auto-eligible nahi.
+### FIXED — the new bug: direction lock KABHI release nahi hota tha
+- **Root cause**: `releaseDirectionLock()` export tha par production me kahin call nahi hota
+  (mtfAutoLink me sirf dead import). `checkDirectionLock()` me `active:true` lock kabhi expire
+  nahi karta — ek baar koi engine symbol X par trade kholta hi opposite side **process-restart tak** block rehti thi.
+- **Fix (2 authoritative release paths)**:
+  1. **paperTrading.js `_closePart` central hook** — har paper-trade close (SL/T1/T2/trail/EOD/
+     manual/stale) yahin land karta hai; symbol par KOI AUR open paper trade na ho to lock release
+     (multi-engine same-symbol hold safe). directionLock.js zero-import PURE module — koi cycle nahi.
+  2. **routes.js 60s always-on watcher sweep** — `reconcileDirectionLocks()` (naya export) ALL
+     open-position books (paper engine + MTF auto book live/paper + shared journal agent/india/
+     manual + SAPTA journal) se flat symbols detect karke active locks release karta hai.
+- **Cooldown semantics preserved**: release ke baad bhi opposite side `entry + 4h` (flipReentryBlockMin)
+  tak blocked — whipsaw flip safe; 4h+ ke trades ke baad genuine trend-change entry allowed.
+- mtfAutoLink.js ka dead `releaseDirectionLock` import hata (lint warning fix).
 
-### PHASE 1 — jhoothi claims hata, asli numbers lagao
-- **Honest win-rate**: hardcoded 95/92 winRatePct hata diya. Ab `pWinCalibrated` SIRF tab jab
-  `winProb.calibrated === true` (ledger-based); warna null → UI "P(win) uncalibrated" dikhata hai.
-  `scoreBand` (tier label) add. Board payload ka `targetWinRatePct: 95` → null + note.
-  `tradePlanner.js`: `targetWinRatePct` → `heuristicConfluencePct` (honest internal name).
-- **Ollama trio de-circular**: `estimatedWinRatePct` input trio vote se HATA (wo khud fuse ke
-  fake 95% se aata tha). Sentinel vote ab real inputs + live model note (CONFIRM/CAUTION parse).
-  Verdict labels honest: `3/3 RULE-GUARD PASS` vs `LOCAL AI CONFIRM` — `modelVerified` /
-  `ruleBased` tags. `ollamaVerdict` fallback 'RULE-GUARD (local AI offline)'.
-- **Real 1d+4h extended bias**: context-TF (15m/1h) EMA fabrication hata — ab actual 4h+1d
-  candles se EMA50/200 bias (TTL-cached, honest null skip → component redistribute, no
-  double-count, no jhootha "1d+4h" label).
-- **UI (MTFDualBoardPanel)**: "95% WINRATE TARGET" header → ledger-measured scorecard text
-  (`LAST 30D ELITE+STRONG: n/hit/avgR`, n<30 → insufficient data). Card par `P(win) …%
-  (calibrated)` ya "P(win) uncalibrated". `?? 95` / `?? 9` fallbacks hata. Naya **conflict chip**
-  `⚠ BOARD SHORT vs MTF LONG — CONFLICT` (red). `signals.board.side` ab server bhejta hai.
+### FIXED — SAPTA (proTraderAuto) lock wiring adhoora tha
+- `proTraderGate` sirf CHECK karta tha — SAPTA ki trades lock **acquire** nahi karti thi, isliye
+  doosre engines ko SAPTA ki position dikhti hi nahi thi (opposite-side double-trade possible).
+- Ab `_tryEntry` → `_saveTrade` (status MONITORING/PLACED) ke baad
+  `acquireDirectionLock({ source: 'protrader-auto' })` stamp hota hai. Release 60s sweep se.
+- `__internals._tryEntry` test seam export.
 
-### PHASE 2 — cross-engine one-coin-one-direction
-- **`server/ai/directionLock.js`** (naya): koi bhi engine trade khole → {symbol→side} stamp;
-  doosra engine OPPOSITE side entry 4h window ke liye BLOCK (`directionLockGate`).
-  Symbol/domain normalization (B-BTC_USDT ≡ BTC; CRYPTO/FUTURES/METALS ek domain).
-  Wired: `mtfAutoLink.js` (gate+stamp), `agent.js` (gate+stamp), `proTraderAuto.js` (gate+stamp).
-- **`server/ai/resolveDirection.js`** (naya): direction resolution SSOT pure function —
-  conflicts[] + verified + PAKKA/CONFLICT/WAIT/NEUTRAL label (fuse inline P0 logic ke saath
-  semantics-matched).
-- **Live consensus gate** (`mtfAutoLink.js`, `liveConsensusGate: true`): live auto me board side
-  match + SVA CONFIRM/STRONG_* (ya SVA absent) zaroori; paper mode untouched.
-- **Guessed counts guard**: worldInd missing par fabricated aligned8Count (7/5) aur
-  defaultInst8 "8/8 institutional" list HATA — null → `directionVerified=false` (unverified).
+### VERIFIED — cryptoAgent "not wired" report: NOT APPLICABLE
+- cryptoAgent.js ek READ-ONLY chat agent hai — saare 21 tools analysis/getters hain
+  (get_live_crypto_signals, analyze_coin, get_wallet, get_open_positions, backtest…). Koi
+  order-placement case exist nahi karta, isliye wahan direction-lock wiring ka koi surface HI nahi hai.
 
-### PHASE 3 — accuracy ko measure karo
-- **`server/ai/mtfLedger.js`** (naya): board top rows ledger me log (dedupe 30m, bounded 3000);
-  outcome resolution 5m candles se (T1/SL/TIMEOUT + MFE/MAE R + directionHit + wrongWay);
-  PURE `computeDirectionScorecard` — directionHitRate / T1% / SL-first% / wrongWay% / avgR,
-  tier×conflict buckets, n<30 → "INSUFFICIENT DATA" (koi fake % claim nahi).
-- **Wiring**: `/api/ai/mtf-dual/board` route + 60s mtfAutoLoop rows log karte hain; pending
-  rows resolve hote hain; board payload me `directionScorecard` embed (5-min cache);
-  naya route `/api/ai/mtf-dual/scorecard`.
+### FIXED — 95% win-rate fabrication (server + UI)
+- **mtfDualBoard.js** `winRatePct` ladder me hardcoded `95/92` branches hata:
+  1. ledger-calibrated `pWinCalibrated` (n ≥ 20) → AUTHORITATIVE exact number
+  2. conflict/veto rows → honest low band 48-62
+  3. otherwise measured confluence × score heuristic, clamped **52-85**
+- `worldIndicatorsInfo.targetWinRatePct` hardcoded `95` → derived honest value (null possible).
+- `avgWinRatePct` ka `|| 88` fabricated fallback → sirf finite measured values (null → UI '—').
+- `highAccuracy95Ready` ab honest: calibrated P(win) + verified aligned row (pehle always-true jhooth).
+- **MTFDualBoardPanel.tsx**:
+  - Header chip "PURE 8 INSTITUTIONAL TOP INDICATORS · 95% WINRATE TARGET" → honest
+    "PURE 8 INSTITUTIONAL CONFLUENCE · N% AVG P(WIN)" (ya "LEDGER-CALIBRATING")
+  - Row chip `{winRateShown ?? 95}% Winrate` → `pWinCalibrated ?? winRatePct ?? heuristicConfluencePct`
+    priority + "~" suffix for heuristic + "P(WIN) CALIBRATING" jab koi number nahi
+  - `alignedCount ?? 9` fabricated fallback → `?? 0`
+- `useAITrading.ts`: `avgWinRatePct`/`targetWinRatePct` types ab nullable.
 
-### TESTS / GATES
-- `npm run check` full PASS: **212 files / 3902 tests** · tsc 0 errors · lint 0 errors ·
-  `check-version` OK · vite build + dist stamp 21.24.0 · API routes PASS.
-- Naye suites: `directionConflict.test.ts` (P0), `directionLock.test.ts` (P2/P3 — lock,
-  SSOT, outcome walk, scorecard, dedupe).
-- Updated fixtures: planner-shaped tests me `worldIndicators` add (production-realistic);
-  stale assertions (OLLAMA AI LOCK label, winRatePct ≥ 75) → honest expectations.
-- Version: 21.23.0 → 21.24.0 (package.json + src/version.ts + dist stamp).
+### FIXED — typecheck + lint (CI gate `npm run check` fail hua tha)
+- **tsc 0 errors**: `runMtfAutoTick()` ka `opened: unknown[]` → properly typed
+  `MtfAutoTickOpenedRow[]`/`MtfAutoTickClosedRow[]` (MTFDualBoardPanel.tsx(242) ke 2 TS2339 fix).
+- **lint 0 warnings** (changed files): unused `releaseDirectionLock` (mtfAutoLink) + unused
+  `buildMTFSnapshot` (mtfDualBoard) imports removed.
 
-### LIMITS (honest)
-- Ye code-audit + synthetic-regression implementation hai — LIVE win-rate number abhi
-  nahi hai; wo Phase-3 ledger data 2 hafte accumulate hone ke baad scorecard se aayega
-  (tab tak UI "insufficient data" dikhata hai). Live enable se pehle paper-mode 3-5 din
-  + Phase-3 scorecard data recommended (audit rollout checklist).
+### TESTS
+- Naya `test/directionLockRelease.test.ts` (6 tests): paper-close release + cooldown window +
+  multi-engine same-symbol hold + sweep normalization/hold/release-skip.
+- Naya `test/protraderDirectionLock.test.ts` (2 tests): SAPTA entry acquire + opposite-lock gate.
+- `directionConflict.test.ts` +3 HONEST win-rate regression guards (12 total).
+- Version gate: 21.23.0 → 21.23.1 (package.json + src/version.ts + Watchdog bat + test).
 
 ## v21.14.0 — LAYA LOCAL AI MODEL PERMANENT REMOVAL (2026-10-14)
 

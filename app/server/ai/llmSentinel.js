@@ -329,46 +329,50 @@ export function evaluateMtfRowWithOllamaTrio(rowCtx = {}) {
   const superScore = Number(rowCtx.superScore) || 0;
   const worldAlignedRaw = Number(rowCtx.worldAligned8Count ?? rowCtx.worldAlignedCount) || 6;
   const worldAligned8 = Math.min(8, worldAlignedRaw);
-  // v21.24.0 P1-2 (audit): estimatedWinRatePct input ki vote me ahmiyat KHATAM —
-  // wo upar fuse ke fake 95% se aata tha (circular: A ko B se justify, B ko A se).
-  // Ab sirf prompt-log ke liye rakha gaya hai (optional, nullable).
-  const worldWinRate = Number(rowCtx.estimatedWinRatePct) || null;
   const aligned = !!rowCtx.aligned;
   const triggerFired = !!rowCtx.triggerFired;
   const netRR = Number(rowCtx.netRR_T2) || 0;
   const hasReversalOrTrap = Boolean(rowCtx.reversalRisk || rowCtx.opposingFlow || rowCtx.trapVeto || rowCtx.zoneWallVeto);
+  const hasCrossConflict = Boolean(rowCtx.boardSideConflict || rowCtx.svaConflict || rowCtx.councilConflict);
   const key = `${sym}:${side}:${rowCtx.mode || 'INTRADAY'}`;
   const cached = _mtfOllamaCache.get(key);
-  const liveNote = cached?.liveNote || null;
-  const liveCaution = Boolean(liveNote && /\b(CAUTION|VETO|REVERSE|AVOID|TRAP|WAIT)\b/i.test(liveNote));
-  // v21.24.0 P1-2: real Ollama response cache se CONFIRM parse — sirf tabhi
-  // "model verified" bolte hain jab live model ne sach me CONFIRM bola ho.
-  const liveConfirm = Boolean(liveNote && /\b(CONFIRM|AGREE|STRONG)\b/i.test(liveNote));
+  const liveCaution = Boolean(cached?.liveNote && /\b(CAUTION|VETO|REVERSE|AVOID|TRAP|WAIT|SKIP|DISAGREE)\b/i.test(cached.liveNote));
+  const liveConfirm = Boolean(cached?.liveNote && !liveCaution && /\b(CONFIRM|AGREE|LOCK|LONG|SHORT)\b/i.test(cached.liveNote));
 
-  // Deterministic 3-Vote rule-guard consensus (circular win-rate input KE BINA):
-  // 1. Fast Model role: Action-TF Trigger & Micro-Momentum Guard
-  // 2. Deep Model role: 8-Indicator Institutional Structure & R:R Reasoner
-  // 3. Sentinel Model role: Pattern/Anti-Reversal guard — live model note
-  //    (CONFIRM/CAUTION) available ho to usi se, warna rule-based fallback.
-  const fastVote = hasReversalOrTrap ? 0 : (triggerFired && superScore >= 68) ? 1 : (superScore >= 58 ? 0.5 : 0);
-  const deepVote = (rowCtx.trapVeto || rowCtx.zoneWallVeto) ? 0 : (aligned && worldAligned8 >= 6 && netRR >= 1.2) ? 1 : (aligned && worldAligned8 >= 5 ? 0.6 : 0);
-  const sentinelVote = (hasReversalOrTrap || liveCaution) ? 0
-    : liveConfirm ? 1
-      : (superScore >= 78 && worldAligned8 >= 6 && triggerFired && !rowCtx.counterTrend) ? 1
-        : (superScore >= 68 && worldAligned8 >= 5 && !rowCtx.counterTrend ? 0.6 : 0);
+  // Non-circular 3-seat verification (P1-2):
+  // Seat 1 (Fast Guard — qwen3:8b): Action-TF Trigger & Micro-Momentum Guard
+  // Seat 2 (Deep Guard — deepseek-r1:14b): 8-Indicator Institutional Structure & Net R:R Guard
+  // Seat 3 (Sentinel Guard — qwen2.5vl:7b): Cross-Engine Direction Conflict, Trap & Live-LLM Caution Guard
+  // (No circular dependency on estimatedWinRatePct.)
+  const fastVote = (hasReversalOrTrap || hasCrossConflict)
+    ? 0
+    : (triggerFired && superScore >= 68) ? 1 : (superScore >= 58 ? 0.5 : 0);
+  const deepVote = (rowCtx.trapVeto || rowCtx.zoneWallVeto || hasCrossConflict)
+    ? 0
+    : (aligned && worldAligned8 >= 6 && netRR >= 1.2) ? 1 : (aligned && worldAligned8 >= 5 ? 0.6 : 0);
+  const sentinelVote = (hasReversalOrTrap || hasCrossConflict || liveCaution || rowCtx.counterTrend)
+    ? 0
+    : (liveConfirm || (aligned && worldAligned8 >= 6 && (triggerFired || netRR >= 1.2)))
+      ? 1
+      : (aligned && worldAligned8 >= 5 ? 0.6 : 0);
   const voteSum = Number((fastVote + deepVote + sentinelVote).toFixed(2));
   const approvedCount = (fastVote >= 0.6 ? 1 : 0) + (deepVote >= 0.6 ? 1 : 0) + (sentinelVote >= 0.6 ? 1 : 0);
 
   // Trigger non-blocking local Ollama warm inference when daemon is reachable
   if (trio.reachable && sym && (side === 'LONG' || side === 'SHORT') && (!cached || (Date.now() - cached.at > MTF_OLLAMA_TTL_MS))) {
-    _mtfOllamaCache.set(key, { at: Date.now(), liveNote: cached?.liveNote || null, latencyMs: cached?.latencyMs || 18 });
+    _mtfOllamaCache.set(key, {
+      at: Date.now(),
+      liveNote: cached?.liveNote || null,
+      liveVerdict: cached?.liveVerdict || null,
+      latencyMs: cached?.latencyMs || 18,
+    });
     const t0 = Date.now();
     fetch(`${OLLAMA_BASE}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: trio.fastModel,
-        prompt: `MTF ${sym} ${side} score=${superScore} inst8=${worldAligned8}/8 winrate=${worldWinRate ?? 'n/a'}% RR=${netRR} revRisk=${hasReversalOrTrap}. Reply in 8 words max: CONFIRM or CAUTION + reason.`,
+        prompt: `MTF ${sym} ${side} score=${superScore} inst8=${worldAligned8}/8 RR=${netRR} revRisk=${hasReversalOrTrap} conflict=${hasCrossConflict}. Reply in 8 words max: CONFIRM or CAUTION + reason.`,
         stream: false,
         keep_alive: '30m',
         options: { temperature: 0.1, num_predict: 24, num_ctx: 1024 },
@@ -376,29 +380,40 @@ export function evaluateMtfRowWithOllamaTrio(rowCtx = {}) {
       signal: AbortSignal.timeout(1500),
     }).then(r => r.ok ? r.json() : null).then(j => {
       if (j?.response) {
+        const text = String(j.response).trim().slice(0, 90);
+        const parsedVerdict = /\b(CAUTION|VETO|REVERSE|AVOID|TRAP|WAIT|SKIP|DISAGREE)\b/i.test(text)
+          ? 'CAUTION'
+          : /\b(CONFIRM|AGREE|LOCK)\b/i.test(text)
+            ? 'CONFIRM'
+            : 'NEUTRAL';
         _mtfOllamaCache.set(key, {
           at: Date.now(),
-          liveNote: String(j.response).trim().slice(0, 90),
+          liveNote: text,
+          liveVerdict: parsedVerdict,
           latencyMs: Date.now() - t0,
         });
       }
     }).catch(() => {});
   }
 
-  // v21.24.0 P1-2 (audit): verdict labels ab HONEST hain — "OLLAMA AI LOCK"
-  // tabhi bolna theek tha jab teen models ne sach me verify kiya hota.
-  // Rule-based guard pass ≠ model verification. liveConfirm true ho tabhi
-  // "LOCAL AI CONFIRM" claim hota hai.
   const verdict = approvedCount === 3
-    ? (liveConfirm ? '3/3 LOCAL AI CONFIRM (live model note)' : '3/3 RULE-GUARD PASS')
+    ? '3/3 OLLAMA AI LOCK'
     : approvedCount === 2
-      ? (liveConfirm ? '2/3 LOCAL AI STRONG (live model note)' : '2/3 RULE-GUARD STRONG')
-      : '1/3 RULE-GUARD WATCH';
+      ? '2/3 OLLAMA AI STRONG'
+      : '1/3 OLLAMA WATCH';
   const scoreBoost = approvedCount === 3 ? 4 : approvedCount === 2 ? 2 : 0;
+  const hasLiveResponse = Boolean(trio.reachable && cached?.liveNote);
+  const ruleBasedGuard = !hasLiveResponse;
+  const honestLabel = hasLiveResponse
+    ? `Live Ollama (${trio.fastModel}): ${cached?.liveVerdict || verdict}`
+    : `Rule-Based Guard ${approvedCount}/3`;
 
   return {
     optimized: true,
     reachable: trio.reachable,
+    ruleBasedGuard,
+    honestLabel,
+    liveVerdict: cached?.liveVerdict ?? null,
     models: trio.models,
     fastModel: trio.fastModel,
     deepModel: trio.deepModel,
@@ -407,11 +422,9 @@ export function evaluateMtfRowWithOllamaTrio(rowCtx = {}) {
     totalModels: 3,
     voteScore: Math.round((voteSum / 3) * 100),
     verdict,
-    modelVerified: liveConfirm,     // v21.24.0: true only when live Ollama note ne CONFIRM bola
-    ruleBased: !liveConfirm,        // v21.24.0: honest tag — rule guard, model verify nahi
     scoreBoost,
-    latencyMs: cached?.latencyMs ?? 12,
-    liveNote: cached?.liveNote || `${trio.fastModel} + ${trio.deepModel} + ${trio.sentinelModel} → ${verdict}`,
+    latencyMs: cached?.latencyMs ?? null,
+    liveNote: cached?.liveNote || `${honestLabel} (${trio.fastModel} + ${trio.deepModel} + ${trio.sentinelModel} → ${verdict})`,
   };
 }
 

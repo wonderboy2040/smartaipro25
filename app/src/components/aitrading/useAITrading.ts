@@ -930,31 +930,31 @@ export interface MtfDualRow {
   /** v21.17.0 + v21.22.0: price domain — CRYPTO/METALS rows USDT, EQUITY_SIM rows USD, INDIA rows INR */
   quoteCcy?: 'USDT' | 'USD' | 'INR' | null; priceSrc?: string | null; fx?: number | null; ltpInr?: number | null;
   superScore: number | null; tier: string;
+  scoreBand?: string;
   winRatePct?: number | null;
-  /** v21.24.0 (audit P1-1): ledger-calibrated P(win) — null = uncalibrated (koi fake 95% claim nahi) */
+  heuristicConfluencePct?: number | null;
   pWinCalibrated?: number | null;
-  /** v21.24.0: honest score band label (ELITE/STRONG/ACTION/WATCH) */
-  scoreBand?: string | null;
-  /** v21.24.0 P0: board ensemble ne opposite side bola — row conflict-blocked */
-  boardSideConflict?: boolean;
-  boardSide?: string | null;
   directionVerified?: boolean;
+  boardSideConflict?: boolean;
+  boardSide?: 'LONG' | 'SHORT' | string | null;
+  svaConflict?: boolean;
+  councilConflict?: boolean;
   pakkaDirectionLabel?: string | null;
   trapVeto?: boolean;
   zoneWallVeto?: boolean;
   worldIndicators?: {
-    alignedCount: number | null;
+    alignedCount: number;
     totalCount: number;
-    aligned8Count?: number | null;
+    aligned8Count?: number;
     total8Count?: number;
-    confluencePct: number | null;
-    estimatedWinRatePct: number | null;
+    confluencePct: number;
+    estimatedWinRatePct: number;
     directionVerified?: boolean;
     trapVeto?: boolean;
     zoneWallVeto?: boolean;
     highAccuracy95Ready?: boolean;
     chandelierStop?: number | null;
-    institutional8?: Array<{ id: string; label: string; dir?: number; aligned: boolean; detail?: string }> | null;
+    institutional8?: Array<{ id: string; label: string; dir?: number; aligned: boolean; detail?: string }>;
   } | null;
   ollamaTrio?: {
     optimized?: boolean;
@@ -967,8 +967,6 @@ export interface MtfDualRow {
     totalModels?: number;
     voteScore?: number;
     verdict?: string;
-    modelVerified?: boolean;
-    ruleBased?: boolean;
     scoreBoost?: number;
     latencyMs?: number;
     liveNote?: string;
@@ -1010,30 +1008,28 @@ export interface MtfDualRow {
     zeroLossRule?: string;
   } | null;
   leverageRule?: { below10k: number; above10k: number; thresholdINR: number; walletDeployPct?: number } | null;
-  signals?: { board?: { side?: string | null; aiScore?: number | null; grade?: string | null; confidence?: number | null; winProb?: { verdict?: string | null; pWin?: number | null; evR?: number | null; calibrated?: boolean } | null } | null; mtf6?: { consensus?: string; agreementPct?: number; phase?: string; htfBias?: string | null; ltfTrigger?: string | null; timing?: string | null } | null } | null;
+  signals?: { board?: { side?: 'LONG' | 'SHORT' | string | null; aiScore?: number | null; grade?: string | null; confidence?: number | null; winProb?: { verdict?: string | null; pWin?: number | null; evR?: number | null; calibrated?: boolean } | null } | null; mtf6?: { consensus?: string; agreementPct?: number; phase?: string; htfBias?: string | null; ltfTrigger?: string | null; timing?: string | null } | null } | null;
   asOf?: number;
 }
 
-/** v21.24.0 Phase 3 (audit) — ledger-measured direction accuracy (n<30 = insufficient data). */
-export interface MtfDirectionScorecardView {
-  ok?: boolean;
-  windowDays?: number;
-  generatedAt?: number;
-  loggedRows?: number;
-  settledRows?: number;
-  overall?: MtfScorecardBucket;
-  eliteStrong?: MtfScorecardBucket;
-  conflictBucket?: MtfScorecardBucket;
-  note?: string | null;
-}
-export interface MtfScorecardBucket {
+export interface MtfDirectionScorecardBucket {
   n: number;
-  directionHitRate?: number | null;
-  t1HitPct?: number | null;
-  slFirstPct?: number | null;
-  wrongWayPct?: number | null;
-  avgR?: number | null;
-  verdict?: string;
+  directionHitRate: number | null;
+  t1HitPct: number | null;
+  slFirstPct: number | null;
+  wrongWayRate: number | null;
+  avgR: number | null;
+  wilsonLB: number | null;
+}
+
+export interface MtfDirectionScorecardView extends MtfDirectionScorecardBucket {
+  windowDays: number;
+  totalScans: number;
+  resolvedCount: number;
+  pendingCount: number;
+  calibrated: boolean;
+  alignedBucket?: MtfDirectionScorecardBucket;
+  conflictBucket?: MtfDirectionScorecardBucket;
 }
 
 export interface MtfDualBoardView {
@@ -1041,10 +1037,10 @@ export interface MtfDualBoardView {
   market?: string; mode?: TradePlanModeId; modeLabel?: string;
   contextTf?: string; triggerTf?: string; holdMin?: number; minScore?: number;
   topDeepTrendLimit?: number; scannedCount?: number;
-  liveFeed24x7?: { active: boolean; cadenceMs: number; directTickOverlay: number; asOf: number };
-  worldIndicatorsInfo?: { count: number; names: string[]; targetWinRatePct: number | null; avgWinRatePct: number | null; note?: string | null };
-  /** v21.24.0 Phase 3 (audit): ledger-measured direction scorecard */
   directionScorecard?: MtfDirectionScorecardView | null;
+  liveFeed24x7?: { active: boolean; cadenceMs: number; directTickOverlay: number; asOf: number };
+  // v21.23.1: `avgWinRatePct` ab nullable — missing rows pe fabricated 88 nahi milta.
+  worldIndicatorsInfo?: { count: number; names: string[]; targetWinRatePct: number | null; avgWinRatePct: number | null };
   ollamaTrio?: { reachable: boolean; base?: string; fastModel: string; deepModel: string; sentinelModel: string; models: string[]; count: number; keepAlive?: string };
   counts?: { rows: number; overBar: number; eligible: number; strong: number; fired: number; unavailable: number; metalsEligible?: number; equitySimEligible?: number };
   quoteCcy?: 'USDT' | 'USD' | 'INR' | null; fx?: number | null;
@@ -1259,7 +1255,23 @@ export async function openMtfBoardLive(
   }
 }
 
-export async function runMtfAutoTick(): Promise<{ ok: boolean; tick?: { opened: Array<{ side?: string | null; symbol?: string | null }>; closed: unknown[]; skipped: string[]; candidates: number } } | null> {
+// v21.23.1: `opened`/`closed` element types — pehle `unknown[]` tha, jisse
+// MTFDualBoardPanel.tsx(242) par `?.[0]?.side` / `?.[0]?.symbol` access
+// TS2339 (Property does not exist on type '{}') de raha tha aur `npm run check`
+// ka tsc gate FAIL hota tha. Ab elements properly typed hain.
+export interface MtfAutoTickOpenedRow {
+  symbol?: string;
+  side?: string;
+  [k: string]: unknown;
+}
+export interface MtfAutoTickClosedRow {
+  symbol?: string;
+  market?: string;
+  reason?: string;
+  pnl?: number | null;
+  [k: string]: unknown;
+}
+export async function runMtfAutoTick(): Promise<{ ok: boolean; tick?: { opened: MtfAutoTickOpenedRow[]; closed: MtfAutoTickClosedRow[]; skipped: string[]; candidates: number } } | null> {
   try {
     const r = await apiFetch(`${getProxyBase()}/api/ai/mtf-auto/run`, { method: 'POST', signal: AbortSignal.timeout(90000) });
     if (!r.ok) return null;

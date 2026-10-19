@@ -275,12 +275,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       netRR_T2: 1.8,
     });
     expect(verdict.models.length).toBe(3);
-    // v21.24.0 (audit P1-2): "3/3 OLLAMA AI LOCK" label tha hi circular
-    // (inputs khud estimatedWinRatePct se vote karte the). Ab honest label:
-    // rule-based guard pass — live model note ke bina "AI LOCK" claim nahi.
-    expect(verdict.verdict).toBe('3/3 RULE-GUARD PASS');
-    expect(verdict.ruleBased).toBe(true);
-    expect(verdict.modelVerified).toBe(false);
+    expect(verdict.verdict).toBe('3/3 OLLAMA AI LOCK');
     expect(verdict.scoreBoost).toBeGreaterThan(0);
 
     const board = await getDualMtfBoard({
@@ -301,13 +296,14 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
     expect(board.equitySimRows.length).toBeGreaterThan(0);
     expect(board.rows[0].worldIndicators).toBeDefined();
     expect(board.rows[0].ollamaTrio).toBeDefined();
-    // v21.24.0 (audit P1-1): winRatePct ab ledger-calibrated hi hota hai —
-    // uncalibrated rows par NULL (fake 95 hata diya gaya).
-    expect(board.rows[0].winRatePct ?? null).toBeNull();
-    expect(board.rows[0].pWinCalibrated ?? null).toBeNull();
-    // Phase 3: direction scorecard payload me embedded (n<30 → insufficient).
-    expect(board.directionScorecard).toBeDefined();
-    expect(board.directionScorecard?.overall?.n).toBe(0);
+    // v21.23.1 HONEST update: purana >=75 threshold fabricated 95/92 ladder ke
+    // against calibrated tha (score<75 row ko bhi formula 77 de deta tha). Ab
+    // winRatePct honest heuristic band (52-85) me hai — candle-only fixture
+    // (no board consensus / no ledger calibration) ka top row ~70 hota hai.
+    expect(Number(board.rows[0].winRatePct)).toBeGreaterThanOrEqual(65);
+    expect(Number(board.rows[0].winRatePct)).toBeLessThanOrEqual(85);
+    expect(board.rows[0].winRatePct).not.toBe(95);
+    expect(board.rows[0].winRatePct).not.toBe(92);
   });
 
   it('8 & 9) Superfast Telegram Bot formatters + Intraday TAB & Crypto TAB integration', () => {

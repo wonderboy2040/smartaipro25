@@ -387,16 +387,6 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     return `${isLiveAuto ? '🟢 LIVE AUTO-TRADE INTELLIGENCE ON' : '⏸ AUTO-TRADE STANDBY'} · 100% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} / ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')} @ ${activeLeverage}x (Buying Power ₹${buyingPower95INR.toLocaleString('en-IN')}) · Active Traded: ${activeTradedRows.length} · day ${auto.day ?? '—'} · trades ${auto.dayCount}/${auto.maxTradesPerDay}`;
   }, [auto, isLiveAuto, activeLeverage, effectiveWalletINR, deployed95WalletINR, buyingPower95INR, activeTradedRows.length]);
 
-  // v21.24.0 (audit P1-1 + Phase 3): "95% WINRATE TARGET" header claim ki
-  // jagah ledger-measured direction scorecard (n<30 → insufficient data).
-  // Jab tak ledger settle nahi hota, honest "insufficient data" hi dikhao.
-  const scorecardText = useMemo(() => {
-    const es = board?.directionScorecard?.eliteStrong;
-    if (!es || !es.n) return 'DIRECTION SCORECARD: insufficient data (ledger accumulate ho raha hai)';
-    const suffix = es.n < 30 ? ' · insufficient data' : '';
-    return `LAST 30D ELITE+STRONG: n=${es.n} · dir-hit ${es.directionHitRate ?? '—'}% · avgR ${es.avgR ?? '—'}${suffix}`;
-  }, [board]);
-
   return (
     <div className="mt-3" aria-label="mtf dual timeframe signals board">
       {/* ================= header strip (desk-board parity) ================= */}
@@ -408,8 +398,8 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
               title="24×7 Direct Ultra-Fast Market Price Fetching">
               {ccyTag}{isUsdBoard && board?.fx ? ` · ₹${fmt(board.fx, 1)}/USDT` : ''} · ⚡ 24×7 DIRECT LIVE
             </span>
-            <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black border border-emerald-500/45 bg-emerald-500/15 text-emerald-200" title="8 Institutional Top Indicators Integrated: 1. SMC (BOS/CHoCH/OB) · 2. Liquidity Sweep/Trap · 3. Volume Profile (POC/VAH/VAL) · 4. Fair Value Gap (FVG) · 5. ICT (OTE/MSS) · 6. EMA Ribbon · 7. Supply & Demand Zones · 8. Price Action · v21.24.0: win-rate claims ab ledger-measured (scorecard), hardcoded 95% hata diya gaya">
-              🏆 PURE 8 INSTITUTIONAL TOP INDICATORS · {scorecardText}
+            <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black border border-emerald-500/45 bg-emerald-500/15 text-emerald-200" title="8 Institutional Top Indicators Integrated: 1. SMC (BOS/CHoCH/OB) · 2. Liquidity Sweep/Trap · 3. Volume Profile (POC/VAH/VAL) · 4. Fair Value Gap (FVG) · 5. ICT (OTE/MSS) · 6. EMA Ribbon · 7. Supply & Demand Zones · 8. Price Action — P(win) ledger-calibrated hota hai (n ≥ 20), warna heuristic estimate">
+              🏆 PURE 8 INSTITUTIONAL CONFLUENCE{board?.worldIndicatorsInfo?.avgWinRatePct != null ? ` · ${board.worldIndicatorsInfo.avgWinRatePct}% AVG P(WIN)` : ' · P(WIN) LEDGER-CALIBRATING'}
             </span>
             <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black border border-teal-500/45 bg-teal-500/15 text-teal-200" title="1. SMC · 2. Liquidity Sweep/Trap · 3. Volume Profile · 4. Fair Value Gap · 5. ICT · 6. EMA · 7. Supply & Demand · 8. Price Action">
               🎯 SMC · LIQ-SWEEP · VOL-PROFILE · FVG · ICT · EMA · SUPPLY/DEMAND · PRICE-ACTION
@@ -625,6 +615,33 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
         )}
       </div>
 
+      {/* ================= PHASE 3.3: 30-DAY MTF DIRECTION SCORECARD STRIP ================= */}
+      {board?.directionScorecard && (
+        <div data-testid="mtf-direction-scorecard" className="mt-2 rounded-xl border border-cyan-500/30 bg-slate-950/80 px-3 py-1.5 flex items-center justify-between flex-wrap gap-2 text-[9px] font-mono">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-black text-cyan-300 uppercase">📊 MTF Direction Scorecard ({board.directionScorecard.windowDays}d):</span>
+            <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700/70 text-slate-200">
+              Scans: <b>{board.directionScorecard.totalScans}</b> ({board.directionScorecard.resolvedCount} resolved · {board.directionScorecard.pendingCount} live)
+            </span>
+            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-emerald-200 font-black">
+              Direction Hit: {board.directionScorecard.directionHitRate != null ? `${board.directionScorecard.directionHitRate}%` : 'calibrating…'}
+            </span>
+            <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/40 text-cyan-200 font-black">
+              T1 Hit: {board.directionScorecard.t1HitPct != null ? `${board.directionScorecard.t1HitPct}%` : '—'}
+            </span>
+            <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/40 text-violet-200">
+              Avg R: {board.directionScorecard.avgR != null ? `${board.directionScorecard.avgR >= 0 ? '+' : ''}${board.directionScorecard.avgR}R` : '—'}
+            </span>
+            <span className="px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/40 text-rose-200">
+              Wrong-Way: {board.directionScorecard.wrongWayRate != null ? `${board.directionScorecard.wrongWayRate}%` : '0%'}
+            </span>
+          </div>
+          <span className="text-[8px] text-slate-400">
+            {board.directionScorecard.calibrated ? '✓ Ledger-Calibrated (n ≥ 20)' : '⏳ Uncalibrated (<20 resolved scans)'}
+          </span>
+        </div>
+      )}
+
       {/* ================= CARD GRID (Signal-Board parity + Gold/Silver XAU/XAG + Equity Sim) ================= */}
       {boardBusy && !displayedRows.length && <div className="text-[10px] text-slate-400 animate-pulse py-3">Dual-TF board compute ho raha hai…</div>}
       {!boardBusy && !displayedRows.length && (
@@ -656,13 +673,19 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                 : r.market === 'INDIA'
                   ? { label: '🇮🇳 NSE INTRADAY', cls: 'bg-emerald-500/15 text-emerald-200 border-emerald-400/40' }
                   : { label: '⚡ CRYPTO PERP', cls: 'bg-violet-500/15 text-violet-200 border-violet-400/40' };
-            // v21.24.0 (audit P1-1): fake 95 fallback hata diya — sirf
-            // ledger-calibrated P(win) dikhao; warna honest "uncalibrated".
-            const winRateShown = r.pWinCalibrated ?? null;
-            const worldAligned = r.worldIndicators?.alignedCount ?? null;
-            const inst8Aligned = r.worldIndicators?.aligned8Count ?? (worldAligned != null ? Math.min(8, worldAligned) : null);
+            // v21.23.1 HONEST P(WIN): fabricated `?? 95` fallback HATA — priority:
+            // ledger-calibrated → server winRatePct → heuristic confluence → plan estimate.
+            // Koi number nahi hai to chip honest '—' dikhata hai (jhoothe 95% claim nahi).
+            const winRateIsCalibrated = r.pWinCalibrated != null;
+            const winRateShown = winRateIsCalibrated
+              ? r.pWinCalibrated
+              : (r.winRatePct ?? r.heuristicConfluencePct ?? r.worldIndicators?.estimatedWinRatePct ?? null);
+            const worldAligned = r.worldIndicators?.alignedCount ?? 0;
+            const inst8Aligned = r.worldIndicators?.aligned8Count ?? Math.min(8, worldAligned);
             const inst8List = r.worldIndicators?.institutional8 || [];
             const isPakka = Boolean(r.directionVerified ?? r.worldIndicators?.directionVerified);
+            const oppBoardSide = r.boardSide || r.signals?.board?.side || null;
+            const hasBoardConflict = Boolean(r.boardSideConflict || (oppBoardSide && r.side && oppBoardSide !== r.side));
             return (
               <div key={key} data-testid={`mtf-card-${r.symbol}`} className="quantum-panel rounded-2xl p-3 border border-violet-500/15">
                 {/* card header */}
@@ -678,13 +701,21 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                       </span>
                       {isPakka && (r.side === 'LONG' || r.side === 'SHORT') && (
                         <span className={`px-1.5 py-0.5 rounded-md text-[9px] font-black border ${long ? 'bg-emerald-500/25 text-emerald-100 border-emerald-400/60' : 'bg-rose-500/25 text-rose-100 border-rose-400/60'}`}
-                          title="Pakka Verified Direction Lock: Deep Context TF + Action Trigger TF + 8 Institutional Indicators Aligned + Zero Trap/Wall Veto">
+                          title="Pakka Verified Direction Lock: Deep Context TF + Action Trigger TF + 8 Institutional Indicators Aligned + Zero Trap/Wall Veto + Cross-Engine Direction Match">
                           🔒 PAKKA {r.side} VERIFIED
                         </span>
                       )}
-                      {r.boardSideConflict && (
-                        <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-red-500/25 text-red-200 border border-red-400/60" data-testid={`mtf-conflict-${r.symbol}`} title="v21.24.0 P0 (audit): Board ensemble OPPOSITE side bol raha hai — direction conflict! Row ka score capped 64 + auto-entry BLOCKED.">
-                          ⚠ BOARD {r.signals?.board?.side ?? r.boardSide ?? '—'} vs MTF {r.side} — CONFLICT
+                      {hasBoardConflict && (
+                        <span data-testid={`mtf-conflict-chip-${r.symbol}`}
+                          className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-red-500/30 text-red-100 border border-red-400/70"
+                          title={`Cross-Engine Direction Conflict: Board Ensemble says ${oppBoardSide} (${r.signals?.board?.aiScore ?? '—'}) while MTF Dual Board says ${r.side} — capped ≤64 & blocked from auto-entry`}>
+                          ⚠ BOARD: {oppBoardSide}{r.signals?.board?.aiScore != null ? ` ${r.signals.board.aiScore}` : ''} vs MTF: {r.side}
+                        </span>
+                      )}
+                      {!isPakka && r.pakkaDirectionLabel?.startsWith('CONFLICT-') && (
+                        <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-red-500/25 text-red-200 border border-red-400/60"
+                          title="Direction Conflict across Board Ensemble / SVA Verifier / AI Council — Auto-Trade blocked">
+                          🛑 {r.pakkaDirectionLabel}
                         </span>
                       )}
                       {r.trapVeto && (
@@ -697,8 +728,13 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                           🛑 POST-PEAK TRAP{r.trigger?.rangePct != null ? ` (${fmt(r.trigger.rangePct, 0)}% Range)` : ''}
                         </span>
                       )}
-                      <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-emerald-500/20 text-emerald-200 border border-emerald-500/50" title="8 Institutional Top Indicators Confluence (SMC, Liquidity Sweep/Trap, Volume Profile, FVG, ICT, EMA, Supply & Demand, Price Action) + v21.24.0: P(win) sirf ledger-calibrated dikhaya jata hai — uncalibrated par honest null, koi fake 95% nahi">
-                        🏆 {inst8Aligned != null ? `${inst8Aligned}/8` : '—/8'} Top Institutional Ind · {winRateShown != null ? `P(win) ${winRateShown}% (calibrated)` : 'P(win) uncalibrated'}
+                      <span
+                        className={`px-1.5 py-0.5 rounded-md text-[9px] font-black border ${winRateIsCalibrated ? 'bg-emerald-500/20 text-emerald-200 border-emerald-500/50' : 'bg-emerald-500/10 text-emerald-300/90 border-emerald-500/35'}`}
+                        title={winRateIsCalibrated
+                          ? 'P(win) LEDGER-CALIBRATED (n ≥ 20 resolved trades, signalLedger σ-calibration) — authoritative number'
+                          : 'P(win) HEURISTIC ESTIMATE (confluence × score blend) — ledger-calibrated number abhi accumulate ho raha hai; yeh guaranteed win-rate claim NAHI hai'}
+                      >
+                        🏆 {inst8Aligned}/8 Top Institutional Ind · {winRateShown != null ? `${winRateShown}%${winRateIsCalibrated ? '' : '~'} P(WIN)` : 'P(WIN) CALIBRATING'}
                       </span>
                       {r.earlyIgnition && <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-amber-500/20 text-amber-200 border border-amber-500/50" title="Ultra-Fast Early Trend Ignition — fresh EMA5/9/20 + MACD velocity">⚡ EARLY IGNITION</span>}
                       {r.counterTrend && <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-red-500/15 text-red-300 border border-red-500/40">⚠ COUNTER</span>}
@@ -708,7 +744,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                     <div className="mt-0.5 text-[9px] text-slate-500 font-mono">
                       {r.label} · hold {r.holdMin}m · {isRowUsd ? `$ ${fmt(r.ltp ?? p?.entry)} ${r.quoteCcy}` : `₹ ${fmt(r.ltp ?? p?.entry)}`}
                       {r.ltpInr != null && <span className="text-slate-600"> (≈ ₹{fmt(r.ltpInr, 0)})</span>}
-                      {r.signals?.board?.aiScore != null && <span> · board {r.signals.board.aiScore}</span>}
+                      {r.signals?.board?.aiScore != null && <span> · board {r.signals.board.side ? `${r.signals.board.side} ` : ''}{r.signals.board.aiScore}</span>}
                       {r.signals?.mtf6?.agreementPct != null && <span> · MTF6 {r.signals.mtf6.agreementPct}%</span>}
                     </div>
                   </div>

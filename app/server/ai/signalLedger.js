@@ -216,3 +216,217 @@ export function purgedWalkForwardSplit(trades, { folds = 4, embargoMs = 5 * 6000
   }
   return out;
 }
+
+// ------------------------------------------------------------
+// Phase 3 — Ledger-Based MTF Direction Scorecard (30d rolling)
+// ------------------------------------------------------------
+const _mtfScanLedger = [];
+const _mtfScanDedup = new Map(); // `${sym}:${mode}:${bucket30m}` -> id
+const MTF_SCAN_MAX = 1500;
+const DEDUP_BUCKET_MS = 30 * 60_000; // 30 minutes
+
+const _r2 = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 100) / 100 : null);
+
+/**
+ * 3.1 Log every MTF Dual Board top-6 row into the MTF scan ledger
+ * (deduped per symbol + mode + 30-minute bucket).
+ */
+export function recordMtfBoardScanRow(row, { now = Date.now() } = {}) {
+  if (!row || typeof row !== 'object') return null;
+  const symbol = String(row.symbol || '').toUpperCase().trim();
+  const side = String(row.side || '').toUpperCase();
+  if (!symbol || (side !== 'LONG' && side !== 'SHORT')) return null;
+  const entry = Number(row.plan?.entry ?? row.ltp ?? 0);
+  const stopLoss = Number(row.plan?.stopLoss ?? 0);
+  const t1 = Number(row.plan?.t1 ?? 0);
+  const t2 = Number(row.plan?.t2 ?? 0);
+  if (!(entry > 0) || !(stopLoss > 0) || !(t1 > 0)) return null;
+
+  const mode = String(row.mode || 'INTRADAY').toUpperCase();
+  const bucket = Math.floor((Number(now) || Date.now()) / DEDUP_BUCKET_MS);
+  const dedupKey = `${symbol}:${mode}:${bucket}`;
+  if (_mtfScanDedup.has(dedupKey)) {
+    const existingId = _mtfScanDedup.get(dedupKey);
+    return _mtfScanLedger.find((e) => e.id === existingId) || null;
+  }
+
+  const risk = Math.max(entry * 0.001, Math.abs(entry - stopLoss));
+  const rec = {
+    id: `mtf-${symbol}-${mode}-${now}-${Math.random().toString(36).slice(2, 7)}`,
+    symbol,
+    market: String(row.market || 'CRYPTO').toUpperCase(),
+    mode,
+    side,
+    boardSide: row.boardSide ?? row.signals?.board?.side ?? null,
+    boardSideConflict: Boolean(row.boardSideConflict),
+    svaConflict: Boolean(row.svaConflict),
+    councilConflict: Boolean(row.councilConflict),
+    directionVerified: Boolean(row.directionVerified),
+    superScore: Number(row.superScore) || 0,
+    tier: row.tier || null,
+    entry,
+    stopLoss,
+    t1,
+    t2: t2 > 0 ? t2 : t1,
+    risk,
+    holdMin: Number(row.holdMin) || (mode === 'SWING' ? 240 : 60),
+    ts: Number(now) || Date.now(),
+    peakFavPrice: entry,
+    peakAdvPrice: entry,
+    mfeR: 0,
+    maeR: 0,
+    resolved: false,
+    resolvedAt: null,
+    outcome: 'PENDING', // 'T1_HIT' | 'T2_HIT' | 'SL_HIT' | 'TIMEOUT' | 'PENDING'
+    outcomeR: null,
+    directionHit: null,
+  };
+  _mtfScanLedger.push(rec);
+  _mtfScanDedup.set(dedupKey, rec.id);
+  while (_mtfScanLedger.length > MTF_SCAN_MAX) {
+    _mtfScanLedger.shift();
+  }
+  return rec;
+}
+
+/**
+ * 3.2 Update MFE/MAE and resolve MTF scan ledger rows against live quotes or OHLC candles.
+ */
+export function resolveMtfBoardScanOutcomes({ quotes = {}, candlesBySymbol = {}, now = Date.now() } = {}) {
+  let updated = 0;
+  let resolvedNow = 0;
+  for (const e of _mtfScanLedger) {
+    if (e.resolved) continue;
+    const isLong = e.side === 'LONG';
+    const qRaw = quotes[e.symbol] ?? quotes[`${e.market}|${e.symbol}`];
+    const ltp = typeof qRaw === 'object' ? Number(qRaw?.price ?? qRaw?.ltp) : Number(qRaw);
+    const candles = Array.isArray(candlesBySymbol[e.symbol]) ? candlesBySymbol[e.symbol] : [];
+
+    const checkPriceRange = (highPx, lowPx) => {
+      if (!(highPx > 0) || !(lowPx > 0)) return;
+      if (isLong) {
+        if (highPx > e.peakFavPrice) e.peakFavPrice = highPx;
+        if (lowPx < e.peakAdvPrice) e.peakAdvPrice = lowPx;
+      } else {
+        if (lowPx < e.peakFavPrice) e.peakFavPrice = lowPx;
+        if (highPx > e.peakAdvPrice) e.peakAdvPrice = highPx;
+      }
+      const favMove = isLong ? Math.max(0, e.peakFavPrice - e.entry) : Math.max(0, e.entry - e.peakFavPrice);
+      const advMove = isLong ? Math.max(0, e.entry - e.peakAdvPrice) : Math.max(0, e.peakAdvPrice - e.entry);
+      e.mfeR = _r2(favMove / e.risk) ?? 0;
+      e.maeR = _r2(advMove / e.risk) ?? 0;
+
+      const hitSl = isLong ? lowPx <= e.stopLoss : highPx >= e.stopLoss;
+      const hitT2 = e.t2 > 0 && (isLong ? highPx >= e.t2 : lowPx <= e.t2);
+      const hitT1 = isLong ? highPx >= e.t1 : lowPx <= e.t1;
+
+      if (hitSl && !hitT1) {
+        e.resolved = true;
+        e.resolvedAt = now;
+        e.outcome = 'SL_HIT';
+        e.outcomeR = -1;
+        e.directionHit = false;
+        resolvedNow++;
+      } else if (hitT2) {
+        e.resolved = true;
+        e.resolvedAt = now;
+        e.outcome = 'T2_HIT';
+        e.outcomeR = _r2(Math.abs(e.t2 - e.entry) / e.risk) ?? 2;
+        e.directionHit = true;
+        resolvedNow++;
+      } else if (hitT1) {
+        e.resolved = true;
+        e.resolvedAt = now;
+        e.outcome = 'T1_HIT';
+        e.outcomeR = _r2(Math.abs(e.t1 - e.entry) / e.risk) ?? 1;
+        e.directionHit = true;
+        resolvedNow++;
+      }
+    };
+
+    for (const c of candles) {
+      if (e.resolved) break;
+      if (Number(c?.ts ?? c?.time ?? now) < e.ts) continue;
+      checkPriceRange(Number(c.high ?? c.close), Number(c.low ?? c.close));
+      updated++;
+    }
+    if (!e.resolved && Number(ltp) > 0) {
+      checkPriceRange(ltp, ltp);
+      updated++;
+    }
+
+    const elapsedMin = Math.max(0, (now - e.ts) / 60_000);
+    if (!e.resolved && elapsedMin >= e.holdMin) {
+      e.resolved = true;
+      e.resolvedAt = now;
+      e.outcome = 'TIMEOUT';
+      const endPx = Number(ltp) > 0 ? Number(ltp) : e.peakFavPrice;
+      const signedMove = isLong ? (endPx - e.entry) : (e.entry - endPx);
+      e.outcomeR = _r2(signedMove / e.risk) ?? 0;
+      e.directionHit = (e.mfeR >= 0.5 && e.maeR < 1.0) || e.outcomeR > 0;
+      resolvedNow++;
+    }
+  }
+  return { updated, resolvedNow, total: _mtfScanLedger.length };
+}
+
+/**
+ * 3.3 Compute 30-day rolling MTF Direction Scorecard for UI & API.
+ */
+export function computeMtfDirectionScorecard({ windowDays = 30, now = Date.now() } = {}) {
+  const cutoff = now - Math.max(1, Number(windowDays) || 30) * 86_400_000;
+  const rows = _mtfScanLedger.filter((r) => r.ts >= cutoff);
+  const resolved = rows.filter((r) => r.resolved);
+  const alignedResolved = resolved.filter((r) => !r.boardSideConflict && !r.svaConflict && !r.councilConflict);
+  const conflictResolved = resolved.filter((r) => r.boardSideConflict || r.svaConflict || r.councilConflict);
+
+  const summarize = (list) => {
+    const n = list.length;
+    if (n === 0) {
+      return {
+        n: 0,
+        directionHitRate: null,
+        t1HitPct: null,
+        slFirstPct: null,
+        wrongWayRate: null,
+        avgR: null,
+        wilsonLB: null,
+      };
+    }
+    const dirHits = list.filter((r) => r.directionHit || r.outcome === 'T1_HIT' || r.outcome === 'T2_HIT' || (r.mfeR >= 0.5 && r.outcome !== 'SL_HIT')).length;
+    const t1Hits = list.filter((r) => r.outcome === 'T1_HIT' || r.outcome === 'T2_HIT').length;
+    const slHits = list.filter((r) => r.outcome === 'SL_HIT').length;
+    const wrongWay = list.filter((r) => r.outcome === 'SL_HIT' && Number(r.mfeR) < 0.25).length;
+    const rs = list.map((r) => Number(r.outcomeR)).filter((x) => Number.isFinite(x));
+    return {
+      n,
+      directionHitRate: _r2((dirHits / n) * 100),
+      t1HitPct: _r2((t1Hits / n) * 100),
+      slFirstPct: _r2((slHits / n) * 100),
+      wrongWayRate: _r2((wrongWay / n) * 100),
+      avgR: rs.length ? _r2(rs.reduce((a, b) => a + b, 0) / rs.length) : null,
+      wilsonLB: _r2(wilsonLowerBound(t1Hits, n) * 100),
+    };
+  };
+
+  const overall = summarize(resolved);
+  const alignedBucket = summarize(alignedResolved);
+  const conflictBucket = summarize(conflictResolved);
+
+  return {
+    windowDays,
+    totalScans: rows.length,
+    resolvedCount: resolved.length,
+    pendingCount: rows.length - resolved.length,
+    calibrated: resolved.length >= 20,
+    ...overall,
+    alignedBucket,
+    conflictBucket,
+    recentScans: rows.slice(-12).reverse(),
+  };
+}
+
+export function __resetMtfLedgerForTests() {
+  _mtfScanLedger.length = 0;
+  _mtfScanDedup.clear();
+}

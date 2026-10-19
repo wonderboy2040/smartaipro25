@@ -84,6 +84,13 @@ import {
   agentStatus, __resetAgentForTests, __setAgentStateForTests, AGENT_DEFAULTS,
 } from '../server/ai/agent.js';
 import { __resetForTests, __setJournalForTests, loadJournal, todayIST, __setConfigForTests } from '../server/ai/coindcxOrders.js';
+// v21.23.1: 776b289 ("direction lock guard") ne agent.js me acquireDirectionLock wire
+// kiya par agent.test.ts me lock RESET nahi kiya tha — pichhle test ki BTC LONG
+// lock (active, kabhi release nahi hoti thi) agli SHORT-side test ko block karti
+// thi ("flip-churn EXPIRES after flipReentryBlockMin" stable fail). Production me
+// release-on-close fix ke saath 5h purana lock genuinely expire hota hai; yahan
+// har test ke beech lock reset karna hi sahi isolation hai.
+import { __resetDirectionLocksForTests } from '../server/ai/directionLock.js';
 import { saveJSON, loadJSON as loadJSONOrig } from '../server/lib/store.js';
 
 // ---------------- fixtures ----------------
@@ -117,6 +124,7 @@ let _origCreds = null;
 beforeEach(() => {
   __resetForTests();
   __resetAgentForTests();
+  __resetDirectionLocksForTests();
   _connected = true;
   _origCreds = JSON.parse(JSON.stringify(loadJSONOrig('mcp-coindcx.json') || {}));
   saveJSON('mcp-coindcx.json', { apiKey: 'test-key', secret: 'test-secret', connectedAt: Date.now() });

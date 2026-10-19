@@ -32,8 +32,7 @@ import { durablePut } from '../mcp/durable.js';
 import { coindcxConnected } from '../mcp/coindcx.js';
 import { getTick } from '../liveFeed.js';
 import { walletLeverageForEquityINR, feeBreakevenFloor } from '../exec/sizing.js';
-// v21.24.0 P2-1 (audit/direction-guards): cross-engine per-symbol direction lock
-import { directionLockGate, lockDirection, __resetDirectionLockForTests } from './directionLock.js';
+import { acquireDirectionLock, checkDirectionLock } from './directionLock.js';
 import { walletSnapshot, executeFuturesSignal, closeFuturesPosition, fetchUsdInr, inrOfUsdt as _inrOfUsdt } from './futures.js';
 import {
   loadConfig, loadJournal, dailyStats as _dailyStats, todayIST,
@@ -1959,16 +1958,6 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
       best.market === 'INDIA' ? 'INDIA' : best.market,
       best.symbol, { ltp: best.plan.entry, levels: 20 },
     ).catch(() => null);
-  // v21.24.0 P2-1 (audit) CROSS-ENGINE DIRECTION LOCK: agar MTF Auto-Link
-  // ya PRO AUTO engine ne is symbol par opposite-side trade khola hai
-  // (<4h), to Auto-Agent us side ki entry YAHIN block ho jata hai —
-  // "one coin, one direction" across engines (audit Engine C vs E).
-  const dLock = directionLockGate({ symbol: best.symbol, market: best.market, side: best.side });
-  if (!dLock.allowed) {
-    log('skip', `DIRECTION LOCK ${best.symbol} — ${dLock.reason}`);
-    persistState();
-    return;
-  }
   let out = null;
   // v20.7.3: tracks how many split legs actually filled (futures AND spot
   // loops below) — a later leg refused by the one-per-pair gate must NOT
@@ -2004,6 +1993,11 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
     const floorUSDT = isGlobal ? 1 : (cfg.mode === 'live' ? 2 : 1);
     if (marginUSDT < floorUSDT) {
       maybeLogSkip('margin too small', `${isGlobal ? 'global SIM' : 'futures'} margin ${marginUSDT} USDT < ${floorUSDT} — sizing equity ₹${r2(sizingEquityINR)}${cfg.mode !== 'live' ? ' (practice)' : ''} / risk ${riskPct}% too small for this stop`);
+      persistState(); return;
+    }
+    const crossLock = checkDirectionLock(best.symbol, best.side);
+    if (crossLock && !crossLock.allowed) {
+      maybeLogSkip('cross-engine direction lock', crossLock.reason);
       persistState(); return;
     }
     // v10.6: the depth walk runs on the POSITION NOTIONAL in the book's
@@ -2087,11 +2081,9 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
   }
 
   if (out?.ok) {
-    // v21.24.0 P2-1: entry ho gayi — cross-engine direction lock stamp
-    // (dusra engine is symbol par ab opposite side open nahi karega).
-    lockDirection({ symbol: best.symbol, market: best.market, side: best.side, source: 'auto-agent' });
     _state.lastEntryAt = Date.now();
     _state.lastEntryPair = pairOfSignal(best);
+    acquireDirectionLock({ symbol: best.symbol, side: best.side, source: 'agent', cooldownMin: cfg.flipReentryBlockMin || 240 });
     const f = out.filled || {};
     const deskTag = best.market === 'GLOBALFUTURES' ? '🌍 Global SIM' : wantFutures ? '⚡ Futures' : '₿ Spot';
     // v10.8: near-miss entries get a journal marker (NEAR_MISS kind —
@@ -2583,7 +2575,6 @@ export function __resetAgentForTests() {
   saveAgentConfig({ ...AGENT_DEFAULTS });
   _lastSkip = { key: '', at: 0 };
   _lastWalletView = null;
-  __resetDirectionLockForTests(); // v21.24.0 P2-1: cross-engine direction lock bhi reset
 }
 export function __setAgentStateForTests(s) { _state = { ...freshState(), ...s }; }
 export function __agentLogForTests() { return _state.log; }
