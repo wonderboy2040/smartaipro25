@@ -809,8 +809,8 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                     </span>
                   )}
                   {r.ollamaTrio && (
-                    <span className="px-1.5 py-0.5 rounded border border-violet-500/45 bg-violet-500/15 text-violet-200 font-black" title={r.ollamaTrio.liveNote || '3-Model Local Ollama AI Ensemble'}>
-                      🧠 {r.ollamaTrio.verdict} ({r.ollamaTrio.latencyMs ?? 12}ms)
+                    <span className="px-1.5 py-0.5 rounded border border-violet-500/45 bg-violet-500/15 text-violet-200 font-black" title={r.ollamaTrio.liveNote || (r.ollamaTrio.ruleBasedGuard ? 'Rule-based 3-seat guard — Ollama live models offline (koi live AI response nahi)' : '3-Model Local Ollama AI Ensemble (live)')}>
+                      🧠 {r.ollamaTrio.honestLabel || r.ollamaTrio.verdict}{r.ollamaTrio.latencyMs != null ? ` (${r.ollamaTrio.latencyMs}ms)` : ''}
                     </span>
                   )}
                   {r.aiAgents && (

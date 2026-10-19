@@ -2167,7 +2167,7 @@ bot.onText(/^\/screener(@\w+)?$/i, async (msg) => {
       ]);
       const li = siteAgents.formatBoardLines(india, { label: '🇮🇳 NSE SCREENER — site 14-model board', max: 6 });
       const lc = siteAgents.formatBoardLines(crypto, { label: '₿ CRYPTO SCREENER — site 14-model board', max: 6 });
-      const lmtf = siteAgents.formatMtfDualBoardLines(mtfCrypto, { label: '⚡ MTF DUAL-TIMEFRAME SIGNAL BOARD (95% Win-Rate · Gold/Silver · Equity Sim)', max: 6 });
+      const lmtf = siteAgents.formatMtfDualBoardLines(mtfCrypto, { label: '⚡ MTF DUAL-TIMEFRAME SIGNAL BOARD (Gold/Silver · Equity Sim · Ledger-Calibrating Win-Rate)', max: 6 });
       if (li || lc || lmtf) {
         await safeSend(chatId, [lmtf, li, lc].filter(Boolean).join('\n\n'));
         await safeSend(chatId, 'ℹ️ <i>Ye wahi board hai jo website pe dikhta hai — ek hi engine, ek hi answer. /mtf, /gold, /autotrade, /deepmonitor ya /insights use karo.</i>');

@@ -1,5 +1,33 @@
 # Changelog
 
+## v21.23.3 — HONESTY COMPLETION: 7 residual fabrications swept (fresh-eyes deep audit) (2026-10-19)
+
+**User ask: "latest repo pull karo + full site deep pro Advance level pe recheck + issues fix."
+Remote 099d3c0 verify hua: v21.23.2 inversion fixes 100% port — tsc 0 / lint 0 / 3926 tests green.
+Deep-pro fresh-eyes sweep ne 3 UN-SWEPT PATHS par residual fabrications pakde — sab fixed + 12 regression locks.**
+
+### AUDIT RESULTS (remote 099d3c0 base)
+- **Exit-side matrix ALL CORRECT** (fresh-eyes verify): CoinDCX spot exits (`long ? 'sell' : 'buy'` — SL/TP2/manual/T1T2), margin `exit_positions` position-side keying (by-design, 3 callsites consistent), indiaOrders watcher/SL `long ? 'SELL' : 'BUY'`, dhan SL-M inverting adapter (`kind === 'SL' ? opposite`), position-book side interpretation (negative qty → SHORT correct) — **zero naya direction bug**
+- **directionLock lifecycle COMPLETE**: 4 engines acquire (agent/indiaAgent/mtfAutoLink/proTraderAuto), 5 check gates, dual release (paperTrading `_closePart` flat-check + routes.js 60s `reconcileDirectionLocks()` sweep ALL books)
+- **telegram-bot direct trading NAHI karta** — sab server API se (fixed adapters ke through); sirf public ticker fetch
+- **SW/service worker healthy**: har build fresh `CACHE_VERSION` stamp (vite stamp-sw-version) + activate-eviction; stale dist assets dead-weight the (kuch reference nahi karta)
+
+### FIXED — 7 residual honesty bugs
+1. **MTFDualBoardPanel OLLAMA chip** (row-level): raw `verdict` render hota tha — Ollama **offline** ho tab bhi "🧠 3/3 OLLAMA AI LOCK (12ms)" dikhta tha (fabricated latency `?? 12` bhi). Ab `honestLabel || verdict` + `ruleBasedGuard` tooltip + latency sirf real-measured (`null` → kuch nahi). Type me `honestLabel`/`ruleBasedGuard`/`liveVerdict` fields add (useAITrading.ts) — pehle v21.23.2 honest fix `aiAgents.ollamaVerdict` me gaya tha jo **kabhi render hi nahi hota** tha
+2. **telegram siteAgents row**: `winRatePct ?? estimatedWinRatePct ?? winProbPct ?? 88` → **fabricated "88% Winrate"** jab kuch measured nahi; `alignedCount ?? 8` → guessed "8/8". Ab unmeasured → "Winrate: calibrating" + "—/8 Inst · —/10 Top Ind"; ollama tag honestLabel-first
+3. **bot.mjs digest header**: flat "(95% Win-Rate)" claim → "(Gold/Silver · Equity Sim · Ledger-Calibrating Win-Rate)"
+4. **TradePlanPanel**: `?? 7` guessed "7/8 Top Institutional Ind" → real count ya 0; synthetic `estimatedWinRatePct` ab "~X% est. win-rate" qualified (pehle bare "% Winrate" jaisa)
+5. **mtfDualBoard API payload note**: "95% Win-Rate Confluence" → "Ledger-Calibrated Win-Rate Confluence + 3-Seat Local Ollama Guard"
+6. **India/CoinDcx tab headers**: "(95% Win-Rate Target)" → "(Ledger-Calibrated Win-Rate)" — pinned tests updated
+7. **llmSentinel cache-init**: `latencyMs: cached?.latencyMs || 18` placeholder **return path pe leak** ho raha tha (fetch fail → "18ms" fabricated telemetry) → `?? null`
+
+### VERIFIED AT v21.23.2 BASE (before these fixes)
+- tsc 0 errors · eslint 0 · **215 files / 3926 tests PASS** · dist stamp 21.23.2 · check:routes PASS
+
+### AT v21.23.3
+- tsc 0 errors · eslint 0 · **216 files / 3938 tests PASS** (+12 honesty regression locks) · dist stamp 21.23.3
+- Watchdog bat + launcher version pins 21.23.3
+
 ## v21.23.2 — SIGNAL-DIRECTION INVERSION FIX (long↔short opposite trades) (2026-10-19)
 
 **User ask: "Trade signals Wrong and opposite jaa rahe hai — long trade signal ka short jaa raha hai, short trade signal ka long jaa raha hai." Deep-pro trace kiya — DO concrete root causes mile, dono fixed + regression-locked.**

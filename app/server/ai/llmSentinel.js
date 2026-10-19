@@ -368,7 +368,7 @@ export function evaluateMtfRowWithOllamaTrio(rowCtx = {}) {
       at: Date.now(),
       liveNote: cached?.liveNote || null,
       liveVerdict: cached?.liveVerdict || null,
-      latencyMs: cached?.latencyMs || 18,
+      latencyMs: cached?.latencyMs ?? null,
     });
     const t0 = Date.now();
     fetch(`${OLLAMA_BASE}/api/generate`, {

@@ -312,18 +312,24 @@ function fmtMtfRowLine(r, defaultCcy = 'USDT') {
   const pfx = (ccy === 'USDT' || ccy === 'USD') ? '$' : '₹';
   const sideIcon = r.side === 'LONG' ? '🟢' : r.side === 'SHORT' ? '🔴' : '⚪';
   const tierIcon = r.tier === 'ELITE' ? '👑' : r.tier === 'STRONG' ? '🚀' : '⚡';
-  const winRate = r.winRatePct ?? r.worldIndicators?.estimatedWinRatePct ?? r.plan?.winProbPct ?? 88;
-  const worldAligned = r.worldIndicators?.alignedCount ?? 8;
-  const inst8Aligned = r.worldIndicators?.aligned8Count ?? Math.min(8, worldAligned);
+  // v21.23.3 HONESTY: fabricated fallbacks (?? 88 winrate / ?? 8 aligned guesses)
+  // hataye — unmeasured ho to "calibrating"/"—" bolo, guessed number nahi.
+  const winRate = r.winRatePct ?? r.plan?.winProbPct ?? null;
+  const winTag = winRate != null ? `🏆 <b>${winRate}% Winrate</b>` : '🏆 Winrate: calibrating';
+  const worldAligned = r.worldIndicators?.alignedCount ?? null;
+  const inst8Aligned = r.worldIndicators?.aligned8Count ?? null;
+  const indTag = `${inst8Aligned != null ? inst8Aligned : (worldAligned != null ? worldAligned : '—')}/8 Inst · ${worldAligned != null ? worldAligned : '—'}/10 Top Ind`;
   const pakkaTag = (r.directionVerified || r.worldIndicators?.directionVerified) && (r.side === 'LONG' || r.side === 'SHORT')
     ? ` · 🔒 <b>PAKKA ${esc(r.side)}</b>`
     : '';
-  const ollamaTag = r.ollamaTrio?.verdict ? ` · 🧠 ${esc(r.ollamaTrio.verdict)}` : '';
+  // honestLabel pehle — raw verdict offline "3/3 OLLAMA AI LOCK" jhooth bol sakta hai
+  const ollamaLabel = r.ollamaTrio?.honestLabel || r.ollamaTrio?.verdict || '';
+  const ollamaTag = ollamaLabel ? ` · 🧠 ${esc(ollamaLabel)}` : '';
   const entry = r.plan?.entry != null ? `${pfx}${r2(r.plan.entry)}` : '—';
   const sl = r.plan?.stopLoss != null ? `${pfx}${r2(r.plan.stopLoss)}` : '—';
   const t1 = r.plan?.t1 != null ? `${pfx}${r2(r.plan.t1)}` : '—';
   const t2 = r.plan?.t2 != null ? `${pfx}${r2(r.plan.t2)}` : '—';
-  return `${tierIcon} <b>${esc(r.symbol)}</b> ${sideIcon} <b>${esc(r.side || 'WATCH')}</b>${pakkaTag} · Score <b>${r.superScore ?? 0}</b> (${esc(r.tier)}) · 🏆 <b>${winRate}% Winrate</b> (${inst8Aligned}/8 Inst · ${worldAligned}/10 Top Ind)${ollamaTag}\n   🎯 Entry <b>${entry}</b> · 🛑 SL <b>${sl}</b> · 🏆 T1 <b>${t1}</b> · T2 <b>${t2}</b>`;
+  return `${tierIcon} <b>${esc(r.symbol)}</b> ${sideIcon} <b>${esc(r.side || 'WATCH')}</b>${pakkaTag} · Score <b>${r.superScore ?? 0}</b> (${esc(r.tier)}) · ${winTag} (${indTag})${ollamaTag}\n   🎯 Entry <b>${entry}</b> · 🛑 SL <b>${sl}</b> · 🏆 T1 <b>${t1}</b> · T2 <b>${t2}</b>`;
 }
 
 export function formatMtfDualBoardLines(board, { label = '⚡ MTF DUAL-TIMEFRAME SIGNAL BOARD (v21.22.0)', max = 6 } = {}) {

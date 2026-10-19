@@ -866,7 +866,7 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
         : isGlobalEqDesk
           ? 'Equity Sim (US Global) rows USD domain me hain (NVDA, TSLA, AAPL, MSFT, META, AMD) — ₹ equivalent chhote text me.'
           : 'India rows NSE ₹ domain me hain + Gold/Silver (XAU/XAG) & Equity Sim tabs bhi board me integrated hain.',
-      `v21.22.0 Pure 8 Higher-Win-Rate Institutional Top Indicators + 95% Win-Rate Confluence + 3-Model Local Ollama AI Ensemble: Full ${rows.length}-symbol desk scan me se Top ${TOP_DEEP_TREND_LIMIT} Deep-Trend setups + Gold/Silver (XAU/XAG) + Equity Sim.`,
+      `v21.22.0 Pure 8 Institutional Top Indicators + Ledger-Calibrated Win-Rate Confluence + 3-Seat Local Ollama Guard: Full ${rows.length}-symbol desk scan me se Top ${TOP_DEEP_TREND_LIMIT} Deep-Trend setups + Gold/Silver (XAU/XAG) + Equity Sim.`,
       '75+ score = ACTION/STRONG/ELITE tier — Live Auto-Trade ON karne par 100% CoinDCX Wallet amount + leverage ke saath strictly 1 Verified Trade lagta hai aur TP1/TP2 tak Deep Monitor + Trailing SL + Reversal Profit-Booking active rehta hai.',
       'Board rows 6s 24×7 ultra-fast cache + direct live tick overlay par hain.',
     ],

@@ -164,7 +164,7 @@ export const TradePlanPanel = memo(function TradePlanPanel({ symbol, market, sid
           )}
           {plan?.worldIndicators && (
             <span className="px-1.5 py-0.5 rounded text-[9px] font-black border border-emerald-500/40 bg-emerald-500/15 text-emerald-200">
-              🏆 {plan.worldIndicators.aligned8Count ?? plan.worldIndicators.alignedCount ?? 7}/8 Top Institutional Ind ({plan.worldIndicators.estimatedWinRatePct}% Winrate)
+              🏆 {(plan.worldIndicators.aligned8Count ?? plan.worldIndicators.alignedCount ?? 0)}/8 Top Institutional Ind{plan.worldIndicators.estimatedWinRatePct != null ? ` (~${plan.worldIndicators.estimatedWinRatePct}% est. win-rate)` : ''}
             </span>
           )}
           {plan && <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${gradeCls(plan.grade)}`} title="Grade = context+trigger confluence">GRADE {plan.grade} · {plan.confidence}%</span>}

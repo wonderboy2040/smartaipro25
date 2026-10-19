@@ -363,8 +363,11 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
 
     const cxSrc = fs.readFileSync(path.resolve('src/components/tabs/CoinDcxTab.tsx'), 'utf8');
     const inSrc = fs.readFileSync(path.resolve('src/components/tabs/IndiaIntradayTab.tsx'), 'utf8');
-    expect(cxSrc).toContain('10 World Top Indicators (95% Win-Rate Target)');
-    expect(inSrc).toContain('10 World Top Indicators (95% Win-Rate Target)');
+    // v21.23.3 HONESTY: "95% Win-Rate Target" header claim hataya — ab ledger-calibrated
+    expect(cxSrc).toContain('10 World Top Indicators (Ledger-Calibrated Win-Rate)');
+    expect(inSrc).toContain('10 World Top Indicators (Ledger-Calibrated Win-Rate)');
+    expect(cxSrc).not.toContain('95% Win-Rate');
+    expect(inSrc).not.toContain('95% Win-Rate');
   });
 
   it('8) All 8 Institutional Top Indicators (SMC, Liquidity Sweep/Trap, Volume Profile, FVG, ICT, EMA, Supply/Demand, Price Action) & Pakka LONG/SHORT Direction Lock work with Trap Veto', async () => {

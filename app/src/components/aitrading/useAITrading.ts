@@ -967,9 +967,15 @@ export interface MtfDualRow {
     totalModels?: number;
     voteScore?: number;
     verdict?: string;
+    // v21.23.3 HONESTY: sentinel ka honest path — offline pe "Rule-Based Guard n/3",
+    // live pe "Live Ollama (...)"; raw verdict rule-based ho sakta hai (offline bhi
+    // "3/3 OLLAMA AI LOCK" bol deta tha — fabricated claim).
+    honestLabel?: string;
+    ruleBasedGuard?: boolean;
+    liveVerdict?: string | null;
     scoreBoost?: number;
-    latencyMs?: number;
-    liveNote?: string;
+    latencyMs?: number | null;
+    liveNote?: string | null;
   } | null;
   side: 'LONG' | 'SHORT' | null; dir?: number | null;
   grade?: 'A' | 'B' | 'C' | null; bias?: string | null;

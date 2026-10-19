@@ -597,7 +597,7 @@ export default memo(function CoinDcxTab() {
             ? 'CoinDCX GLOBAL FUTURES + GOLD/SILVER (XAU/XAG) + EQUITY SIM — 2-Timeframe Modes (15m Deep + 5m Action · 1h Deep + 15m Action) in RT USDT'
             : desk === 'METALS'
               ? `🥇 GOLD (XAU/USDT) + SILVER (XAG/USDT) — CoinDCX commodity perps (B-XAU_USDT / B-XAG_USDT), ${models.length || 16}-model committee + Dual-TF timing`
-              : `🌍 GLOBAL EQUITY FUTURES SIM — ${models.length || 16}-model committee + Dual-TF signals`} → 8 Institutional + 10 World Top Indicators (95% Win-Rate Target) · 24×7 6s Direct Market Prices · 3-Model Local Ollama AI · Single LIVE Auto-Trade (100% CoinDCX Wallet + <₹10k→10x / ≥₹10k→5x Leverage) · Full CoinDCX Active Position Control & Active-Trade-Only Deep Monitor (TP1/TP2 Trailing SL + Reversal Profit Book)`} />
+              : `🌍 GLOBAL EQUITY FUTURES SIM — ${models.length || 16}-model committee + Dual-TF signals`} → 8 Institutional + 10 World Top Indicators (Ledger-Calibrated Win-Rate) · 24×7 6s Direct Market Prices · 3-Model Local Ollama AI · Single LIVE Auto-Trade (100% CoinDCX Wallet + <₹10k→10x / ≥₹10k→5x Leverage) · Full CoinDCX Active Position Control & Active-Trade-Only Deep Monitor (TP1/TP2 Trailing SL + Reversal Profit Book)`} />
         </div>
         <div id="cx-mtf-dual">
           <MTFDualBoardPanel

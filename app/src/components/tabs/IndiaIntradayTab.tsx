@@ -446,7 +446,7 @@ export default memo(function IndiaIntradayTab() {
       {/* ============ 01 · MTF DUAL-TIMEFRAME SIGNAL BOARD (v21.22.0 — 9-Point Superintelligence Upgrade) ============ */}
       <div id="in-signals">
         <div className="flex items-end justify-between flex-wrap gap-2 mb-2.5">
-          <SectionLabel num="01" title="MTF Dual-Timeframe Signal Board" sub={`NSE equities + indices + GOLD/SILVER (XAU/XAG) + EQUITY SIM → 2-Timeframe Modes (15m Deep + 5m Action · 1h Deep + 15m Action) · 8 Institutional + 10 World Top Indicators (95% Win-Rate Target) · 24×7 6s Direct Prices · 3-Model Local Ollama AI · Single LIVE Auto-Trade (100% CoinDCX Wallet + <₹10k→10x / ≥₹10k→5x Leverage) · Full CoinDCX Active Position Control & Active-Trade-Only Deep Monitor (TP1/TP2 Trailing SL + Reversal Profit Book)`} />
+          <SectionLabel num="01" title="MTF Dual-Timeframe Signal Board" sub={`NSE equities + indices + GOLD/SILVER (XAU/XAG) + EQUITY SIM → 2-Timeframe Modes (15m Deep + 5m Action · 1h Deep + 15m Action) · 8 Institutional + 10 World Top Indicators (Ledger-Calibrated Win-Rate) · 24×7 6s Direct Prices · 3-Model Local Ollama AI · Single LIVE Auto-Trade (100% CoinDCX Wallet + <₹10k→10x / ≥₹10k→5x Leverage) · Full CoinDCX Active Position Control & Active-Trade-Only Deep Monitor (TP1/TP2 Trailing SL + Reversal Profit Book)`} />
           <div className="flex items-center gap-2">
             <span className={`text-[9px] px-1.5 py-0.5 rounded border font-mono flex items-center gap-1
               ${stream.connected ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10' : 'text-amber-400 border-amber-500/30 bg-amber-500/10'}`}
