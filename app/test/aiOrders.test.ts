@@ -378,19 +378,24 @@ describe('PAPER practice-plan synthesis (v9.0.2 — paper always starts)', () =>
     expect(j.entries.at(-1)!.signal!.grade).toBe('NEUTRAL'); // honesty journaled
   });
 
-  it('v21.13: paper on a SIDE-FLIP (fresh SHORT, clicked LONG) REALIGNS to the fresh side', async () => {
-    // The #1 real-world blocker was the v6.12 hard reject; v9.0.2 opened
-    // the STALE clicked side (engine's fresh view ke AGAINST — the
-    // "opposite" track-record amplifier: 60s-cached card LONG, fresh
-    // consensus SHORT, trade LONG → SL → journal engine ko blame).
-    // v21.13: the engine's CURRENT view hi practice hota hai.
+  it('v21.23.2: paper on a SIDE-FLIP (fresh SHORT, clicked LONG) BLOCKS — silent inversion kabhi nahi', async () => {
+    // v21.13 me fresh consensus ka flipped side silently khul jaata tha
+    // (user ne LONG card dekha, trade SHORT khula — "long trade signal ka
+    // short jaa raha hai" complaint). v21.23.2: direction conflict =
+    // honest REJECT. Opposite-side entry 0, journal me flip documented.
     const out = await executeSignal({
       symbol: 'BTC', mode: 'paper', side: 'LONG',
       getFreshSignal: async () => ({ ...STRONG, side: 'SHORT' }),
     });
-    expect(out.ok).toBe(true);
-    expect(out.position!.side).toBe('SHORT'); // REALIGNED to fresh consensus
-    expect(out.fitted).toMatch(/REALIGNED to fresh consensus SHORT/i);
+    expect(out.ok).toBe(false);
+    expect(out.error).toMatch(/fresh consensus SHORT/i);
+    expect(out.error).toMatch(/blocked \(no auto-flip\)/i);
+    const j = loadJournal();
+    expect(j.positions.length).toBe(0); // koi opposite-side trade NAHI khula
+    const rej = j.entries.find(e => e.status === 'REJECTED');
+    expect(rej).toBeDefined();
+    expect(rej!.flippedFrom).toBe('LONG');
+    expect(rej!.flippedTo).toBe('SHORT');
   });
 
   it('v9.0.2: paper below the ACTION floor (WATCH grade, matching side) opens with a floor-relaxed note', async () => {
@@ -419,7 +424,10 @@ describe('PAPER practice-plan synthesis (v9.0.2 — paper always starts)', () =>
       getFreshSignal: async () => ({ ...STRONG, side: 'SHORT' }),
     });
     expect(out.ok).toBe(false);
-    expect(out.error).toMatch(/fresh consensus SHORT hai, aapne LONG/i);
+    // v21.23.2: ab early direction-conflict reject (message naya) — LIVE ka
+    // no-auto-flip invariant pehle se tha, ab paper/notify me bhi hai.
+    expect(out.error).toMatch(/fresh consensus SHORT/i);
+    expect(out.error).toMatch(/blocked \(no auto-flip\)/i);
   });
 });
 

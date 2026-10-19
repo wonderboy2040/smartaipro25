@@ -120,17 +120,21 @@ describe('SPOT desk: STRONG 80+ SHORT card → trade direction', () => {
     expect(j.entries.at(-1)!.status).toBe('FILLED');
   });
 
-  it('PAPER: clicked SHORT while the fresh consensus flipped LONG → v21.13 REALIGNS to the fresh side (never against the engine)', async () => {
-    // v9.0.2-v21.12 me trade STALE clicked side pe khulta tha (engine ki
-    // fresh view ke AGAINST — the "opposite" track-record amplifier).
-    // v21.13: the engine's CURRENT view hi practice hota hai.
+  it('PAPER: clicked SHORT while the fresh consensus flipped LONG → v21.23.2 BLOCKS (silent inversion nahi)', async () => {
+    // v21.13 me flipped fresh side silently khul jaata tha (clicked SHORT,
+    // trade LONG — user ko "short ka long" dikhta tha). v21.23.2: conflict =
+    // honest REJECT — clicked side ke OPPOSITE trade kabhi nahi khulta.
     const out = await executeSignal({
       symbol: 'BTC', side: 'SHORT', mode: 'paper',
       getFreshSignal: async () => ({ ...SPOT_LONG }),
     });
-    expect(out.ok).toBe(true);
-    expect(out.position!.side).toBe('LONG'); // ← REALIGNED to fresh consensus LONG
-    expect(out.fitted).toMatch(/REALIGNED to fresh consensus LONG/i);
+    expect(out.ok).toBe(false);
+    expect(out.error).toMatch(/fresh consensus LONG/i);
+    expect(out.error).toMatch(/blocked \(no auto-flip\)/i);
+    const j = loadJournal();
+    const flipRej = j.entries.find(e => e.status === 'REJECTED' && e.flippedFrom === 'SHORT');
+    expect(flipRej).toBeDefined();
+    expect(flipRej!.flippedTo).toBe('LONG');
   });
 
   it('LIVE: a STRONG SHORT signal sends a SELL order to CoinDCX and books a SHORT position', async () => {
@@ -156,7 +160,8 @@ describe('SPOT desk: STRONG 80+ SHORT card → trade direction', () => {
       getFreshSignal: async () => ({ ...SPOT_LONG }),
     });
     expect(out.ok).toBe(false);
-    expect(out.error).toMatch(/fresh consensus LONG hai, aapne SHORT/i);
+    expect(out.error).toMatch(/fresh consensus LONG/i);
+    expect(out.error).toMatch(/blocked \(no auto-flip\)/i);
     // THE certificate line: not a single signed request left the server.
     expect(mockPrivate).not.toHaveBeenCalled();
     expect(loadJournal().entries.at(-1)!.status).toBe('REJECTED');
@@ -227,16 +232,21 @@ describe('SPOT desk: STRONG 80+ LONG card → trade direction (mirror)', () => {
     expect(j.entries.at(-1)!.status).toBe('FILLED');
   });
 
-  it('PAPER: clicked LONG while the fresh consensus flipped SHORT → v21.13 REALIGNS to the fresh side (mirror)', async () => {
-    // v21.13 mirror: never open a practice trade AGAINST the engine's
-    // current view (stale-flipped card). Fresh side wins.
+  it('PAPER: clicked LONG while the fresh consensus flipped SHORT → v21.23.2 BLOCKS (mirror — "long ka short" kabhi nahi)', async () => {
+    // v21.23.2 mirror: clicked LONG card ke against fresh SHORT consensus
+    // aaye to trade REJECT hota hai — silent flip nahi (user complaint ka
+    // exact scenario: "long trade signal ka short jaa raha hai").
     const out = await executeSignal({
       symbol: 'BTC', side: 'LONG', mode: 'paper',
       getFreshSignal: async () => ({ ...SPOT_SHORT }),
     });
-    expect(out.ok).toBe(true);
-    expect(out.position!.side).toBe('SHORT'); // ← REALIGNED to fresh consensus SHORT
-    expect(out.fitted).toMatch(/REALIGNED to fresh consensus SHORT/i);
+    expect(out.ok).toBe(false);
+    expect(out.error).toMatch(/fresh consensus SHORT/i);
+    expect(out.error).toMatch(/blocked \(no auto-flip\)/i);
+    const j = loadJournal();
+    const flipRej = j.entries.find(e => e.status === 'REJECTED' && e.flippedFrom === 'LONG');
+    expect(flipRej).toBeDefined();
+    expect(flipRej!.flippedTo).toBe('SHORT');
   });
 
   it('LIVE: a STRONG LONG signal sends a BUY order to CoinDCX and books a LONG position', async () => {
@@ -262,7 +272,8 @@ describe('SPOT desk: STRONG 80+ LONG card → trade direction (mirror)', () => {
       getFreshSignal: async () => ({ ...SPOT_SHORT }),
     });
     expect(out.ok).toBe(false);
-    expect(out.error).toMatch(/fresh consensus SHORT hai, aapne LONG/i);
+    expect(out.error).toMatch(/fresh consensus SHORT/i);
+    expect(out.error).toMatch(/blocked \(no auto-flip\)/i);
     // THE mirror certificate line: not a single signed request left the server.
     expect(mockPrivate).not.toHaveBeenCalled();
     expect(loadJournal().entries.at(-1)!.status).toBe('REJECTED');

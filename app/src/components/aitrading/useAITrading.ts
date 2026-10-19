@@ -847,12 +847,12 @@ export interface TradePlanView {
   trapVeto?: boolean;
   zoneWallVeto?: boolean;
   worldIndicators?: {
-    alignedCount: number;
+    alignedCount: number | null;
     totalCount: number;
-    aligned8Count?: number;
+    aligned8Count?: number | null;
     total8Count?: number;
-    confluencePct: number;
-    estimatedWinRatePct: number;
+    confluencePct: number | null;
+    estimatedWinRatePct: number | null;
     directionVerified?: boolean;
     trapVeto?: boolean;
     zoneWallVeto?: boolean;
@@ -943,12 +943,12 @@ export interface MtfDualRow {
   trapVeto?: boolean;
   zoneWallVeto?: boolean;
   worldIndicators?: {
-    alignedCount: number;
+    alignedCount: number | null;
     totalCount: number;
-    aligned8Count?: number;
+    aligned8Count?: number | null;
     total8Count?: number;
-    confluencePct: number;
-    estimatedWinRatePct: number;
+    confluencePct: number | null;
+    estimatedWinRatePct: number | null;
     directionVerified?: boolean;
     trapVeto?: boolean;
     zoneWallVeto?: boolean;

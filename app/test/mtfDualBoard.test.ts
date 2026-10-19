@@ -27,6 +27,14 @@ function planFixture(over = {}) {
     plan: { entry: 100, stopLoss: 99.2, t1: 100.8, t2: 101.6, netRR: { t1: 0.8, t2: 1.7 } },
     tfFit: { verdict: 'OK', ratioT1: 1.1, note: 'ok' },
     costs: { costR: 0.15, roundTripPct: 0.08 },
+    // v21.23.2: production planner hamesha measured worldIndicators attach
+    // karta hai — fixture me bhi (port ke guessed-count era me ye absent tha
+    // aur fuse 7/8 FABRICATE karta tha; ab honest null → unverified).
+    worldIndicators: {
+      alignedCount: 7, totalCount: 8, aligned8Count: 7, total8Count: 8,
+      confluencePct: 88, estimatedWinRatePct: 68, directionVerified: true,
+      trapVeto: false, zoneWallVeto: false,
+    },
     checklist: [], warnings: [], timePlan: {},
     ...over,
   };

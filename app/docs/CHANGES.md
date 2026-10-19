@@ -1,5 +1,64 @@
 # Changelog
 
+## v21.23.2 — SIGNAL-DIRECTION INVERSION FIX (long↔short opposite trades) (2026-10-19)
+
+**User ask: "Trade signals Wrong and opposite jaa rahe hai — long trade signal ka short jaa raha hai, short trade signal ka long jaa raha hai." Deep-pro trace kiya — DO concrete root causes mile, dono fixed + regression-locked.**
+
+### FIXED — BUG A: India LIVE SHORT orders exchange par BUY ban jaate the ("short ka long")
+- **Root cause**: `dhan.js dhanPlaceOrder` ka `buy = side !== 'SELL'` check sirf 'BUY'/'SELL'
+  vocabulary samajhta tha, par India execution paths (executeIndiaSignal entry+SL, watcher
+  trailing-SL, agent SL-update) **'LONG'/'SHORT'** bhejte hain. `'SHORT' !== 'SELL'` → `buy=true`
+  → **SHORT entry BUY order** (journal SHORT, exchange position LONG — P&L ulti).
+  WORSE: SHORT position ka **protective SL bhi SELL** lagta tha — cover karne ke bajaye
+  **double-short** (position unprotected, risk doubled).
+- **Fix**: `dhanOrderBody()` pure builder extract (v21.23.2) — dono vocabularies explicitly
+  map: LONG/BUY → BUY, SHORT/SELL → SELL (entry); SL branch exit-side cover (LONG→SELL,
+  SHORT→BUY). Unknown side BUY-default NAHI karta (conservative SELL). Pure function ab
+  directly testable — pehle ye logic internal `dhanPrivate` call ke peeche chhupi thi,
+  isi wajah se inversion kabhi test se pakda nahi gaya.
+- **Regression**: `test/signalDirectionInversion.test.ts` (7 tests) — full transactionType
+  matrix + triggerPrice validation + unknown-side fail-honest.
+
+### FIXED — BUG B: paper/notify me clicked signal ke OPPOSITE trade silently khul jaata tha ("long ka short")
+- **Root cause**: v21.13 "FLIP REALIGN" (indiaOrders.js + coindcxOrders.js) — fresh consensus
+  flipped side pe trade silently realign kar deta tha (card LONG, trade SHORT) aur
+  **`evaluateExecutionGate` ke anti-flip veto ko bypass** karta tha (gate REALIGNED side pe
+  match hota tha — veto kabhi fire nahi hota tha). LIVE-only tha "kabhi silent flip nahi"
+  invariant; paper/notify me inversion allowed tha.
+- **Fix**: direction conflict = **honest REJECT** (sab modes me — paper/notify/live). Journal
+  me `flippedFrom`/`flippedTo` document hota hai, message user ko naya card refresh karne
+  bolta hai. FLAT/planless (direction-less) case pehle jaisa requested side pe synth (koi
+  conflict nahi — engine ne direction nahi diya). Engine track-record bhi clean: stale-card
+  SL ka blame engine pe nahi jata (trade hi nahi khulta).
+- **Regression**: 9 updated tests (aiOrders, directionProof, indiaOrders) — clicked side ke
+  opposite position count = 0, journal REJECTED + flip documented, LIVE certificate lines
+  (no signed request left server) preserved.
+
+### FIXED — port honesty regressions (72ad0a3 ne v21.23.1 code v21.24.0 fixes ke upar likh diya tha)
+- **mtfDualBoard.js**: worldInd missing par GUESSED aligned8Count (dualAligned ? 7 : 5)
+  fabrication restore hui thi — ab **null = UNVERIFIED** (directionVerified false, heuristic
+  confluence % fabricate nahi hota). Production planner hamesha measured worldIndicators
+  deta hai; sirf partial/synthetic plans me absent.
+- **mtfDualBoard.js**: fallback `ollamaVerdict: '3/3 OLLAMA AI LOCK'` JHOOTA tha jab Ollama
+  offline (rule-based guard = 0 live models). Ab sentinel ka honestLabel — offline pe
+  "Rule-Based Guard n/3", live pe "Live Ollama (...)".
+- **llmSentinel.js**: trio guard ka `|| 6` default count GUESSED 6/8 tha (unmeasured/0 bhi
+  6 ban jaata tha → trio ko vote-milte the). Ab unmeasured → conservative 0.
+
+### FIXED — port ne directionLock.test.js tod diya tha (4 tests remote par hi failing)
+- 72ad0a3 port ne directionLock.js ka API badla (acquire/check/release/get — v21.23.1
+  lineage) par a4d1693 ka purana test (lockDirection/directionLockGate/clearDirectionLock)
+  reh gaya → `__resetDirectionLockForTests is not a function`. New API ke against rewrite
+  (semantics same: one-coin-one-direction, 4h released-cooldown, symbol normalization,
+  snapshot/release).
+
+### Gates
+- `npx tsc --noEmit` — **0 errors**
+- `npm run lint` — **0 errors, 0 warnings**
+- `npx vitest run` — **215 files / 3926 tests PASS** (7 naye inversion regression tests +
+  1 LIVE SHORT wiring test included)
+- Version stamp: 21.23.2 (package.json + src/version.ts + dist/.build-version)
+
 ## v21.23.1 — DIRECTION-LOCK RELEASE-ON-CLOSE + SAPTA LOCK ACQUIRE + HONEST P(WIN) (2026-10-19)
 
 **User ask: latest repo pull kiya ("direction lock guard, MTF dual board improvements") — plan ka zyadatar hissa apply hua, par 2 adhoori cheezein + 1 naya bug. Ye release unhe fix karta hai.**

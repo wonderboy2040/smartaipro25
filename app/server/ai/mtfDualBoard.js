@@ -197,8 +197,18 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
   // v21.22.0 PURE 8 INSTITUTIONAL TOP INDICATORS CONFLUENCE
   // (1. SMC, 2. Liquidity Sweep/Trap, 3. Volume Profile, 4. FVG, 5. ICT, 6. EMA Ribbon, 7. Supply/Demand, 8. Price Action)
   const worldInd = plan?.worldIndicators || null;
-  const worldAligned8Count = Number(worldInd?.aligned8Count) || Math.min(8, Number(worldInd?.alignedCount) || (dualAligned ? 7 : (dir !== 0 ? 5 : 4)));
-  const worldAlignedCount = worldAligned8Count;
+  // v21.23.2 HONESTY RESTORE (port regression): worldInd missing par GUESSED
+  // aligned8Count (dualAligned ? 7 : 5) fabrication wapas aa gayi thi (v21.24.0
+  // audit P2-4 ne hatai thi, port ne v21.23.1 code se replace kar diya). Ab
+  // null = institutional confluence UNVERIFIED — directionVerified false
+  // rehta hai, heuristic confluence % bhi fabricate nahi hota. Production
+  // planner hamesha worldIndicators deta hai; sirf partial/synthetic plans
+  // me absent rehta hai (wahan honest unverified > jhoothe 7/8).
+  const worldAligned8Raw = worldInd != null
+    ? Math.min(8, Number(worldInd?.aligned8Count ?? worldInd?.alignedCount) || 0)
+    : null;
+  const worldAligned8Count = worldAligned8Raw; // number | null
+  const worldAlignedCount = worldAligned8Raw;
   const trapVeto = Boolean(plan?.trapVeto || worldInd?.trapVeto);
   const zoneWallVeto = Boolean(plan?.zoneWallVeto || worldInd?.zoneWallVeto);
   const directionVerified = Boolean(
@@ -271,15 +281,17 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
   //      clamped 52-85 — ELITE row ko bhi exact measured number milta hai, 95/92 kabhi nahi.
   // UI me yahi teeno fields (`pWinCalibrated` / `winRatePct` / `heuristicConfluencePct`) jaate
   // hain; scorecard chip 30d ledger directionHitRate alag se dikhata hai.
-  const heuristicConfluencePct = Number(plan?.heuristicConfluencePct ?? worldInd?.confluencePct ?? Math.round((worldAligned8Count / 8) * 100));
+  const heuristicConfluencePct = worldInd != null
+    ? Number(plan?.heuristicConfluencePct ?? worldInd?.confluencePct ?? Math.round((worldAligned8Count / 8) * 100))
+    : Number.isFinite(Number(plan?.heuristicConfluencePct)) ? Number(plan.heuristicConfluencePct) : null; // unmeasured → koi fabricated confluence % nahi
   const pWinCalibrated = (wp && wp.calibrated && Number.isFinite(Number(wp.pWin))) ? Number(wp.pWin) : null;
   const winRatePct = (() => {
     if (pWinCalibrated != null) return Math.round(Math.min(90, Math.max(40, pWinCalibrated)));
     if (trapVeto || zoneWallVeto || boardOpposes || svaOpposes || councilHardNo || lockOpposes) {
       return Math.min(62, Math.max(48, Math.round(45 + score * 0.25)));
     }
-    if (dualAligned && !reversalRisk && score >= 80 && heuristicConfluencePct >= 75) return Math.min(85, Math.round(55 + score * 0.30));
-    if (dualAligned && !reversalRisk) {
+    if (dualAligned && !reversalRisk && score >= 80 && heuristicConfluencePct != null && heuristicConfluencePct >= 75) return Math.min(85, Math.round(55 + score * 0.30));
+    if (dualAligned && !reversalRisk && heuristicConfluencePct != null) {
       const est = Number(worldInd?.estimatedWinRatePct);
       const base = Number.isFinite(est) && est > 0 ? Math.min(88, Math.max(60, est)) : Math.round(50 + score * 0.34);
       return Math.round(Math.min(85, Math.max(52, (heuristicConfluencePct + base) / 2)));
@@ -376,7 +388,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
       totalCount: 8,
       aligned8Count: worldAligned8Count,
       total8Count: 8,
-      confluencePct: Math.round((worldAligned8Count / 8) * 100),
+      confluencePct: worldAligned8Count != null ? Math.round((worldAligned8Count / 8) * 100) : null,
       estimatedWinRatePct: winRatePct,
       directionVerified: finalDirectionVerified,
       trapVeto,
@@ -578,7 +590,11 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
         ollamaScanModel: ol?.model || 'qwen3:8b',
         ollamaDeepModel: ol?.deepModel || 'deepseek-r1:14b',
         ollamaTrioModels: ol?.trioModels || ['qwen3:8b', 'deepseek-r1:14b', 'qwen2.5vl:7b'],
-        ollamaVerdict: fuse.ollamaTrio?.verdict || '3/3 OLLAMA AI LOCK',
+        // v21.23.2 HONESTY: fallback '3/3 OLLAMA AI LOCK' JHOOTA tha jab Ollama
+        // offline hai (rule-based guard = 0 live models, "3/3 AI LOCK" claim
+        // nahin). Sentinel ka honestLabel use karo — offline pe "Rule-Based
+        // Guard n/3" bolta hai, live pe "Live Ollama (...)".
+        ollamaVerdict: fuse.ollamaTrio?.honestLabel || fuse.ollamaTrio?.verdict || 'RULE-GUARD (local AI offline)',
         councilVerdict: boardSig?.aiCouncil?.verdict || boardSig?.aiConfirm?.verdict || (fuse.dualAligned ? 'CONFIRM' : 'WAIT'),
         councilNote: boardSig?.aiCouncil?.note || boardSig?.aiCouncil?.analysis || fuse.ollamaTrio?.liveNote || null,
       };

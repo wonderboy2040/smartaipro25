@@ -441,6 +441,13 @@ describe('v21.18.0 — Dual-TF Superintelligence Board + Local Ollama + Wallet 1
       plan: { entry: 150, stopLoss: 148.5, t1: 151.5, t2: 153, stopPct: 1.0, netRR: { t1: 0.85, t2: 1.75 } },
       tfFit: { verdict: 'GOOD', ratioT1: 1.5, note: 'good' },
       costs: { costR: 0.12, roundTripPct: 0.1 },
+      // v21.23.2: production planner measured worldIndicators ke saath aata
+      // hai — fixture me bhi (guessed-count fabrication era khatam).
+      worldIndicators: {
+        alignedCount: 7, totalCount: 8, aligned8Count: 7, total8Count: 8,
+        confluencePct: 88, estimatedWinRatePct: 68, directionVerified: true,
+        trapVeto: false, zoneWallVeto: false,
+      },
     };
 
     const earlyFused = fuseDualTf({ symbol: 'SOLUSDT', market: 'CRYPTO', plan: basePlan, modeId: 'INTRADAY' });

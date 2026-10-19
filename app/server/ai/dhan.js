@@ -181,6 +181,45 @@ export async function scripMasterStatus() {
 
 // ---------------- order placement ----------------
 /**
+ * v21.23.2: PURE order-body builder (dhanPlaceOrder se extract) — side-vocabulary
+ * matrix ab DIRECTLY testable hai. Pehle ye logic dhanPlaceOrder ke andar thi aur
+ * internal dhanPrivate call ke peeche chhupi thi — isliye SHORT→BUY inversion
+ * kabhi test se pakda nahi gaya.
+ *
+ * SIGNAL-DIRECTION INVERSION FIX: ye body DO vocabularies se build hoti hai —
+ * India execution paths (executeIndiaSignal entry + broker SL, watcher
+ * trailing-SL, agent SL-update) 'LONG'/'SHORT' bhejte hain, watcher exits
+ * 'BUY'/'SELL'. Purana `String(side) !== 'SELL'` check 'SHORT' ko bhi BUY
+ * treat karta tha:
+ *   • India LIVE SHORT entry → exchange par BUY order (journal SHORT, real
+ *     position LONG — P&L ulti dikhti thi) — "short signal ka long" bug.
+ *   • SHORT position ka protective SL → SELL order (cover karne ke bajaye
+ *     double-short — position unprotected + risk doubled).
+ * Dono vocabularies explicitly map karo; koi bhi unknown value BUY default
+ * nahi karti (fail-honest: SELL bhi nahi — call-site fix maangti hai).
+ */
+export function dhanOrderBody({ symbol, securityId, side, quantity, kind = 'ENTRY', triggerPrice = null }) {
+  const s = String(side || '').toUpperCase();
+  const buy = s === 'BUY' || s === 'LONG';
+  const body = {
+    transactionType: kind === 'SL' ? (buy ? 'SELL' : 'BUY') : buy ? 'BUY' : 'SELL', // SL order is the protective EXIT side
+    exchangeSegment: 'NSE_EQ',
+    productType: 'INTRADAY',
+    orderType: kind === 'SL' ? 'STOP_LOSS_MARKET' : 'MARKET',
+    tradingSymbol: String(symbol).toUpperCase(),
+    securityId: String(securityId),
+    quantity: Math.floor(Number(quantity)),
+    validity: 'DAY',
+  };
+  if (kind === 'SL') {
+    const tp = Number(triggerPrice);
+    if (!(tp > 0)) throw Object.assign(new Error('SL order needs a positive triggerPrice'), { status: 400 });
+    body.triggerPrice = r2(tp);
+  }
+  return body;
+}
+
+/**
  * Place an intraday NSE equity order.
  * kind: 'ENTRY' (MARKET) | 'SL' (STOP_LOSS_MARKET with triggerPrice)
  */
@@ -191,22 +230,7 @@ export async function dhanPlaceOrder({ symbol, side, quantity, kind = 'ENTRY', t
   }
   const qty = Math.floor(Number(quantity));
   if (!(qty >= 1)) throw Object.assign(new Error('quantity must be ≥ 1 share'), { status: 400 });
-  const buy = String(side).toUpperCase() !== 'SELL';
-  const body = {
-    transactionType: kind === 'SL' ? (buy ? 'SELL' : 'BUY') : buy ? 'BUY' : 'SELL', // SL order is the protective EXIT side
-    exchangeSegment: 'NSE_EQ',
-    productType: 'INTRADAY',
-    orderType: kind === 'SL' ? 'STOP_LOSS_MARKET' : 'MARKET',
-    tradingSymbol: String(symbol).toUpperCase(),
-    securityId: String(meta.securityId),
-    quantity: qty,
-    validity: 'DAY',
-  };
-  if (kind === 'SL') {
-    const tp = Number(triggerPrice);
-    if (!(tp > 0)) throw Object.assign(new Error('SL order needs a positive triggerPrice'), { status: 400 });
-    body.triggerPrice = r2(tp);
-  }
+  const body = dhanOrderBody({ symbol, securityId: meta.securityId, side, quantity: qty, kind, triggerPrice });
   const resp = await dhanPrivate('/orders', { method: 'POST', body });
   const orderId = resp?.orderId || null;
   const orderStatus = resp?.orderStatus || (orderId ? 'TRANSIT' : 'UNKNOWN');

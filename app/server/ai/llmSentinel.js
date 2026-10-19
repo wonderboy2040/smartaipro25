@@ -327,8 +327,12 @@ export function evaluateMtfRowWithOllamaTrio(rowCtx = {}) {
   const sym = String(rowCtx.symbol || '').toUpperCase();
   const side = rowCtx.side || 'NONE';
   const superScore = Number(rowCtx.superScore) || 0;
-  const worldAlignedRaw = Number(rowCtx.worldAligned8Count ?? rowCtx.worldAlignedCount) || 6;
-  const worldAligned8 = Math.min(8, worldAlignedRaw);
+  // v21.23.2 HONESTY: `|| 6` default GUESSED 6/8 aligned tha (unmeasured/0
+  // count bhi 6 ban jaata tha → trio ko vote-mil jaate the). Ab count
+  // pass NAHI hua ya 0 measured hai → conservative 0 (count-based vote
+  // grants band; sirf live-LLM confirm vaali seat chalegi).
+  const worldAligned8Raw = Number(rowCtx.worldAligned8Count ?? rowCtx.worldAlignedCount);
+  const worldAligned8 = Math.min(8, Number.isFinite(worldAligned8Raw) ? worldAligned8Raw : 0);
   const aligned = !!rowCtx.aligned;
   const triggerFired = !!rowCtx.triggerFired;
   const netRR = Number(rowCtx.netRR_T2) || 0;

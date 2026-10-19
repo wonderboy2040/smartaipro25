@@ -415,7 +415,7 @@ describe('v20.8.3 frontend stale-build visibility', () => {
     const m = VERSION_TS.match(/APP_VERSION = '([^']+)'/);
     expect(m).toBeTruthy();
     expect(m![1]).toBe(PKG.version);
-    expect(PKG.version).toBe('21.23.1'); // v21.23.1 bump (direction-lock release-on-close + SAPTA lock acquire + honest P(win) — no fabricated 95/92)
+    expect(PKG.version).toBe('21.23.2'); // v21.23.2 bump (signal-direction inversion fix — dhan LONG/SHORT vocabulary + silent FLIP-REALIGN removal + port honesty regressions)
   });
 
   it('Watchdog bat: v20.8.3 title + auto-build line', () => {

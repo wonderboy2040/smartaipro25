@@ -549,15 +549,16 @@ export async function executeSignal(opts) {
   const gates = { minConfidence: cfg.minConfidence, minAgreement: cfg.minAgreement };
   const { evaluateExecutionGate, buildTradePlan, fitPlanToRiskCap, maxSaneLeverage } = await import('./ensemble.js');
 
-  // PAPER/NOTIFY practice fallback: the FRESH consensus can be FLAT/planless,
-  // can have DECAYED below the ACTION floor, or can have FLIPPED side versus
-  // the card the user clicked (board cached vs fresh re-run race — the direct
-  // cause of "paper trading start hi nhi ho raha"). Practice mode (v21.13):
-  // a FLIPPED fresh consensus REALIGNS the trade to the engine's current
-  // side (never trades against the fresh view); a FLAT/planless view
-  // synthesizes a plan at the live price for the requested side. The
-  // journal records the honest fresh grade. LIVE never enters this branch
-  // (full gauntlet below).
+  // PAPER/NOTIFY practice fallback: the FRESH consensus can be FLAT/planless
+  // or can have DECAYED below the ACTION floor. V21.23.2 SIGNAL-DIRECTION
+  // INVERSION FIX: v21.13 ka silent FLIP-REALIGN HATA DIYA — pehle fresh
+  // consensus ka flipped side (clicked card ke OPPOSITE) trade khul jaata
+  // tha (user ko signal LONG dikhta, trade SHORT khulta — "long trade signal
+  // ka short jaa raha hai") aur ye evaluateExecutionGate ke anti-flip veto
+  // ko bypass karta tha (gate REALIGNED side pe match hota tha). Ab
+  // direction conflict = honest REJECT — LIVE ka "kabhi silent flip nahi"
+  // invariant ab HAR mode me hai. FLAT/planless (direction-less) pehle
+  // jaisa requested side pe synth hota hai. LIVE is branch me nahi aata.
   let effectiveSignal = signal;
   let synthNote = null;
   // v12.7 (recheck R1-#9): an ABSENT side no longer silently defaults
@@ -569,24 +570,28 @@ export async function executeSignal(opts) {
     : (signal.side === 'SHORT' || signal.side === 'LONG' ? signal.side : 'LONG');
   const sideConflict = signal.side !== 'FLAT' && signal.side !== reqSide;
   const belowFloor = signal.grade !== 'STRONG' && signal.grade !== 'ACTION';
-  if (wantMode !== 'live' && (sideConflict || signal.side === 'FLAT' || !signal.plan)) {
-    // v21.13 FLIP REALIGN: sideConflict me pehle trade STALE clicked side
-    // pe khulta tha — engine ki FRESH view ke against entry (the "opposite"
-    // track-record amplifier: card 60s-cached LONG, fresh consensus SHORT,
-    // trade LONG → SL → journal engine ko blame karta tha). Ab fresh
-    // DIRECTIONAL consensus ki side hi practice hoti hai (fresh plan
-    // available → wahi; FLAT/no-plan → user ki requested side pe synth —
-    // a direction-less fresh view never mints a side).
-    const openSide = sideConflict ? signal.side : reqSide;
+  if (sideConflict) {
+    // v21.23.2: clicked/signal side ke OPPOSITE trade KABHI nahi khulta.
+    // Stale-card flip ka honest answer BLOCK hai — silent inversion nahi
+    // (user complaint: "long trade signal ka short jaa raha hai / short ka
+    // long"). Journal me flip document hota hai; engine track-record pe
+    // stale-side SL ka blame bhi nahi jata.
+    return reject(
+      `Direction conflict: fresh consensus ${signal.side} hai, ${reqSide} signal/card pe trade maara tha — signal FLIP ho gaya (whipsaw window). Entry BLOCKED — silent auto-flip kabhi nahi hota. Naya ${signal.side} card refresh karke confirm karo.`,
+      `Signal flip: fresh consensus ${signal.side} ≠ requested ${reqSide} — trade blocked (no auto-flip)`,
+      { flippedFrom: reqSide, flippedTo: signal.side },
+    );
+  }
+  if (wantMode !== 'live' && (signal.side === 'FLAT' || !signal.plan)) {
+    // FLAT/planless (direction-less) → REQUESTED side pe practice plan synth
+    // (a direction-less fresh view never mints a side; side caller ki hai).
     const synthPlan = buildTradePlan(
-      { side: openSide, dir: openSide === 'LONG' ? 1 : -1 },
+      { side: reqSide, dir: reqSide === 'LONG' ? 1 : -1 },
       { ltp: signal.ltp, ind: {} }, 'CRYPTO',
     );
     if (synthPlan && signal.ltp > 0) {
-      effectiveSignal = { ...signal, side: openSide, plan: synthPlan };
-      synthNote = sideConflict
-        ? `REALIGNED to fresh consensus ${signal.side} ${signal.confidence}% (clicked card was stale-flipped; engine's current view hi practice hota hai)`
-        : `practice plan @ live price (fresh consensus: ${signal.side} ${signal.confidence}%)`;
+      effectiveSignal = { ...signal, side: reqSide, plan: synthPlan };
+      synthNote = `practice plan @ live price (fresh consensus: ${signal.side} ${signal.confidence}% — direction-less, requested side pe synth)`;
     }
   }
   // v9.0.2: honest disclosure when the fresh consensus matched the request
@@ -615,10 +620,9 @@ export async function executeSignal(opts) {
     } // else: leave the plan as-is — the gate rejects with the honest reason
   }
   const verdict = evaluateExecutionGate(effectiveSignal, {
-    // v21.13: PAPER/NOTIFY practice the REALIGNED trade side se gate hota
-    // hai (fresh view pe realign, phir chase/UCV/grade vetoes guard karte
-    // hain). LIVE keeps the STRICT requested-vs-fresh match — the
-    // no-auto-flip veto is LIVE-only by design (kabhi silent flip nahi).
+    // v21.23.2: gate ab HAMESHA effective (conflict-free) side pe hota hai —
+    // REALIGN branch hat chuka hai, isliye evaluateExecutionGate ka anti-flip
+    // veto (fresh ≠ requested → reject) ab kabhi bypass nahi hota.
     side: wantMode === 'live' ? (side || effectiveSignal.side) : (effectiveSignal.side || side), gates,
     requireStrong: wantMode === 'live',
     maxAgeMs: wantMode === 'live' ? 90_000 : 600_000,

@@ -8,6 +8,10 @@
 //     blocked (one-coin-one-direction), expiry ke baad allowed
 //   • resolveDirection: board/SVA/council conflicts ka single source
 //   • mtfLedger: T1/SL outcome walk + scorecard honest verdicts
+// v21.23.2 PORT FIX: 72ad0a3 port ne directionLock.js ka API badal diya
+// (acquire/check/release/get — v21.23.1 lineage) par ye test file purane
+// API (lockDirection/directionLockGate/...) pe thi → 4 tests remote par
+// hi failing the. New API ke against rewrite — semantics same.
 // ============================================================
 import { describe, it, expect, beforeEach } from 'vitest';
 import fs from 'node:fs';
@@ -20,8 +24,8 @@ process.env.SMARTAI_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mtf-ledger
 process.env.MTF_AUTO_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'mtf-auto-dl-'));
 
 import {
-  lockDirection, directionLockGate, directionLockSnapshot, clearDirectionLock,
-  __resetDirectionLockForTests, DIRECTION_LOCK_DEFAULT_BLOCK_MIN,
+  acquireDirectionLock, checkDirectionLock, getDirectionLocks, releaseDirectionLock,
+  __resetDirectionLocksForTests,
 } from '../server/ai/directionLock.js';
 import { resolveDirection } from '../server/ai/resolveDirection.js';
 import {
@@ -30,39 +34,42 @@ import {
 } from '../server/ai/mtfLedger.js';
 
 describe('directionLock — cross-engine one-coin-one-direction', () => {
-  beforeEach(() => __resetDirectionLockForTests());
+  beforeEach(() => __resetDirectionLocksForTests());
 
   it('locks the symbol on trade-open; same side allowed, OPPOSITE blocked', () => {
-    lockDirection({ symbol: 'BTCUSDT', market: 'CRYPTO', side: 'LONG', source: 'mtf-auto' });
-    expect(directionLockGate({ symbol: 'BTC', market: 'CRYPTO', side: 'LONG' }).allowed).toBe(true);
-    const g = directionLockGate({ symbol: 'B-BTC_USDT', market: 'FUTURES', side: 'SHORT' });
+    acquireDirectionLock({ symbol: 'BTCUSDT', side: 'LONG', source: 'mtf-auto' });
+    expect(checkDirectionLock('BTC', 'LONG').allowed).toBe(true);
+    const g = checkDirectionLock('B-BTC_USDT', 'SHORT');
     expect(g.allowed).toBe(false);
-    expect(g.remainingMin).toBeGreaterThan(0);
+    expect(g.conflict).toBe(true);
     expect(g.reason).toMatch(/direction lock/i);
-    expect(g.lockSide).toBe('LONG');
+    expect(g.lockedSide).toBe('LONG');
   });
 
-  it('opposite side allowed again after the 4h window expires', () => {
+  it('opposite side allowed again after the 4h cooldown expires (released lock)', () => {
     const now = Date.now();
-    lockDirection({ symbol: 'RELIANCE', market: 'INDIA', side: 'SHORT', source: 'auto-agent', now: now - (DIRECTION_LOCK_DEFAULT_BLOCK_MIN + 5) * 60_000 });
-    expect(directionLockGate({ symbol: 'RELIANCE', market: 'INDIA', side: 'LONG', now }).allowed).toBe(true);
+    // v21.23.1 semantics: ACTIVE lock kabhi expire nahi hota (release-on-close
+    // hook se active=false hota hai) — cooldown released lock par chalta hai.
+    acquireDirectionLock({ symbol: 'RELIANCE', side: 'SHORT', source: 'auto-agent', now: now - (245) * 60_000 });
+    releaseDirectionLock('RELIANCE', { now: now - (245) * 60_000 }); // position closed 4h+ pehle
+    expect(checkDirectionLock('RELIANCE', 'LONG', { now }).allowed).toBe(true);
   });
 
   it('symbol normalization: BTCUSDT / B-BTC_USDT / btc → same lock domain', () => {
-    lockDirection({ symbol: 'SOL-USDT', market: 'CRYPTO', side: 'LONG', source: 'test' });
-    expect(directionLockGate({ symbol: 'SOLUSDT', market: 'METALS'.replace('METALS', 'FUTURES'), side: 'SHORT' }).allowed).toBe(false);
-    expect(directionLockGate({ symbol: 'sol', market: 'CRYPTO', side: 'SHORT' }).allowed).toBe(false);
-    // INDIA domain alag hai — NSE RELIANCE perp-domain lock se collide nahi
-    expect(directionLockGate({ symbol: 'RELIANCE', market: 'INDIA', side: 'LONG' }).allowed).toBe(true);
+    acquireDirectionLock({ symbol: 'SOL-USDT', side: 'LONG', source: 'test' });
+    expect(checkDirectionLock('SOLUSDT', 'SHORT').allowed).toBe(false);
+    expect(checkDirectionLock('sol', 'SHORT').allowed).toBe(false);
+    // unlocked symbol par koi spurious block nahi
+    expect(checkDirectionLock('RELIANCE', 'LONG').allowed).toBe(true);
   });
 
-  it('snapshot lists active locks; clearDirectionLock unlocks', () => {
-    lockDirection({ symbol: 'ETH', market: 'CRYPTO', side: 'SHORT', source: 'protrader-auto' });
-    const snap = directionLockSnapshot();
+  it('snapshot lists active locks; release unlocks', () => {
+    acquireDirectionLock({ symbol: 'ETH', side: 'SHORT', source: 'protrader-auto' });
+    const snap = getDirectionLocks();
     expect(snap.length).toBe(1);
     expect(snap[0].side).toBe('SHORT');
-    expect(clearDirectionLock('ETH', 'CRYPTO')).toBe(true);
-    expect(directionLockGate({ symbol: 'ETH', market: 'CRYPTO', side: 'LONG' }).allowed).toBe(true);
+    expect(releaseDirectionLock('ETH', { clearCooldown: true })).toBe(true);
+    expect(checkDirectionLock('ETH', 'LONG').allowed).toBe(true);
   });
 });
 

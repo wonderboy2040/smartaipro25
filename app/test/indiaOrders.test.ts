@@ -171,15 +171,21 @@ describe('India gauntlet — gates', () => {
     expect(out.fitted).toMatch(/practice plan @ live price/i);
   });
 
-  it('v21.13: PAPER on a side-flip (fresh SHORT, clicked LONG) REALIGNS to the fresh side', async () => {
-    // v9.0.2 opened the STALE clicked side (engine ke fresh view ke
-    // against) — v21.13 me engine's CURRENT view hi practice hota hai
-    // (crypto path ke saath parity).
+  it('v21.23.2: PAPER on a side-flip (fresh SHORT, clicked LONG) BLOCKS — opposite-side entry kabhi nahi', async () => {
+    // v21.13 me flipped fresh side silently khul jaata tha (crypto path ke
+    // saath "parity") — clicked LONG, trade SHORT. v21.23.2 signal-direction
+    // inversion fix: conflict = honest REJECT (crypto path ke saath naya
+    // parity — dono desk BLOCK karte hain).
     const flip = { ...STRONG_IN(), side: 'SHORT' };
     const out = await executeIndiaSignal({ symbol: 'RELIANCE', side: 'LONG', mode: 'paper', getFreshIndiaSignal: async () => flip });
-    expect(out.ok).toBe(true);
-    expect(out.position!.side).toBe('SHORT'); // REALIGNED to fresh consensus
-    expect(out.fitted).toMatch(/REALIGNED to fresh consensus SHORT/i);
+    expect(out.ok).toBe(false);
+    expect(out.error).toMatch(/fresh consensus SHORT/i);
+    expect(out.error).toMatch(/blocked \(no auto-flip\)/i);
+    const j = loadJournal();
+    expect(j.positions.filter(p => p.market === 'INDIA').length).toBe(0);
+    const rej = j.entries.find(e => e.status === 'REJECTED' && e.flippedFrom === 'LONG');
+    expect(rej).toBeDefined();
+    expect(rej!.flippedTo).toBe('SHORT');
   });
 
   it('risk auto-fit: an over-cap paper stop is fitted, never bounced (v6.4 policy, India too)', async () => {
@@ -210,18 +216,23 @@ describe('India gauntlet — sizing + journal caps', () => {
     expect(j.entries.at(-1)!.status).toBe('FILLED');
   });
 
-  it('v20.3: PAPER practice fill against a FLIPPED consensus is stamped relaxed (calibration corpus stays clean)', async () => {
-    // request SHORT while the fresh consensus says LONG → practice synth plan
+  it('v21.23.2: PAPER against a FLIPPED consensus is BLOCKED (calibration corpus stays clean — realigned trades hi nahi bante)', async () => {
+    // request SHORT while the fresh consensus says LONG → v21.13 me ye silently
+    // LONG realign ho jaata tha (v20.3 relaxed-stamp) — clicked side ke OPPOSITE
+    // trade. v21.23.2 inversion fix: honest BLOCK. Relaxed-stamp wale realigned
+    // trades ab exist hi nahi karte — corpus clean + direction honest.
     const out = await executeIndiaSignal({
       symbol: 'RELIANCE', mode: 'paper', side: 'SHORT',
       getFreshIndiaSignal: async () => STRONG_IN(),
     });
-    expect(out.ok).toBe(true);
-    const raw = __ledgerRaw();
-    const e = raw.entries.at(-1);
-    expect(e?.market).toBe('INDIA');
-    expect(e?.mode).toBe('paper');
-    expect(e?.relaxed).toBe(true);
+    expect(out.ok).toBe(false);
+    expect(out.error).toMatch(/fresh consensus LONG/i);
+    expect(out.error).toMatch(/blocked \(no auto-flip\)/i);
+    const j = loadJournal();
+    expect(j.positions.filter(p => p.market === 'INDIA').length).toBe(0);
+    expect(j.entries.at(-1)!.status).toBe('REJECTED');
+    expect(j.entries.at(-1)!.flippedFrom).toBe('SHORT');
+    expect(j.entries.at(-1)!.flippedTo).toBe('LONG');
   });
 
   it('PAPER never dead-ends on share price: 1-share practice fallback with honest note', async () => {
@@ -294,6 +305,28 @@ describe('India gauntlet — LIVE Dhan path', () => {
     expect(p.securityId).toBe('2885');
     expect(j.entries.at(-1)!.status).toBe('SUBMITTED');
     expect(j.entries.at(-1)!.reason).toMatch(/broker SL-M armed/);
+  });
+
+  it('v21.23.2 LIVE SHORT signal → entry side SHORT (real dhan.js: SELL) + SL side SHORT (real dhan.js: BUY cover)', async () => {
+    // "short trade signal ka long jaa raha hai" — LIVE wiring regression:
+    // executeIndiaSignal SHORT side ko dhanPlaceOrder tak SHORT hi bhejta
+    // hai (pehle dhan.js usko BUY bana deta tha — journal SHORT, exchange
+    // position LONG). Matrix proof: signalDirectionInversion.test.ts.
+    const out = await executeIndiaSignal({
+      symbol: 'RELIANCE', side: 'SHORT', mode: 'live',
+      getFreshIndiaSignal: async () => STRONG_IN({ side: 'SHORT' }),
+    });
+    expect(out.ok).toBe(true);
+    expect(mockDhanPlace).toHaveBeenCalledTimes(2);
+    const [entryArgs] = mockDhanPlace.mock.calls[0];
+    expect(entryArgs.kind).toBe('ENTRY');
+    expect(entryArgs.side).toBe('SHORT'); // → exchange SELL order
+    const [slArgs] = mockDhanPlace.mock.calls[1];
+    expect(slArgs.kind).toBe('SL');
+    expect(slArgs.side).toBe('SHORT'); // → exchange BUY cover (double-sell nahi)
+    const j = loadJournal();
+    expect(j.positions[0].side).toBe('SHORT');
+    expect(j.positions[0].mode).toBe('live');
   });
 
   it('SL placement failure does NOT fail the trade (watcher still guards)', async () => {
