@@ -368,14 +368,18 @@ describe('v21.23.6 source pins', () => {
     expect(LINK_SRC).toContain('const reversalRiskHint = Boolean(boardRow && (');
   });
 
-  it('pullback tolerance constants: 45% ratio AND 0.28R absolute floor', () => {
-    expect(LINK_SRC).toContain('peakGivebackRatio >= 0.45 && givebackR >= 0.28 && feeCovered');
+  it('pullback tolerance constants: 45% ratio AND 0.28R absolute floor (v21.23.7: ab profile-driven — NORMAL default inhi values pe)', () => {
+    // v21.23.7: deep monitor ab volTrail.js profile se chalta hai — NORMAL
+    // class (default) ke liye giveback tolerance 45% + 0.28R hi hai (v21.23.6-identical);
+    // LOW 42%/0.25R · HIGH 55%/0.38R · EXTREME 65%/0.50R volTrail21237.test.ts me locked.
+    expect(LINK_SRC).toContain('peakGivebackRatio >= (profile.givebackRatioPct / 100) && givebackR >= profile.givebackAbsFloorR && feeCovered');
   });
 
-  it('stage 5 chandelier 0.50R + stage 4 giveback 0.45R (was 0.30/0.32)', () => {
-    expect(LINK_SRC).toContain('peakPrice - 0.50 * risk');
-    expect(LINK_SRC).toContain('Math.max(0.65, +(peakR - 0.45).toFixed(2))'); // stage-4 ratchet
+  it('stage 5 chandelier + stage 4 giveback ab vol-adaptive profile se (v21.23.7: NORMAL = 0.50R / 0.45R — v21.23.6-identical)', () => {
+    expect(LINK_SRC).toContain('profile.stage5ChandelierR * risk');
+    expect(LINK_SRC).toContain('Math.max(0.65, +(peakR - profile.stage4GivebackR).toFixed(2))'); // stage-4 ratchet
     expect(LINK_SRC).not.toContain('peakPrice - 0.30 * risk'); // old tight chandelier GONE
+    expect(LINK_SRC).not.toContain('peakPrice - 0.50 * risk'); // hardcoded chandelier GONE — profile-driven only
   });
 
   it('cooldown + elite gates wired (config default 5 + helper + tick gate)', () => {

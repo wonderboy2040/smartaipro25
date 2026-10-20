@@ -36,7 +36,7 @@ import { getSignals, getDeepSignal, getFreshSignalForExec, getFreshFuturesSignal
 // symbol happened to be a paper position (setScanSymbols existed but was
 // only ever called by /api/intraday-scanner, which no frontend polls).
 import { setScanSymbols as intradaySetScanSymbols, getLatestQuotes } from '../intraday/stream.js';
-import { openPaperTrade as openPaperTradeExec, closePaperTrade as closePaperTradeExec, getPaperSummary as getPaperSummaryExec, updatePaperTradeStopLoss, evaluatePaper } from '../intraday/paperTrading.js';
+import { openPaperTrade as openPaperTradeExec, closePaperTrade as closePaperTradeExec, getPaperSummary as getPaperSummaryExec, updatePaperTradeStopLoss, updatePaperTradeT1ClosePct, evaluatePaper } from '../intraday/paperTrading.js';
 // v20.2 ACCOUNTABILITY: the board's ACTIONABLE signals (STRONG + ACTION
 // with a plan) feed the signal Track Record — the panel's "har published
 // signal track hota hai" promise is finally true for the board the user
@@ -95,7 +95,7 @@ import { portfolioRedFlags, narratePortfolio } from './portfolioNarrative.js';
 import { manualReversalCycles } from './manualTrades.js';
 import {
   executeGlobalSignal, watchGlobalPositions, closeGlobalPosition,
-  globalFuturesMarketsView, fetchGlobalQuotes,
+  globalFuturesMarketsView, fetchGlobalQuotes, fetchGlobalLtpMap,
 } from './globalFutures.js';
 // v10.5.3 REALTIME POSITIONS — SSE diff-push of open-position LTP/PnL
 // (replaces the 5s REST poll the console used to call "ULTRA STREAM").
@@ -265,7 +265,12 @@ async function _recheckFetchLtp(market, symbols) {
       // Also resolve XAU / XAG metals perps if any are still missing
       const stillMissing = missing.filter(s => !out.has(s) && (s === 'XAU' || s === 'XAG'));
       if (stillMissing.length > 0) {
-        const { fetchMetalsPrices } = await import('./metals.js').catch(() => ({ fetchMetalsPrices: null }));
+        // v21.23.9: `./metals.js` repo me EXIST hi nahi karta tha — dono
+        // import sites hamesha silently {fetchMetalsPrices: null} me
+        // degrade hote the → XAU/XAG quote fallback legs (Binance fapi →
+        // gold-api → Yahoo COMEX) 100% DEAD. Ab futures.js ka real
+        // fetchMetalsPrices (same row shape) resolve hota hai.
+        const { fetchMetalsPrices } = await import('./futures.js').catch(() => ({ fetchMetalsPrices: null }));
         if (typeof fetchMetalsPrices === 'function') {
           const mRows = await fetchMetalsPrices({ maxAgeMs: 15000 }).catch(() => null);
           for (const r of (Array.isArray(mRows) ? mRows : [])) {
@@ -309,13 +314,10 @@ export async function runApprovedExecution(opts = {}) {
   return _approvedExec(opts);
 }
 
-// v20.7.8 [H2]: re-entrancy guard for the 90s auto-executor. The old loop
-// only checked the journal for an open auto position — but the fill only
-// lands in the journal AFTER executeSignal returns. A gauntlet run slower
-// than 90s (upstream brownout: TV scans 12s×2, candle fetches 8s×3, then
-// exchange APIs) let the NEXT tick re-pass the check and place a SECOND
-// live order. Same _ticking discipline agentTick/proTraderTick already use.
-let _autoBusy = false;
+// v20.7.8 [H2] legacy note: the 90s spot auto-executor's `_autoBusy`
+// re-entrancy guard (fill journal me land hone se PEHLE next tick doosra
+// order laga deta tha) v21.23.8 me hata diya gaya — wo loop ab PERMANENTLY
+// disabled no-op shell hai (SPOT FULL STOP), koi gauntlet run nahi hota.
 
 // v20.7.8 [M3]: the registrar arms ~12 live loops (watchers, agents, auto-
 // executor, insta-push, recheck, monitors). A second registration (test
@@ -772,11 +774,31 @@ export function registerAITradingRoutes(app, deps) {
       return Number(COINDCX_INR_PER_USDT) || 102;
     } catch { return 102; }
   };
+  // v21.23.8 EQUITY SIM auto-trade support: GLOBALFUTURES (USDC sim) quotes
+  // ko qualified `GLOBALFUTURES|SYM` keys ke saath auto-trade quote map me
+  // overlay karo — deep monitor sweep, evaluatePaper (3s fast loop) aur
+  // /mtf-auto/status teeno isi se EQUITY SIM trades ke live price padhte
+  // hain (paper engine ka `_quoteFor` inhi qualified keys pe truth dhundta
+  // hai; plain-key INR spot quote se cross-domain mix kabhi nahi).
+  const mtfGlobalQuoteOverlay = async () => {
+    const out = {};
+    try {
+      const gq = await fetchGlobalLtpMap();
+      if (gq && typeof gq.get === 'function') {
+        for (const [sym, row] of gq) {
+          const px = Number(row?.price ?? row);
+          if (sym && px > 0) out[`GLOBALFUTURES|${String(sym).toUpperCase()}`] = { price: px };
+        }
+      }
+    } catch { /* non-fatal — sim trades board-row ltp fallback pe chalte hain */ }
+    return out;
+  };
   const mtfUsdtQuoteMap = async () => {
     try {
-      const [{ fetchFuturesPrices }, { fetchMetalsPrices }] = await Promise.all([
+      // v21.23.9: `./metals.js` dead-import fix — fetchMetalsPrices ab
+      // futures.js se aata hai (wahi 3-leg metals chain).
+      const [{ fetchFuturesPrices, fetchMetalsPrices }] = await Promise.all([
         import('./futures.js'),
-        import('./metals.js').catch(() => ({ fetchMetalsPrices: null })),
       ]);
       const [rows, metalRows] = await Promise.all([
         fetchFuturesPrices({ maxAgeMs: 15000 }).catch(() => null),
@@ -1167,6 +1189,9 @@ export function registerAITradingRoutes(app, deps) {
         } catch { /* non-fatal */ }
       }
       const combinedQuotes = { ...(getLatestQuotes().data || {}) };
+      // v21.23.8: EQUITY SIM (GLOBALFUTURES) qualified quotes overlay — deep
+      // monitor status EQUITY SIM trades ka live USDC price inhi se dikhata hai.
+      Object.assign(combinedQuotes, await mtfGlobalQuoteOverlay());
       try {
         const usdtMap = await mtfUsdtQuoteMap();
         if (usdtMap instanceof Map) {
@@ -1279,8 +1304,8 @@ export function registerAITradingRoutes(app, deps) {
       const liveCtx = await mtfAutoLiveCtx(cfg);
       const out = await mtfAutoTick({
         boards,
-        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, getPaperSummary: getPaperSummaryExec },
-        quotes: getLatestQuotes().data,
+        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
+        quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
         killSwitch,
         fx: fxLive,
         usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
@@ -3086,8 +3111,8 @@ export function registerAITradingRoutes(app, deps) {
       }
       await mtfAutoTick({
         boards,
-        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, getPaperSummary: getPaperSummaryExec },
-        quotes: getLatestQuotes().data,
+        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
+        quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
         fx: fxLive,
         usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
         siteLiveActive: liveCtx.siteLiveActive,
@@ -3115,6 +3140,9 @@ export function registerAITradingRoutes(app, deps) {
       const baseSt = mtfAutoStatus();
       if (!baseSt || !(baseSt.openCount > 0)) return;
       const combinedQuotes = { ...(getLatestQuotes()?.data || {}) };
+      // v21.23.8: EQUITY SIM overlay — 3s fast loop ka evaluatePaper is qualified
+      // GLOBALFUTURES|SYM quotes se EQUITY SIM paper trades ke SL/T1/T2 evaluate karta hai.
+      Object.assign(combinedQuotes, await mtfGlobalQuoteOverlay());
       const usdtMap = await mtfUsdtQuoteMap().catch(() => null);
       if (usdtMap instanceof Map) {
         for (const [sym, px] of usdtMap.entries()) {
@@ -3138,7 +3166,11 @@ export function registerAITradingRoutes(app, deps) {
             await updateCoinDcxPositionSl({
               symbol: tr.symbol,
               positionId: tr.livePositionId,
-              newStopLoss: tr.trailedStopLoss,
+              // v21.23.9: pehle `newStopLoss:` pass hota tha jabki signature
+              // `stopLoss` padhta hai → har pass {ok:false,'invalid stopLoss'}
+              // early-return → 3s ultra-fast LIVE exchange SL sync SILENT
+              // DEAD CODE tha (15s deep monitor hi sync kar raha tha).
+              stopLoss: tr.trailedStopLoss,
               takeProfit: tr.tp1Hit ? tr.t2 : tr.t1,
             }).catch(() => null);
           }
@@ -3211,6 +3243,45 @@ export function registerAITradingRoutes(app, deps) {
   // Telegram (own 30-min dedupe) and the /api/ai/signal-recheck panel
   // view. AI_SIGNAL_RECHECK=off disables. When no STRONG/ACTION
   // signals exist the tick is a few map reads (free).
+  // v21.23.7 ULTRA-FAST TREND CAPTURE: onAutoTradeDeepTick ko NAMED const
+  // me hoist kiya — 15s recheck ke alawa 10s opportunistic fast-entry probe
+  // (neeche) bhi isi full evaluation path ko chalata hai. Trigger fire →
+  // entry latency worst-case ~15-21s se ghatakar ~10s (warm board se).
+  const onAutoTradeDeepTick = async () => {
+      try {
+        const cfg = loadMtfAutoConfig();
+        const liveCtx = await mtfAutoLiveCtx(cfg);
+        await liveCtx.syncLivePositions();
+        const hasOpenLinked = (mtfAutoStatus()?.openCount || 0) > 0;
+        if (!mtfAutoEnabled() && !hasOpenLinked) return;
+        const fxLive = await mtfLiveFx();
+        const boards = {};
+        const hasOpenIndia = (mtfAutoStatus()?.book || []).some(b => b.status === 'OPEN' && b.market === 'INDIA');
+        for (const market of ['INDIA', 'CRYPTO']) {
+          const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
+          if (!on) continue;
+          if (market === 'INDIA' && !isNseOpen() && !hasOpenIndia) continue;
+          boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, fx: fxLive }).catch(() => null);
+        }
+        await mtfAutoTick({
+          boards,
+          // v21.23.7: updatePaperTradeT1ClosePct — deep monitor LIVE vol-class
+          // shift pe paper trade ka TP1 partial % refresh karta hai (volTrail).
+          paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
+          quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
+          fx: fxLive,
+          usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
+          siteLiveActive: liveCtx.siteLiveActive,
+          walletEquityINR: liveCtx.walletEquityINR,
+          syncLivePositions: liveCtx.syncLivePositions,
+          liveExecute: liveCtx.liveExecute,
+          liveUpdateSl: liveCtx.liveUpdateSl,
+          liveClose: liveCtx.liveClose,
+          notify: sendTelegram,
+        });
+      } catch { /* non-fatal */ }
+    };
+
   startSignalRecheckLoop({
     getSignals,
     getDeepSignal,
@@ -3231,39 +3302,63 @@ export function registerAITradingRoutes(app, deps) {
       }
       return outBoards;
     },
-    onAutoTradeDeepTick: async () => {
-      try {
-        const cfg = loadMtfAutoConfig();
-        const liveCtx = await mtfAutoLiveCtx(cfg);
-        await liveCtx.syncLivePositions();
-        const hasOpenLinked = (mtfAutoStatus()?.openCount || 0) > 0;
-        if (!mtfAutoEnabled() && !hasOpenLinked) return;
-        const fxLive = await mtfLiveFx();
-        const boards = {};
-        const hasOpenIndia = (mtfAutoStatus()?.book || []).some(b => b.status === 'OPEN' && b.market === 'INDIA');
-        for (const market of ['INDIA', 'CRYPTO']) {
-          const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
-          if (!on) continue;
-          if (market === 'INDIA' && !isNseOpen() && !hasOpenIndia) continue;
-          boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, fx: fxLive }).catch(() => null);
-        }
-        await mtfAutoTick({
-          boards,
-          paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, getPaperSummary: getPaperSummaryExec },
-          quotes: getLatestQuotes().data,
-          fx: fxLive,
-          usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
-          siteLiveActive: liveCtx.siteLiveActive,
-          walletEquityINR: liveCtx.walletEquityINR,
-          syncLivePositions: liveCtx.syncLivePositions,
-          liveExecute: liveCtx.liveExecute,
-          liveUpdateSl: liveCtx.liveUpdateSl,
-          liveClose: liveCtx.liveClose,
-          notify: sendTelegram,
-        });
-      } catch { /* non-fatal */ }
-    },
+    onAutoTradeDeepTick,
   });
+
+  // v21.23.7 ULTRA-FAST TREND CAPTURE — 10s opportunistic ENTRY PROBE
+  // (user: "long or short trade signals trend ultra fast se capture hona
+  // chahiye"). Design HONEST + FREE:
+  //   • Probe sirf WARM cached boards (≤8s purane — peekDualMtfBoards) padhta
+  //     hai — board recompute KABHI nahi (compute cost zero).
+  //   • Cheap local pre-gates pehle: auto-link ON, desks on, kill off,
+  //     session/position budget clear. Cooldown/quota/elite/anti-chase SAB
+  //     gates escalation ke ANDAR mtfAutoTick me re-check hote hain — probe
+  //     unhe bypass nahi karta, sirf "koi candidate dikh raha hai?" decide
+  //     karta hai.
+  //   • Candidate dikhe (tier ELITE/STRONG ya score>=minScore, LONG/SHORT,
+  //     not-already-open, autoBlockers clear) → FULL onAutoTradeDeepTick
+  //     escalation (fresh boards + live wallet ctx + har gate).
+  //   • Headless (koi warm board nahi) → probe no-op; 15s recheck + 60s sweep
+  //     backbone waise hi chalte hain. Busy-guard + 8s escalation dedup.
+  let _fastProbeBusy = false;
+  let _lastProbeEscalateAt = 0;
+  const fastEntryProbeLoop = setInterval(async () => {
+    if (_fastProbeBusy) return;
+    _fastProbeBusy = true;
+    try {
+      if (!mtfAutoEnabled()) return;
+      const cfg = loadMtfAutoConfig();
+      if (!(cfg?.desks?.india || cfg?.desks?.crypto)) return;
+      const st = mtfAutoStatus();
+      const openCount = st?.openCount || 0;
+      const isLiveSession = cfg.executionMode === 'live' || st?.executionMode === 'live' || st?.siteLiveActive === true;
+      // 1-session-1-trade lock (LIVE) / max positions (paper) — full tick
+      // inhe re-check karta hai; ye sirf FREE zero-cost bail-out hai.
+      if (isLiveSession && openCount >= 1) return;
+      if (openCount >= (cfg.maxOpenPositions || 3)) return;
+      try { if (loadConfig()?.killSwitch === true) return; } catch { /* non-fatal */ }
+      const warm = peekDualMtfBoards(8_000);
+      if (!Array.isArray(warm) || warm.length === 0) return;
+      const minScore = Math.max(75, Number(cfg.minScore) || 75);
+      const openSyms = new Set((st?.book || [])
+        .filter(b => b.status === 'OPEN')
+        .map(b => String(normalizeLinkSymbol(b.symbol, b.market)).toUpperCase()));
+      const hot = warm.some(bd => bd?.ok && Array.isArray(bd.rows) && bd.rows.some(r =>
+        r?.ok
+        && (r.side === 'LONG' || r.side === 'SHORT')
+        && (r.tier === 'ELITE' || r.tier === 'STRONG' || Number(r.superScore) >= minScore)
+        && !(r.autoBlockers?.length)
+        && !openSyms.has(String(normalizeLinkSymbol(r.symbol, bd.market)).toUpperCase())
+      ));
+      if (!hot) return;
+      const now = Date.now();
+      if (now - _lastProbeEscalateAt < 8_000) return; // 15s recheck ke saath stack nahi
+      _lastProbeEscalateAt = now;
+      await onAutoTradeDeepTick(); // FULL evaluation — har gate andar re-check
+    } catch { /* non-fatal */ }
+    finally { _fastProbeBusy = false; }
+  }, 10_000);
+  if (fastEntryProbeLoop.unref) fastEntryProbeLoop.unref();
 
   // v10.16 SECTION 2: the MANUAL TRADE monitor — 5s LTP sweep + 30s
   // conviction re-vote (cached deep path) + telegram pushes on flip /
@@ -3314,33 +3409,26 @@ export function registerAITradingRoutes(app, deps) {
   // push (AI_WEEKLY_REVIEW_PUSH=off). /weeklyreview runs it on demand.
   scheduleWeeklyReviewPush(() => ({ KEYS: effectiveKeys(), OPENAI_COMPAT }));
 
-  // Auto-executor — only when the user explicitly enabled it in LIVE
-  // mode. executeSignal re-runs every gate; caps/kill switch apply.
-  const auto = setInterval(async () => {
-    if (_autoBusy) return; // v20.7.8 [H2]: a >90s gauntlet run must not stack a second live order
-    _autoBusy = true;
-    try {
-      // v21.22.0: Never run the legacy spot auto-executor when MTF Auto-Trade is enabled or has an active trade
-      if (mtfAutoEnabled() || (mtfAutoStatus()?.openCount || 0) > 0) return;
-      const cfg = loadConfig();
-      if (!cfg.allowAuto || cfg.killSwitch || cfg.mode !== 'live') return;
-      const j = loadJournal();
-      // one auto position at a time across the entire session — never stack concurrent orders
-      if (j.positions.some(p => p.status === 'OPEN' || p.status === 'UNKNOWN')) return;
-      const board = await getSignals('CRYPTO', depsForSignals(), { limit: 5 });
-      const strong = (board?.signals || []).find(s => s.grade === 'STRONG' && s.executable);
-      if (!strong) return;
-      const out = await executeSignal({
-        symbol: strong.symbol, side: strong.side, mode: 'live',
-        getFreshSignal: (pair, o) => getFreshSignalForExec(pair, depsForSignals(), o),
-        wantAuto: true, source: 'auto',
-      });
-      if (out.ok) {
-        await sendTelegram(`🤖 <b>AI AUTO-EXECUTED</b> — ${strong.symbol} ${strong.side} (${strong.confidence}% conf)\nQty: ${out.filled?.qty} @ ₹${out.filled?.price}\nSL ₹${strong.plan?.stopLoss} · TP ₹${strong.plan?.target2}`);
-        console.log(`[ai] auto-executed ${strong.symbol} ${strong.side}`);
-      }
-    } catch { /* non-fatal */ }
-    finally { _autoBusy = false; } // v20.7.8 [H2]: always release, even on throw
+  // LEGACY SPOT AUTO-EXECUTOR — v21.23.8 me PERMANENTLY DISABLED.
+  //
+  // User spec: "coindcx spot trade... spot ko FULL STOP kardo — sirf
+  // FUTURES USDT & EQUITY SIM aur GOLD & SILVER me hi trade lagna chahiye."
+  // Ye 90s loop CoinDCX SPOT (SYM-INR) orders lagata tha (executeSignal)
+  // jab MTF Auto-Trade OFF tha + legacy allowAuto config ON tha. Ab:
+  //   • CoinDCX ka saucha auto-trade engine MTF Auto-Link hai (FUTURES
+  //     USDT perps + XAU/XAG + EQUITY SIM) — ye loop sirf ek competing
+  //     duplicate entry source tha.
+  //   • executeSignal par bhi SPOT FULL STOP gate hai (coindcxOrders.js
+  //     gate 0) — is loop ko zinda rakhne ka koi honest reason nahi;
+  //     har attempt journal me REJECTED spam karta.
+  // Loop shell sirf audit-trail ke liye rakha gaya hai (koi order kabhi
+  // nahi lagega); purana behaviour AI_SPOT_FULL_STOP=0 ke saath bhi wapas
+  // nahi aata — ye DEAD path hai.
+  const auto = setInterval(() => {
+    // v21.23.8: SPOT FULL STOP — legacy spot auto-executor permanently disabled
+    // (see block comment above). Pure no-op shell: no signal scan, no
+    // executeSignal call, no journal writes — CoinDCX auto-trade ka ek-matra
+    // engine ab MTF Auto-Link hai (FUTURES USDT + XAU/XAG + EQUITY SIM).
   }, 90_000);
   if (auto.unref) auto.unref();
 

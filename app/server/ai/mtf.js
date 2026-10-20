@@ -125,7 +125,7 @@ async function _yahooCandles(yh, interval, range) {
   } catch { return null; }
 }
 
-async function _indiaCandles(symbol, tf, market = 'INDIA') {
+async function _indiaCandles(symbol, tf, market = 'INDIA', { raw = false } = {}) {
   const yh = market === 'GLOBALFUTURES'
     ? String(symbol || '').toUpperCase()
     : (YF_TICKER_MINI[symbol] || `${symbol}.NS`);
@@ -135,11 +135,19 @@ async function _indiaCandles(symbol, tf, market = 'INDIA') {
   // v21.23.5: the CACHE holds the RAW Yahoo series; the live-bar overlay
   // (Groww liveFeed print) is applied per-READ so the forming bar never
   // bakes a stale live close into the shared cache.
-  if (hit && Date.now() - hit.at < ttl) return indiaOverlayCandles(symbol, tf, hit.payload);
+  if (hit && Date.now() - hit.at < ttl) return raw ? hit.payload : indiaOverlayCandles(symbol, tf, hit.payload);
   let out = null;
   if (tf === '4h') {
-    // 4h resampled from the cached 1h series — zero extra Yahoo call
-    const base = await _indiaCandles(symbol, '1h', market);
+    // 4h resampled from the cached 1h series — zero extra Yahoo call.
+    // v21.23.9 [F1 — the overlay-bake fix]: pehle yahan OVERLAID 1h
+    // (`_indiaCandles(symbol,'1h')` ki return value overlay applied hoti
+    // thi) resample hota tha → baked-overlay 4h `_yfCache.set` me jaata
+    // tha — the file ke APNE v21.23.5 invariant ka violation. Ek
+    // fabricated/live tick wala 4h tail 10-min TTL tak (YF_TTL['4h'])
+    // cache-hit reads par freeze ho sakta tha (weight-2.4 4h MTF vote
+    // stale intrabar print padhta tha). Ab 1h RAW payload se resample —
+    // overlay sirf per-READ (neeche), cache hamesha RAW.
+    const base = await _indiaCandles(symbol, '1h', market, { raw: true });
     out = base ? _resample(base, 240) : null;
   } else {
     const interval = tf === '1h' ? '60m' : tf;
@@ -152,7 +160,7 @@ async function _indiaCandles(symbol, tf, market = 'INDIA') {
     if (k === undefined) break;
     _yfCache.delete(k);
   }
-  return indiaOverlayCandles(symbol, tf, out);
+  return raw ? out : indiaOverlayCandles(symbol, tf, out);
 }
 
 /** Bucket candles into `minutes`-wide bars (open/high/low/close/volume). */
@@ -524,6 +532,23 @@ export async function chartCandles(symbol, market, tf, opts = {}) {
   const hit = _chartCache.get(key);
   const now = Date.now();
   let base = hit && now - hit.at < CHART_TTL_MS ? hit.payload : null;
+  // v21.23.9 [F2]: cache-hit fetchedAt honesty — pehle har read `now`
+  // bolta tha jabki forming bar `hit.at` ka freeze tha.
+  const dataAt = base && hit ? hit.at : now;
+  if (base) {
+    // v21.23.9 [F2]: INDIA/GLOBALFUTURES hits per-READ overlay refresh —
+    // pehle overlaid series 60s-TTL tak cache-hit par stale forming bar
+    // serve karta tha (miss-path fresh tha, hit-path 60s purana). Domain
+    // lock safe: indiaOverlayCandles hamesha same-domain (IN_<SYM> tick →
+    // .NS/INR candles). CRYPTO/FUTURES legs yahan refresh NAHI hote —
+    // wahan cached payload CoinDCX-INR ya Binance-USDT leg ka ho sakta hai
+    // aur blind re-apply cross-domain violation ho jayega (v20.9.3);
+    // 60s TTL unke liye bounded hai.
+    if (mkt === 'INDIA' || mkt === 'GLOBALFUTURES') {
+      const refreshed = indiaOverlayCandles(sym, t, base);
+      if (Array.isArray(refreshed) && refreshed.length > 0) base = refreshed;
+    }
+  }
   let scale = null;
   if (!base) {
     base = await _candlesFor(sym, mkt, t);
@@ -557,7 +582,7 @@ export async function chartCandles(symbol, market, tf, opts = {}) {
 
   return {
     ok: true, symbol: sym, market: mkt, tf: t, bars: candles.length,
-    candles, scaled: scale, fetchedAt: now,
+    candles, scaled: scale, fetchedAt: dataAt,
     tfMs: t === '5m' ? 300_000 : t === '15m' ? 900_000 : t === '1h' ? 3_600_000 : 86_400_000,
   };
 }

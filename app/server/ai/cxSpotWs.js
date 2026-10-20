@@ -47,6 +47,7 @@ const SPOT_WS_DEMAND_IDLE_MS = 120_000;  // no demand for 2 min → close
 const SPOT_WS_FAIL_LIMIT = 3;            // consecutive handshake failures → cooldown
 const SPOT_WS_COOLDOWN_MS = 30 * 60_000;
 const SPOT_WS_RECONNECT_MS = 3_000;      // base delay, ×2 backoff → 24s cap
+export { SPOT_WS_DEMAND_IDLE_MS };
 /** v11.4 recheck: a socket can be protocol-alive (engine.io pings answered)
  *  yet stop delivering book updates. cxRtStream has a silent-contract
  *  watchdog for exactly this; the spot layer had none — a silent zombie
@@ -132,15 +133,34 @@ export function spotWsStatus() {
   const now = _nowFn();
   let fresh = 0;
   for (const row of _prices.values()) if (now - row.at <= PRICE_FRESH_MS) fresh++;
+  const connected = !!_io && _io.state().connected;
+  const ageMs = _lastUpdateAt ? now - _lastUpdateAt : null;
+  // v21.23.7 HONEST HEALTH (the "WS ⚠ 1 DOWN" false-positive fix): healthMonitor
+  // pehle `cx.spotWs.healthy` padhta tha jo EXIST hi nahi karta tha → hamesha
+  // false → CoinDCX tab par PERMANENT red DOWN. Ab honest derived fields:
+  //   healthy   = enabled + connected + book-update fresh (silent-kill window
+  //               ke andar — zyada stale hota hi nahi, watchdog kill kar deta hai)
+  //   demandAgeMs = last consumer heartbeat ka age (armed = demand fresh)
+  //   cooldownRemainMs = handshake fail-streak cooldown remaining
+  const healthy = _enabled === true && connected === true
+    && ageMs != null && ageMs <= SPOT_WS_SILENT_KILL_MS;
+  const demandAgeMs = _demandAt > 0 ? now - _demandAt : null;
   return {
     enabled: _enabled,
-    connected: !!_io && _io.state().connected,
+    connected,
+    healthy,
     markets: _prices.size,
     freshMarkets: fresh,
     servable: fresh >= MIN_SERVABLE_MARKETS,
     lastUpdateAt: _lastUpdateAt,
-    ageMs: _lastUpdateAt ? now - _lastUpdateAt : null,
+    // v21.23.9 [F4]: apna handshake fail-streak expose — healthMonitor ka
+    // coindcxSpot entry pehle FUTURES socket ka cx.failStreak padh raha
+    // tha (misattributed telemetry). Ab spot apna streak deta hai.
+    failStreak: Number.isFinite(_failStreak) ? _failStreak : 0,
+    ageMs,
+    demandAgeMs,
     cooling: now < _disabledUntil,
+    cooldownRemainMs: now < _disabledUntil ? _disabledUntil - now : 0,
     channel: PRICE_CHANNEL,
   };
 }

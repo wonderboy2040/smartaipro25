@@ -118,15 +118,42 @@ export async function healthSnapshot() {
       cooldownReason: cx?.cooldownReason ?? null, // 'handshake-streak' | 'silent-contract' | 'glob-quiet' | null
       failStreak: Number.isFinite(cx?.failStreak) ? cx.failStreak : 0,
       cooldownRemainMs: cx?.cooldownActive === true ? Math.max(0, cx?.cooldownRemainMs || 0) : 0,
+      // v21.23.9 [F6]: armed GLOB-only (metals XAU/XAG) sessions US-premarket
+      // me legitimately minutes-tak attributable tick nahi dete — cxRtStream
+      // khud 5-7.5min quiet budget enforce karta hai (silent-kill watchdog).
+      // `globQuiet` = connected + glob-only-armed (real network-down ab bhi
+      // alert hoga — disconnect connected=false karta hai; watchdog cooldown
+      // cooldownActive=true karta hai).
+      globQuiet: _cxArmed
+        && cx?.connected === true
+        && !(cx?.cooldownActive === true)
+        && (cx?.domains?.fut || 0) === 0
+        && (cx?.domains?.glob || 0) > 0,
     };
     if (cx?.spotWs) {
+      // v21.23.7 FIX (the CoinDCX tab "WS ⚠ 1 DOWN" permanent false-positive):
+      // pehle `healthy: cx.spotWs.healthy === true` padha jaata tha jabki
+      // cxRtWsStatus().spotWs me healthy field EXIST hi nahi karta tha →
+      // hamesha false → armed (fut domains subscribed — CoinDCX tab) hone
+      // par spot tier PERMANENT red DOWN dikhta tha chahe socket perfectly
+      // healthy ho. Ab: (a) healthy honest derived hai (cxSpotWs.js: enabled
+      // + connected + fresh book update), (b) armed SPOT DEMAND se aata hai
+      // (fetchCoinDcxTickers/SSE heartbeat ≤2min = real subscriber), NOT
+      // fut/glob domains se, (c) ageSec + cooldown detail UI tooltip ke liye.
+      const spotArmed = cx.spotWs.enabled === true
+        && cx.spotWs.demandAgeMs != null
+        && Number(cx.spotWs.demandAgeMs) <= 120_000; // SPOT_WS_DEMAND_IDLE_MS
       out.feeds.ws.coindcxSpot = {
         healthy: cx.spotWs.healthy === true,
         lastUpdateAt: cx.spotWs.lastUpdateAt ?? null,
+        ageSec: cx.spotWs.ageMs != null ? Math.max(0, Math.round(cx.spotWs.ageMs / 1000)) : null,
         ageMs: cx.spotWs.ageMs ?? null,
-        armed: _cxArmed,
-        failStreak: Number.isFinite(cx?.failStreak) ? cx.failStreak : 0,
-        cooldownRemainMs: cx?.cooldownActive === true ? Math.max(0, cx?.cooldownRemainMs || 0) : 0,
+        armed: spotArmed, // demand-driven idle ≠ down (v21.1.1 A2 doctrine)
+        cooldownReason: cx.spotWs.cooling === true ? 'handshake-streak' : null,
+        // v21.23.9 [F4]: SPOT apna failStreak — pehle top-level cx.failStreak
+        // (FUTURES socket ka streak) yahan misattribute hota tha.
+        failStreak: Number.isFinite(cx.spotWs.failStreak) ? cx.spotWs.failStreak : 0,
+        cooldownRemainMs: cx.spotWs.cooling === true ? Math.max(0, Number(cx.spotWs.cooldownRemainMs) || 0) : 0,
       };
     }
   } catch { /* cxRtStream not armed */ }
@@ -303,6 +330,7 @@ async function _healthAlertTick() {
   const wsStale = [];
   for (const [k, v] of Object.entries(snap.feeds?.ws || {})) {
     if (v?.armed === false) continue; // idle-by-design — not down
+    if (v?.globQuiet === true) continue; // v21.23.9 [F6]: armed GLOB-only metals session, US-premarket quiet budget — cxRtStream ka silent-kill watchdog hi real-down enforce karta hai; 90s window se false alert spam hota tha
     if (v?.healthy === false && (v.ageSec == null || v.ageSec > FEED_STALE_ALERT_SEC)) wsStale.push(k);
   }
   if (wsStale.length > 0) {

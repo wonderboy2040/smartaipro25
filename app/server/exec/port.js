@@ -84,7 +84,16 @@ export class ApiFuturesPort {
   }
   async open({ pair, side, qty, leverage, type = 'market', price = null, _sl, _tp, clientId }) {
     try {
-      const isLong = String(side).toUpperCase() === 'LONG';
+      // v21.23.9 [CRITICAL FIX]: side HONEST validation — pehle unknown side
+      // silently 'sell' (SHORT) ban jati thi. futuresOrderBody ab DONO
+      // vocabularies honestly map karta hai — 'sell' pehle 'SELL' !== 'SHORT'
+      // se long=true hota tha → SHORT entry ulti BUY position ban jati thi.
+      // Unknown side = loud reject (v21.23.4 doctrine).
+      const s = String(side ?? '').toUpperCase().trim();
+      if (s !== 'LONG' && s !== 'SHORT' && s !== 'BUY' && s !== 'SELL') {
+        return { ok: false, error: `open: invalid side "${String(side)}" (LONG/SHORT chahiye)` };
+      }
+      const isLong = s === 'LONG' || s === 'BUY';
       // v20.7.10 CRITICAL FIX: createFuturesOrder({ pair, side, qty,
       // leverage, price }) destructure karta hai — pehle `quantity: qty`
       // pass hota tha (qty undefined → total_quantity: NaN → JSON null →

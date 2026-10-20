@@ -362,6 +362,16 @@ export function openPaperTrade(input) {
     source: String(input?.source || 'ui').slice(0, 20),
     leverage: Number(input?.leverage) > 0 ? Number(input.leverage) : null,
     feeBreakevenPrice: Number(input?.feeBreakevenPrice) > 0 ? Number(input.feeBreakevenPrice) : null,
+    // v21.23.7 VOL-AWARE TP1 PARTIAL (user: "TP1 partial book reduced in
+    // volatile markets — keep runner BIGGER"): 0.50 default (LOW/NORMAL vol),
+    // HIGH vol 0.40 / EXTREME 0.35 mtf-auto stamp karta hai (volTrail.js);
+    // manual/UI trades 0.50 hi rehte hain. Deep monitor 15s tick LIVE vol
+    // class shift pe updatePaperTradeT1ClosePct() se isse refresh karta hai.
+    t1ClosePct: (Number.isFinite(Number(input?.t1ClosePct)) && Number(input.t1ClosePct) >= 0.05 && Number(input.t1ClosePct) <= 0.90)
+      ? Number(input.t1ClosePct)
+      : 0.5,
+    // v21.23.7: entry-time ATR% (vol-class resolve fallback ke liye stamp)
+    atrPct: Number.isFinite(Number(input?.atrPct)) && Number(input.atrPct) > 0 ? Number(input.atrPct) : null,
     sourceMeta: (input?.sourceMeta && typeof input.sourceMeta === 'object') ? {
       score: Number(input.sourceMeta.score) || null,
       tier: String(input.sourceMeta.tier || '').slice(0, 10) || null,
@@ -557,22 +567,29 @@ export function evaluatePaper(quotes, events = [], byMarket = null) {
       }
       if (hitT1) {
         t.t1Hit = true;
-        // Fractional-safe T1 booking: half the position (4dp for crypto).
-        const half = _isUsdDesk(_marketOfTrade(t))
-          ? +((t.qty / 2).toFixed(4))
-          : Math.ceil(t.qty / 2);
+        // v21.23.7 VOL-AWARE PARTIAL: TP1 pe kitna book karna hai ye ab
+        // trade ka t1ClosePct decide karta hai (default 50% — v21.23.6-identical;
+        // HIGH vol trades 40% / EXTREME 35% book karke runner BADA rakhte hain
+        // kyunki volatile trends me TP1→TP2 ka travel zyada hota hai).
+        const t1Pct = Number.isFinite(Number(t.t1ClosePct)) && Number(t.t1ClosePct) >= 0.05 && Number(t.t1ClosePct) <= 0.90
+          ? Number(t.t1ClosePct)
+          : 0.5;
+        // Fractional-safe T1 booking: t1Pct of the position (4dp for crypto).
+        const partQty = _isUsdDesk(_marketOfTrade(t))
+          ? +((t.qty * t1Pct).toFixed(4))
+          : Math.ceil(t.qty * t1Pct);
         // v21.0.6 [audit B2]: a 1-unit position (option cards qty=1 lot)
-        // SPLIT Nahi HO SAKTI — half===remaining poora trade close kar
-        // deta tha, isliye advertised "T1 50% book → trail / T2" KABHI
+        // SPLIT Nahi HO SAKTI — partial===remaining poora trade close kar
+        // deta tha, isliye advertised "T1 partial book → trail / T2" KABHI
         // run nahi hota tha (har option trade flat +0.5R pe khatam —
         // track record structurally capped). Ab: qty jo split nahi ho
         // sakti us T1 pe SIRF stopLoss ko entry (breakeven) pe le aata hai
         // — runner T2/BE tak ride karta hai, wahi discipline jo card
-        // advertise karta hai. Multi-lot (qty≥2) ab bhi 50% book karta hai.
-        if (half > 0 && half < t.remainingQty) {
-          _closePart(t, half, t.target1, 'T1_BOOK');
+        // advertise karta hai. Multi-lot (qty≥2) ab bhi partial book karta hai.
+        if (partQty > 0 && partQty < t.remainingQty) {
+          _closePart(t, partQty, t.target1, 'T1_BOOK');
           if (t.status !== 'CLOSED') t.status = 'PARTIAL';
-          events.push({ type: 'PAPER_CLOSE', symbol: t.symbol, direction: t.direction, price: t.target1, pnl: t.realizedPnl, pnlNet: t.netPnl ?? null, note: 'Paper: booked 50% at T1, trail to entry' });
+          events.push({ type: 'PAPER_CLOSE', symbol: t.symbol, direction: t.direction, price: t.target1, pnl: t.realizedPnl, pnlNet: t.netPnl ?? null, note: `Paper: booked ${Math.round(t1Pct * 100)}% at T1, trail to entry` });
         } else {
           t.stopLoss = t.entry; // BE-protect the un-splittable runner
           events.push({ type: 'PAPER_T1_BE', symbol: t.symbol, direction: t.direction, price: t.target1, pnl: 0, pnlNet: null, note: 'Paper: T1 touched — 1 lot split nahi hota, SL breakeven pe shifted (runner T2/BE tak)' });
@@ -702,6 +719,22 @@ export function paperSymbolsForWatcher() {
   )];
 }
 
+/** v21.23.7 VOL-AWARE TP1 PARTIAL live-sync: deep monitor 15s tick LIVE
+ * volatility class shift hone par trade ke TP1 partial % ko refresh karta
+ * hai (HIGH vol 0.40 / EXTREME 0.35 — runner bada; LOW/NORMAL 0.50). Sirf
+ * TP1 se PEHLE effective hota hai (t1Hit ho gaya to partial already book
+ * ho chuka — ignore). Restart-safe: _persist() ke saath. */
+export function updatePaperTradeT1ClosePct(id, pct) {
+  const p = Number(pct);
+  if (!(Number.isFinite(p) && p >= 0.05 && p <= 0.90)) return { ok: false, error: 'Invalid t1ClosePct (0.05..0.90)' };
+  const t = _state.trades.find(x => x.status !== 'CLOSED' && (x.id === id || String(x.id) === String(id)));
+  if (!t) return { ok: false, error: 'Open paper trade not found' };
+  if (t.t1Hit === true) return { ok: false, error: 'T1 already booked — partial pct frozen' };
+  t.t1ClosePct = p;
+  _persist();
+  return { ok: true, t1ClosePct: t.t1ClosePct, trade: t };
+}
+
 // 2026-09 multi-market: watch set classified per market so the watcher
 // routes INDIA → Groww and CRYPTO → CoinDCX quotes.
 export function paperSymbolsByMarket() {
@@ -818,6 +851,8 @@ function _publicTrade(t) {
     entry: t.entry, qty: t.qty, remainingQty: t.remainingQty,
     stopLoss: t.stopLoss, target1: t.target1, target2: t.target2,
     status: t.status, t1Hit: t.t1Hit, dayKey: t.dayKey,
+    t1ClosePct: t.t1ClosePct ?? 0.5, // v21.23.7: vol-aware TP1 partial (deep monitor live-sync read)
+    atrPct: t.atrPct ?? null,        // v21.23.7: entry-time ATR% (vol-class resolve stamp)
     openedAt: t.openedAt, closedAt: t.closedAt, closeReason: t.closeReason,
     lastPrice: t.lastPrice, realizedPnl: +(+t.realizedPnl).toFixed(2),
     unrealizedPnl: +(+t.unrealizedPnl).toFixed(2),
@@ -1033,6 +1068,11 @@ function _sanitizeRestoredTrade(raw) {
     })(), qty,
     remainingQty,
     t1Hit: !!raw.t1Hit,
+    // v21.23.7: vol-aware TP1 partial + ATR% stamp restore round-trip
+    t1ClosePct: (Number.isFinite(Number(raw.t1ClosePct)) && Number(raw.t1ClosePct) >= 0.05 && Number(raw.t1ClosePct) <= 0.90)
+      ? Number(raw.t1ClosePct)
+      : 0.5,
+    atrPct: Number.isFinite(Number(raw.atrPct)) && Number(raw.atrPct) > 0 ? Number(raw.atrPct) : null,
     status,
     openedAt,
     closedAt: status === 'CLOSED' ? _num(raw.closedAt, openedAt) : null,

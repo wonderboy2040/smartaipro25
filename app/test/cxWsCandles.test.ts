@@ -311,7 +311,11 @@ describe('v21.23.5 wiring pins — mtf.js + ultrafastVerifier.js', () => {
 
   it('CACHE-SAFETY ORDER: _yfCache.set stores the RAW series BEFORE the overlay return', () => {
     const setAt = MTF_SRC.indexOf('_yfCache.set');
-    const overlayAt = MTF_SRC.indexOf('return indiaOverlayCandles(symbol, tf, out)');
+    // v21.23.9 [F1] honest-update: `return indiaOverlayCandles(...)` →
+    // `return raw ? out : indiaOverlayCandles(...)` (raw passthrough — 4h
+    // resample ab RAW 1h payload se). Cache-RAW-before-overlay intent
+    // aur STRONGER ho gaya — overlay ab sirf non-raw return par.
+    const overlayAt = MTF_SRC.indexOf('return raw ? out : indiaOverlayCandles(symbol, tf, out)');
     expect(setAt).toBeGreaterThan(-1);
     expect(overlayAt).toBeGreaterThan(-1);
     expect(setAt).toBeLessThan(overlayAt);
@@ -329,7 +333,11 @@ describe('v21.23.5 wiring pins — mtf.js + ultrafastVerifier.js', () => {
   it('Binance fallback legs stay UN-overlaid (cross-domain by design) — exact occurrence counts', () => {
     expect((MTF_SRC.match(/cxSpotOverlayCandles\(/g) || []).length).toBe(2); // CRYPTO branch + Leg-3 only
     expect((MTF_SRC.match(/cxFutOverlayCandles\(/g) || []).length).toBe(1);  // Leg-1 only
-    expect((MTF_SRC.match(/indiaOverlayCandles\(/g) || []).length).toBe(2);  // cache-hit + fresh path
+    // v21.23.9 [F2] honest-update: 2 → 3 — naya 3rd wire = chartCandles
+    // INDIA/GLOBALFUTURES cache-hit per-READ overlay refresh (same-domain
+    // IN_<SYM> tick → .NS/INR candles; crypto/fut legs refresh NAHI hote —
+    // cross-domain lock intact, cxSpot/cxFut counts unchanged).
+    expect((MTF_SRC.match(/indiaOverlayCandles\(/g) || []).length).toBe(3);  // cache-hit + fresh path + chart hit-refresh
     expect(MTF_SRC).not.toContain('cxSpotOverlayCandles(base, tf, await');  // Binance leg unwrapped
   });
 

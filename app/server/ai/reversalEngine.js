@@ -125,7 +125,12 @@ export function priceLevelsForLeg({ side, entry, qty, lossCapINR, profitTargetIN
   const fx = Number(usdInr) > 0 ? Number(usdInr) : 84;
   const lossDist = Math.abs(lossCapINR) / fx / q;
   const gainDist = Math.abs(profitTargetINR) / fx / q;
-  const long = String(side).toUpperCase() !== 'SHORT';
+  // v21.23.9: unknown side = honest refuse (levels null) — pehle `!== 'SHORT'`
+  // silent-LONG-default tha (v21.23.4 doctrine). Callers validated LONG/SHORT
+  // hi paate hain, ye defense-in-depth hai.
+  const s = String(side ?? '').toUpperCase().trim();
+  if (s !== 'LONG' && s !== 'SHORT') return { sl: null, tp: null };
+  const long = s === 'LONG';
   return {
     sl: pRound(long ? e - lossDist : e + lossDist),
     tp: pRound(long ? e + gainDist : e - gainDist),

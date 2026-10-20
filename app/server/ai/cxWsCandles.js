@@ -208,7 +208,12 @@ function _futTick(base) {
   const row = futBookSnapshot(FUT_TICK_FRESH_MS).get(`B-${base}_USDT`);
   const price = Number(row?.last || row?.mark) || 0;
   if (!(price > 0)) return null;
-  const atMs = Number(row?.ts) || Number(row?.at) || 0;
+  // v21.23.9 [F5]: defensive seconds→ms scale — mergeFutBook ab btST/cmRT
+  // normalize karta hai, par purane/edge rows (ts absent updates) kabhi
+  // seconds me aa sakte the → atMs < barTime(ms) → overlay SILENT
+  // skippedStale. Live data ms me hamesha > 1e12 hota hai (2001 ke baad).
+  const tsRaw = Number(row?.ts) || 0;
+  const atMs = tsRaw > 0 && tsRaw < 1e12 ? tsRaw * 1000 : tsRaw;
   if (!(atMs > 0)) return null;
   return { price, atMs };
 }

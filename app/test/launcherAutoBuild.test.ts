@@ -415,12 +415,12 @@ describe('v20.8.3 frontend stale-build visibility', () => {
     const m = VERSION_TS.match(/APP_VERSION = '([^']+)'/);
     expect(m).toBeTruthy();
     expect(m![1]).toBe(PKG.version);
-    expect(PKG.version).toBe('21.23.6'); // v21.23.6 bump (auto-trade profit maximization: reversalRisk risk-hint ≠ flip + pullback tolerance + 5-min post-success cooldown + LIVE elite-only entry)
+    expect(PKG.version).toBe('21.23.9'); // v21.23.9 bump (full-site deep recheck: CRITICAL futuresOrderBody SHORT-inversion fix — exec-port 'sell' vocabulary ulta BUY order banati thi; 3s fast-SL LIVE sync dead-param; dead ./metals.js imports; 4h overlay-bake; chart freshness; spot WS telemetry honesty; fut-book ts seconds; GLOB-quiet false-alert)
   });
 
   it('Watchdog bat: v20.8.3 title + auto-build line', () => {
     const bat = readFileSync(path.join(APP_ROOT, 'Start-SmartAI-Watchdog.bat'), 'utf8');
-    expect(bat).toContain('v21.23.6');
+    expect(bat).toContain('v21.23.9');
     expect(bat).toContain('AUTO npm install');
   });
 

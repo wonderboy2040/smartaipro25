@@ -1409,7 +1409,19 @@ export function coindcxRespError(resp) {
 
 /** Build the nested create-order body (documented shape + INR/USDT margin_currency_short_name support). */
 export function futuresOrderBody({ pair, side, qty, leverage, price, marginCurrency }) {
-  const long = String(side).toUpperCase() !== 'SHORT';
+  // v21.23.9 [CRITICAL FIX — the SHORT-inversion]: pehle `long = side !==
+  // 'SHORT'` SILENT-LONG-default tha. exec-port adapter `side: 'buy'/'sell'`
+  // pass karta tha → 'SELL' !== 'SHORT' → long=true → SHORT entry exchange
+  // par BUY order ban jati thi (5-10x leverage par ulta position!). Ab DONO
+  // vocabularies honestly map hoti hain — 'LONG'/'SHORT' (mtfDual/reversal/
+  // partial paths) aur 'BUY'/'SELL' (exec-port) — aur unknown side LOUD
+  // reject hota hai (v21.23.4 doctrine: unknown side ≠ LONG-default).
+  const s = String(side ?? '').toUpperCase().trim();
+  const long = s === 'LONG' || s === 'BUY';
+  const short = s === 'SHORT' || s === 'SELL';
+  if (!long && !short) {
+    throw new Error(`futuresOrderBody: invalid side "${String(side)}" — LONG/SHORT ya BUY/SELL chahiye`);
+  }
   const limit = Number(price) > 0;
   const mc = marginCurrency ? String(marginCurrency).toUpperCase().trim() : null;
   return {
@@ -1431,7 +1443,16 @@ export function futuresOrderBody({ pair, side, qty, leverage, price, marginCurre
 }
 export async function createFuturesOrder({ pair, side, qty, leverage, price, marginCurrency }) {
   const { apiKey, secret } = credGuard();
-  const body = futuresOrderBody({ pair, side, qty, leverage, price, marginCurrency });
+  let body;
+  try {
+    body = futuresOrderBody({ pair, side, qty, leverage, price, marginCurrency });
+  } catch (e) {
+    // v21.23.9: invalid side/params honest reject — pehle unknown side
+    // silently LONG-default hota tha (the SHORT-inversion root). Network
+    // call KABHI nahi jaati, callers ko documented {orderId:null, error}
+    // shape milti hai.
+    return { orderId: null, error: String(e?.message || e).slice(0, 160) };
+  }
   let resp;
   try {
     resp = await coindcxPrivate(ORDERS_CREATE_PATH, apiKey, secret, body);

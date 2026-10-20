@@ -248,11 +248,17 @@ describe('v20.7.8 source contracts', () => {
     expect(s).toMatch(/if \(_shuttingDown\)[\s\S]{0,200}no restart/);
   });
 
-  it('[H2] routes.js: auto-executor has the _autoBusy re-entrancy guard with finally-release', () => {
+  it('[H2] routes.js: auto-executor _autoBusy guard v21.23.8 me OBSOLETE — loop ab PERMANENTLY disabled no-op shell (SPOT FULL STOP)', () => {
     const s = src('server/ai/routes.js');
-    expect(s).toMatch(/if \(_autoBusy\) return/);
-    expect(s).toMatch(/_autoBusy = true/);
-    expect(s).toMatch(/finally \{ _autoBusy = false; \}/);
+    // v21.23.8: user spec "coindcx spot ko full stop kardo" — legacy 90s spot
+    // auto-executor ka re-entrancy guard (gauntlet run 90s se slow hone par
+    // doosra stacked order) ab irrelevant: loop body me NA signal scan hai,
+    // NA executeSignal call. Purana _autoBusy pattern hata — naya contract
+    // yahi hai ki loop KABHI kuch nahi karta.
+    expect(s).toMatch(/LEGACY SPOT AUTO-EXECUTOR — v21\.23\.8 me PERMANENTLY DISABLED/);
+    expect(s).toMatch(/v21\.23\.8: SPOT FULL STOP — legacy spot auto-executor permanently disabled/);
+    expect(s).not.toMatch(/_autoBusy = true/);
+    expect(s).not.toMatch(/await executeSignal\(\{\s*symbol: strong\.symbol/); // loop body se order path GONE
   });
 
   it('[M3] routes.js: registrar is idempotent (double registration cannot double the live loops)', () => {

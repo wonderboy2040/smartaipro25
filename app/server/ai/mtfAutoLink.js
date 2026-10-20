@@ -46,11 +46,26 @@ import { isNseMarketOpen, freshEntriesAllowedFor, dayKeyFor, istDayKey } from '.
 import { dualAutoCandidates } from './mtfDualBoard.js';
 import { SUPER_TIERS } from './superIntel.js';
 import { walletLeverageForEquityINR, feeBreakevenFloor, evaluateFeeAwareReversalExit } from '../exec/sizing.js';
-// v21.23.1: `releaseDirectionLock` yahan se HATA diya — release ab DO authoritative
-// jagah se hota hai: (1) paperTrading.js `_closePart` central close hook (har paper
-// trade close pe immediate, symbol-flat check ke saath), (2) routes.js 60s watcher
-// `reconcileDirectionLocks()` sweep (ALL books — live/journal/SAPTA — se flat detect).
-import { acquireDirectionLock, checkDirectionLock, __resetDirectionLocksForTests } from './directionLock.js';
+// v21.23.1: release ab DO authoritative jagah se hota hai: (1) paperTrading.js
+// `_closePart` central close hook (har paper trade close pe immediate, symbol-flat
+// check ke saath), (2) routes.js 60s watcher `reconcileDirectionLocks()` sweep.
+// v21.23.8 UC FLIP-REVERSE: confirmed board-flip par trade close + IMMEDIATE
+// reverse entry ek hi atomic transaction hai — isliye flip path purana lock
+// yahin release karke naya opposite-side lock acquire karta hai (LIVE adopted
+// positions jinka koi paper _closePart hook nahi hota us case ke liye zaroori;
+// paper close ke baad dobara release idempotent hai).
+import {
+  acquireDirectionLock, checkDirectionLock, releaseDirectionLock, __resetDirectionLocksForTests,
+} from './directionLock.js';
+// v21.23.7 VOLATILITY-ADAPTIVE SUPER SMART SL TRAIL: stage thresholds /
+// chandelier / giveback tolerance / reversal-hint lock / TP1 partial pct —
+// sab ATR% volatility class (LOW/NORMAL/HIGH/EXTREME) + live momentum
+// (SURGING/STEADY/FADING) se derive hote hain (user: "trade volatile me
+// sl trail ko improvement karo — TP1/TP2 tak reach nahi ho raha").
+import {
+  trailProfileResolved, tp1ClosePctFor, classifyVolatility,
+  VOL_CLASS, MOMENTUM,
+} from './volTrail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
@@ -101,7 +116,20 @@ export const MTF_AUTO_DEFAULTS = {
   // trade lagna chahiye" — successful close ke baad LIVE re-entry sirf
   // 5-minute cooldown ke BAAD, elite-verified signal pe.
   postSuccessCooldownMin: 5,
+  // v21.23.8 USER SPEC (UC FLIP-AND-REVERSE): "jab UC ne LONG se SHORT pakka hone
+  // pe status update karta hai tab minimal loss ke sath vo long trade close karke
+  // IMMEDIATELY wahi trade short me lagna chahiye" — confirmed board-flip par
+  // trade minimal-loss/protective close + same-symbol IMMEDIATE reverse entry.
+  // "Thoda pullback" kabhi flip nahi hota (board row same-side hi rehta hai) —
+  // flip SIRF pakka opposite-side confirmation (triggerFired || score>=65) pe.
+  ucFlipReverse: true,
 };
+// v21.23.8 flip churn guards — ek symbol ke liye din me sirf itni flip-reverse
+// entries (whipsaw market me zyada flip = fees + churn; protective minimal-loss
+// EXIT hamesha allowed hai, sirf REVERSE-ENTRY pe cap lagta hai).
+const UC_FLIP_MAX_PER_SYMBOL_PER_DAY = 4;
+const UC_FLIP_MIN_AGE_MS_LIVE = 60_000;   // LIVE: order-fill latency + instant noise guard
+const UC_FLIP_MIN_AGE_MS_PAPER = 30_000;  // paper: thoda kam strict
 const CLAMPS = {
   minScore: [Number(SUPER_TIERS.ACTION), 95],
   riskPerTradeINR: [100, 25000],
@@ -158,6 +186,10 @@ function _sanitizeCfg(cfg) {
   out.autoSyncSiteLive = cfg.autoSyncSiteLive !== false;
   out.feeAwareReversalExit = cfg.feeAwareReversalExit !== false;
   out.deepMonitorEnabled = cfg.deepMonitorEnabled !== false;
+  // v21.23.8: UC FLIP-AND-REVERSE — default ON; config se OFF ho sakta hai
+  // (ucFlipReverse:false → confirmed flip par sirf protective close, reverse
+  // entry nahi — user ka explicit opt-out).
+  out.ucFlipReverse = cfg.ucFlipReverse !== false;
   return out;
 }
 
@@ -233,20 +265,34 @@ export const computeWallet100Deployment = computeWallet95Deployment;
  * Dedicated Realtime Active-Trade Deep Monitor + Dynamic Multi-Stage SL Trailing +
  * Bullish/Bearish Reversal Profit-Booking Superintelligence.
  *
+ * v21.23.7 VOLATILITY-ADAPTIVE SUPER SMART UPGRADE (user: "trade volatile me
+ * sl trail ko improvement karo — TP1/TP2 tak reach nahi ho raha, bahut kam
+ * profit book karke trade exit ho raha hai"): har stage threshold, chandelier
+ * width, giveback tolerance, reversal-hint lock aur TP1 partial pct ab
+ * LIVE ATR% volatility class (LOW/NORMAL/HIGH/EXTREME) + momentum state
+ * (SURGING widens / FADING tightens) se derive hote hain — volTrail.js.
+ *   • LOW (ATR<0.8%)     → v21.23.6-identical ya TIGHTER (no regression)
+ *   • NORMAL (0.8–1.8%)   → standard (default jab ATR data nahi)
+ *   • HIGH (1.8–3.5%)     → WIDE — noise-level pullbacks trail trigger nahi karte
+ *   • EXTREME (≥3.5%)     → ULTRA-WIDE — max room, TP1 partial bhi 35% (bada runner)
+ * Vol source: boardRow.context.atrPct (LIVE) → trade.atrPct (open-stamp)
+ *   → trade.volClass (15s-tick stamp) → NORMAL.
+ *
  * Monitors any active auto-trade from Entry until TP1 or TP2 hits:
  *   • Stage 0: Initial Guard (SL at initial stopLoss)
- *   • Stage 1 (+0.35R): Risk Halved — SL trailed to -0.45R
- *   • Stage 2 (+0.55R): Fee-Free Breakeven Lock — SL trailed above round-trip fee floor (ZERO LOSS)
- *   • Stage 3 (+0.80R): Pre-TP1 Profit Ratchet — SL trailed to +0.45R net profit
- *   • Stage 4 (>= +1.00R / TP1 Hit): TP1 60% Booked + Runner SL trailed to +0.65R floor
- *     (peakR−0.45R ratchet) targeting TP2 — v21.23.6: 0.32R→0.45R giveback room
- *   • Stage 5 (>= +1.40R -> TP2): Runner SL trailed to TP1 (+1.0R) + 0.50R chandelier until
- *     TP2 (2.0R) full exit — v21.23.6: 0.30R→0.50R (normal pullbacks ab runner nahi maarte)
- *   • Reversal Guard v21.23.6: book ONLY on a CONFIRMED flip (board side actually flipped +
- *     trigger fired / superScore >= 65) or a DEEP giveback (>=45% of peak AND >=0.28R absolute).
- *     Risk hints (reversalRisk / context.exhausted / opposingFlow) — jo strong trends me
- *     ROUTINELY fire hote the aur +0.12R pe trade band kar dete the jabki trend jaari rehta
- *     tha — ab SIRF SL profit-lock tighten karte hain, trade band NAHI hota.
+ *   • Stage 1 Early (profile.stage1EarlyR): Ultra-Fast Micro-Shield — SL −0.65R
+ *   • Stage 1 (profile.stage1R): Risk Halved — SL −0.45R / fee-cover pe BE shield
+ *   • Stage 2 (profile.stage2R): Fee-Free Breakeven Lock (ZERO LOSS)
+ *   • Stage 3 (profile.stage3R): Pre-TP1 Profit Ratchet (peak − stage3GivebackR)
+ *   • Stage 4 (>= +1.00R / TP1 Hit): TP1 partial (profile.tp1ClosePct) Booked +
+ *     Runner SL trailed to +0.65R floor (peak − stage4GivebackR ratchet) → TP2
+ *   • Stage 5 (>= +1.40R -> TP2): Runner SL = TP1 floor + profile.stage5ChandelierR
+ *     chandelier until TP2 (2.0R) full exit
+ *   • Reversal Guard v21.23.6: book ONLY on a CONFIRMED flip (board side actually
+ *     flipped + trigger fired / superScore >= 65) or a DEEP giveback
+ *     (>=profile.givebackRatioPct% of peak AND >= profile.givebackAbsFloorR absolute).
+ *     Risk hints (reversalRisk / context.exhausted / opposingFlow) ab SIRF SL
+ *     profit-lock tighten karte hain (peak − profile.hintGivebackR), book NAHI.
  */
 export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const side = String(trade.side || trade.direction || 'LONG').toUpperCase();
@@ -278,6 +324,22 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const tp1Touched = Boolean(trade.t1Hit || trade.tp1Hit || (t1 > 0 && (isLong ? peakPrice >= t1 : peakPrice <= t1)));
   const tp2Touched = Boolean(t2 > 0 && (isLong ? ltp >= t2 : ltp <= t2));
 
+  // v21.23.7 VOLATILITY-ADAPTIVE TRAIL PROFILE — LIVE ATR% (board context)
+  // > entry-stamp (trade.atrPct) > 15s-tick stamp (trade.volClass) > NORMAL.
+  // Momentum (trigger roc1/roc3/volRatio) SURGING pe trail WIDEN karta hai
+  // (fast move ko room do — user: "trend ultra fast se capture hona chahiye"),
+  // FADING pe TIGHTEN (profit lock karo).
+  const profile = trailProfileResolved({
+    side,
+    boardRow: liveCtx.boardRow || null,
+    liveAtrPct: liveCtx.boardRow?.context?.atrPct ?? null,
+    tradeAtrPct: trade.atrPct ?? null,
+    tradeVolClass: trade.volClass ?? null,
+    tradeMomentumState: trade.momentumState ?? null,
+  });
+  const volClass = profile.volClass;
+  const momentumState = profile.momentumState || MOMENTUM.UNKNOWN;
+
   // Multi-Stage Dynamic Trailing SL computation
   let stageCode = 'STAGE_0_INITIAL_GUARD';
   let stageLabel = 'Stage 0 · Initial SL Guard';
@@ -297,39 +359,45 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   } else if (peakR >= 1.4 || (tp1Touched && peakR >= 1.25)) {
     stageCode = 'STAGE_5_RUNNER_TO_TP2';
     stageLabel = 'Stage 5 · TP1 Locked + Structure Trail → TP2';
-    // v21.23.6: 0.30R → 0.50R chandelier — strong-trend pullbacks (NORMAL hai)
-    // ab trail-stop se runner ko maar nahi dete; floor TP1 (>= +1.0R) pe hai hi.
-    const chandelierTrail = isLong ? peakPrice - 0.50 * risk : peakPrice + 0.50 * risk;
+    // v21.23.7: chandelier width ab vol-adaptive (LOW 0.45 / NORMAL 0.50 /
+    // HIGH 0.65 / EXTREME 0.80; SURGING ×1.15 / FADING ×0.85) — high-vol me
+    // 0.50R pullback ROUTINE noise hai tha (TP2 se theek pehle SL hit).
+    // Floor TP1 (>= +1.0R) pe hai hi.
+    const chandelierTrail = isLong ? peakPrice - profile.stage5ChandelierR * risk : peakPrice + profile.stage5ChandelierR * risk;
     candidateSl = tightenSl(candidateSl, tightenSl(t1 > 0 ? t1 : priceAtR(1.0), chandelierTrail));
   } else if (tp1Touched || peakR >= 1.0) {
     stageCode = 'STAGE_4_TP1_LOCKED';
-    // v21.23.6: giveback room 0.32R → 0.45R (floor +0.65R as-is) — TP1 ke
-    // baad ka normal pullback ab SL trigger nahi karta, runner TP2 tak zinda.
-    const lockR = Math.max(0.65, +(peakR - 0.45).toFixed(2));
-    stageLabel = `Stage 4 · TP1 Hit (60% Booked) · SL Auto-Trailed +${lockR}R`;
+    // v21.23.7: giveback room ab vol-adaptive (LOW 0.40 / NORMAL 0.45 /
+    // HIGH 0.55 / EXTREME 0.65) — floor +0.65R as-is.
+    const lockR = Math.max(0.65, +(peakR - profile.stage4GivebackR).toFixed(2));
+    stageLabel = `Stage 4 · TP1 Hit (${Math.round(profile.tp1ClosePct * 100)}% Booked) · SL Auto-Trailed +${lockR}R`;
     candidateSl = tightenSl(candidateSl, priceAtR(lockR));
-  } else if (peakR >= 0.80) {
+  } else if (peakR >= profile.stage3R) {
     stageCode = 'STAGE_3_PROFIT_RATCHET';
-    const lockR = Math.max(0.45, +(peakR - 0.32).toFixed(2));
+    // v21.23.7: pre-TP1 ratchet giveback bhi vol-scaled (stage3 ≤ stage4 har class me).
+    const lockR = Math.max(0.45, +(peakR - profile.stage3GivebackR).toFixed(2));
     stageLabel = `Stage 3 · Pre-TP1 Profit Ratchet (+${lockR}R Locked)`;
     candidateSl = tightenSl(candidateSl, priceAtR(lockR));
-  } else if (peakR >= 0.50) {
+  } else if (peakR >= profile.stage2R) {
     stageCode = 'STAGE_2_BREAKEVEN_PLUS';
     const lockR = Math.max(0.15, +((peakR - 0.35) * 0.65).toFixed(2));
     stageLabel = `Stage 2 · Fee-Protected Breakeven + Auto-Trail (+${lockR}R Zero-Loss)`;
     const bePlus = isLong ? Math.max(feeFloor, priceAtR(lockR)) : Math.min(feeFloor, priceAtR(lockR));
     candidateSl = tightenSl(candidateSl, bePlus);
-  } else if (peakR >= 0.30) {
+  } else if (peakR >= profile.stage1R) {
     stageCode = 'STAGE_1_RISK_HALVED';
-    const lockR = peakR >= 0.42 && peakCoveredFee ? 0.05 : Math.max(-0.45, +(peakR - 0.80).toFixed(2));
-    stageLabel = peakR >= 0.42 && peakCoveredFee
+    // v21.23.7: early-BE shield bar bhi vol-scaled (stage1R + 0.12) — HIGH/EXTREME
+    // vol me BE-lock jaldi lagana whipsaw invite karta tha.
+    const beShieldBarR = +(profile.stage1R + 0.12).toFixed(2);
+    const lockR = peakR >= beShieldBarR && peakCoveredFee ? 0.05 : Math.max(-0.45, +(peakR - 0.80).toFixed(2));
+    stageLabel = peakR >= beShieldBarR && peakCoveredFee
       ? 'Stage 1 · Early Breakeven Shield (Zero-Loss Lock)'
       : 'Stage 1 · Early Profit Shield (Risk Cut 50%+)';
-    const shieldPx = peakR >= 0.42 && peakCoveredFee
+    const shieldPx = peakR >= beShieldBarR && peakCoveredFee
       ? (isLong ? Math.max(feeFloor, priceAtR(0.05)) : Math.min(feeFloor, priceAtR(0.05)))
       : priceAtR(lockR);
     candidateSl = tightenSl(candidateSl, shieldPx);
-  } else if (peakR >= 0.18) {
+  } else if (peakR >= profile.stage1EarlyR) {
     stageCode = 'STAGE_1_EARLY_SHIELD';
     stageLabel = 'Stage 1 · Ultra-Fast Micro-Shield (Risk Cut 35%)';
     candidateSl = tightenSl(candidateSl, priceAtR(-0.65));
@@ -361,11 +429,13 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     ? Math.max(0, (peakMove - favorableMove) / peakMove)
     : 0;
   const givebackR = +(peakR - currentR).toFixed(2); // absolute giveback in R units
-  // v21.23.6 PULLBACK TOLERANCE: strong trend me chhote pullbacks NORMAL hai —
-  // "ek ek baar thoda pull back bhi hota hai". Book sirf DEEP giveback pe:
-  // >=45% of peak AND >=0.28R absolute (pehle 38% tha bina absolute floor ke —
-  // har normal pullback trade band kar deta tha).
-  const peakPullbackReversal = peakR >= 0.50 && peakGivebackRatio >= 0.45 && givebackR >= 0.28 && feeCovered;
+  // v21.23.7 VOL-ADAPTIVE PULLBACK TOLERANCE (user: "ek ek baar thoda pull
+  // back bhi hota hai" — high-vol me to pullback hi NORMAL hai): book sirf
+  // DEEP giveback pe — ratio >= profile.givebackRatioPct% (LOW 42 / NORMAL 45
+  // / HIGH 55 / EXTREME 65) AND absolute >= profile.givebackAbsFloorR
+  // (LOW 0.25 / NORMAL 0.28 / HIGH 0.38 / EXTREME 0.50R) DONO chahiye.
+  // HIGH/EXTREME me ek-candle 45% noise-giveback ab book NAHI karta.
+  const peakPullbackReversal = peakR >= 0.50 && peakGivebackRatio >= (profile.givebackRatioPct / 100) && givebackR >= profile.givebackAbsFloorR && feeCovered;
   const trailedSlHit = candidateSl > 0 && (isLong ? ltp <= candidateSl : ltp >= candidateSl);
   const slImproved = candidateSl > 0 && currentSl > 0 && Math.abs(candidateSl - currentSl) > 1e-7 && (isLong ? candidateSl > currentSl : candidateSl < currentSl);
 
@@ -376,12 +446,14 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     stageLabel = `${stageLabel} · Defensive Reversal Tighten`;
   }
   // v21.23.6 REVERSAL-RISK PROFIT-LOCK (tighten ONLY — trade band NAHI hota):
-  // exhaustion/opposing-flow hint ke saath profit me ho to SL ko peak−0.50R
-  // (min +0.15R) pe lock karo — giveback protection WITHOUT closing a
-  // potentially-still-strong trend. tightenSl monotonic hai — stage locks
-  // isse loose nahi hote.
+  // exhaustion/opposing-flow hint ke saath profit me ho to SL ko
+  // peak − profile.hintGivebackR (LOW/NORMAL 0.50 / HIGH/EXTREME 0.65 —
+  // volatile regimes me routine exhaustion flags zyada fire hote hain,
+  // isliye lock ko wide rakhna padta hai) pe lock karo (min +0.15R) —
+  // giveback protection WITHOUT closing a potentially-still-strong trend.
+  // tightenSl monotonic hai — stage locks isse loose nahi hote.
   if (reversalRiskHint && feeCovered && peakR >= 0.45) {
-    const hintLockR = Math.max(0.15, +(peakR - 0.50).toFixed(2));
+    const hintLockR = Math.max(0.15, +(peakR - profile.hintGivebackR).toFixed(2));
     candidateSl = tightenSl(candidateSl, priceAtR(hintLockR));
     stageLabel = `${stageLabel} · Reversal-Risk Profit-Lock`;
   }
@@ -462,6 +534,12 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     shouldExitDefensiveSl,
     shouldClose: shouldBookProfitNow || shouldExitDefensiveSl,
     exitReason,
+    // v21.23.7 VOL-ADAPTIVE TELEMETRY — UI + 3s fast loop (b.* stamp) +
+    // paper-engine TP1-partial live-sync isii se chalti hain.
+    volClass,
+    momentumState,
+    atrPct: profile.atrPct ?? (Number(trade.atrPct) > 0 ? Number(trade.atrPct) : null),
+    t1ClosePct: profile.tp1ClosePct,
     checkedAt: Date.now(),
   };
 }
@@ -765,6 +843,285 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
   return { ok: true, activeCount: synced.length, synced };
 }
 
+/**
+ * v21.23.8 UC FLIP-AND-REVERSE — reverse-entry ticket derivation (PURE).
+ *
+ * Jab board UC-status pakka opposite-side confirm karta hai (revByRow), to
+ * reverse trade ko EK market-order ticket chahiye jo CURRENT live price ke
+ * around anchored ho (purana plan entry door ho sakta hai). Priority:
+ *   1. Flipped board-row ka apna plan (SL valid-side + reasonable distance)
+ *   2. Synthetic protective geometry: SL = 1.2% (wahi default jo CoinDCX
+ *      position-sync use karta hai) · T1 = +1.25R · T2 = +2.4R
+ *
+ * Board plan SL tabhi use hota hai jab wo current price ke SAHI side par ho
+ * (LONG→SL neeche / SHORT→SL upar) aur 0.3%–5% distance band me ho —
+ * stale/absurd plan levels kabhi reverse ticket me leak nahi hote.
+ */
+export function deriveUcFlipReverseTicket({ side, ltp, boardRow = null, fallbackRiskPct = 0.012 } = {}) {
+  const s = String(side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  const px = Number(ltp) || 0;
+  if (!(px > 0)) return null;
+  const isLong = s === 'LONG';
+
+  const planSl = Number(boardRow?.plan?.stopLoss) || 0;
+  const planEntry = Number(boardRow?.plan?.entry) || 0;
+  const planT1 = Number(boardRow?.plan?.t1) || 0;
+  const planT2 = Number(boardRow?.plan?.t2) || 0;
+
+  const slValidSide = planSl > 0 && (isLong ? planSl < px : planSl > px);
+  const slDistPct = slValidSide ? Math.abs(px - planSl) / px : 0;
+  const slReasonable = slValidSide && slDistPct >= 0.003 && slDistPct <= 0.05;
+  const riskUnit = slReasonable
+    ? Math.abs(px - planSl)
+    : Math.max(px * 0.004, px * (Number(fallbackRiskPct) > 0 ? Number(fallbackRiskPct) : 0.012));
+  if (!(riskUnit > 0)) return null;
+  const stopLoss = +(isLong ? px - riskUnit : px + riskUnit).toFixed(6);
+
+  // T1/T2: flipped-row plan valid-side + sane R-spacing → use; warna synthetic.
+  const t1PlanValid = planT1 > 0 && planEntry > 0 && (isLong ? planT1 > px : planT1 < px)
+    && Math.abs(planT1 - px) >= 0.4 * riskUnit && Math.abs(planT1 - px) <= 6 * riskUnit;
+  const t1 = t1PlanValid ? +planT1.toFixed(6) : +(isLong ? px + 1.25 * riskUnit : px - 1.25 * riskUnit).toFixed(6);
+  const t2PlanValid = planT2 > 0 && t1PlanValid && (isLong ? planT2 > t1 : planT2 < t1)
+    && Math.abs(planT2 - px) >= Math.abs(planT1 - px);
+  const t2 = t2PlanValid ? +planT2.toFixed(6) : +(isLong ? px + 2.4 * riskUnit : px - 2.4 * riskUnit).toFixed(6);
+
+  return {
+    side: s,
+    entry: px,
+    stopLoss,
+    t1,
+    t2,
+    riskUnit,
+    src: slReasonable ? 'board-plan' : 'synthetic',
+  };
+}
+
+/**
+ * v21.23.8: aaj (trade-day) ek symbol par kitni UC flip-reverse entries
+ * already khul chuki hain — book se derive (restart-safe, koi extra state
+ * nahi). Churn guard ke liye.
+ */
+function _ucFlipCountToday(symbol, execMarket, now = null) {
+  const st = _loadState();
+  // v21.23.8 test-determinism: day-key SUNDAY tick ke `now` (jo tests fixed
+  // clock dete hain) se derive hota hai — real-clock mix-up se count kabhi
+  // galat nahi hota (runtime me `now` Date.now() hi hai).
+  const dk = dayKeyFor(execMarket, new Date(Number(now) || Date.now()));
+  let n = 0;
+  for (const x of st.book) {
+    if (x.flipEntry === true && String(x.symbol || '').toUpperCase() === String(symbol || '').toUpperCase() && x.dayKey === dk) n += 1;
+  }
+  return n;
+}
+
+/**
+ * v21.23.8 UC FLIP-AND-REVERSE — purana trade band hone ke TURANT baad
+ * same-symbol opposite-side reverse entry. Caller (deep monitor sweep)
+ * ne close confirm kar diya hai; ye helper sirf ENTRY ka kaam karta hai.
+ *
+ * SAFETY (hard):
+ *   • Strict traded-only: LIVE reverse order fail → paper mirror close + NO book row.
+ *   • EQUITY SIM (GLOBALFUTURES) kabhi LIVE nahi — paper/SIM only.
+ *   • Daily quota + notional budget + flip-churn cap (4/symbol/day) respected.
+ *   • Direction lock: purana release + naya opposite-side acquire (atomic).
+ */
+async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now, isLiveSession }) {
+  try {
+    if (cfg?.ucFlipReverse === false) return null;
+    if (!(Number(ltp) > 0)) return null;
+    const paper = p.paper || {};
+    // paper engine inject hi na ho to ZERO side-effects ke saath bail —
+    // legacy test mocks (sirf close/getSummary) ke liye state kabhi mutate
+    // nahi hoti.
+    if (typeof paper.openPaperTrade !== 'function') return null;
+    const sym = String(b.symbol || '').toUpperCase();
+    const execMarket = String(b.execMarket || b.market || 'FUTURES').toUpperCase();
+    const isSim = execMarket === 'GLOBALFUTURES';
+    const side = b.side === 'LONG' ? 'SHORT' : 'LONG';
+
+    const ticket = deriveUcFlipReverseTicket({ side, ltp, boardRow });
+    if (!ticket) return null;
+
+    // churn cap: din me sirf 4 flip-entries per symbol
+    if (_ucFlipCountToday(sym, execMarket, now) >= UC_FLIP_MAX_PER_SYMBOL_PER_DAY) {
+      _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: daily flip cap (${UC_FLIP_MAX_PER_SYMBOL_PER_DAY}) reached — protective exit done, reverse entry nahi`);
+      return null;
+    }
+    // strict 1-trade-per-session: close ke baad koi aur open bacha to flip nahi
+    if (_openLinked().length > 0) {
+      _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: another trade still open — 1 session = 1 trade lock`);
+      return null;
+    }
+    // daily quota — hard cap (live session me wahi relaxed 15 headroom)
+    const stq = _rollDayIfNeeded();
+    const flipQuota = isLiveSession ? Math.max(Number(cfg.maxTradesPerDay) || 5, 15) : (Number(cfg.maxTradesPerDay) || 5);
+    if (stq.dayCount >= flipQuota) {
+      _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: daily quota ${stq.dayCount}/${flipQuota} done`);
+      return null;
+    }
+
+    const fxRate = clampN(p.fx ?? cfg.inrPerUsdt, 40, 150, 84);
+    const isUsd = execMarket === 'FUTURES' || execMarket === 'GLOBALFUTURES' || execMarket === 'CRYPTO';
+    const entry = ticket.entry;
+    const riskPerUnit = ticket.riskUnit;
+
+    // qty: risk-based sizing (wahi math jo normal entry path use karta hai)
+    const riskBudget = isUsd ? cfg.riskPerTradeINR / fxRate : cfg.riskPerTradeINR;
+    let qty = isUsd ? Math.floor((riskBudget / riskPerUnit) * 10000) / 10000 : Math.floor(riskBudget / riskPerUnit);
+    const notionalCapINR = Math.min(cfg.maxNotionalPerTradeINR, cfg.maxPositionsINR - _openNotionalINR());
+    const capQty = isUsd ? (notionalCapINR / fxRate) / entry : notionalCapINR / entry;
+    if (qty > capQty) qty = isUsd ? Math.floor(capQty * 10000) / 10000 : Math.floor(capQty);
+    const minQty = isUsd ? 0.0001 : 1;
+    if (!(qty >= minQty)) {
+      _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: qty too small after caps (risk ${riskPerUnit.toFixed(4)})`);
+      return null;
+    }
+
+    const effectiveWalletINR = Number(p.walletEquityINR) > 0 ? Number(p.walletEquityINR) : Number(cfg.walletAmountINR) || 10000;
+    const leverage = isSim ? 1 : computeMtfWalletLeverage(effectiveWalletINR, cfg);
+    const w95 = computeWallet95Deployment({ walletINR: effectiveWalletINR, leverage, fxRate, deployPct: cfg.walletDeployPct ?? 100, cfg });
+    const feeBePrice = feeBreakevenFloor({ entry, side, market: execMarket });
+
+    // v21.23.7 ENTRY-STAMP parity: vol class + TP1 partial % flip entry par bhi
+    const entryAtrPct = Number(boardRow?.context?.atrPct) > 0
+      ? Number(boardRow.context.atrPct)
+      : (Number(b.atrPct) > 0 ? Number(b.atrPct) : null);
+    const entryVolClass = entryAtrPct != null ? classifyVolatility(entryAtrPct) : (b.volClass || VOL_CLASS.NORMAL);
+    const entryT1ClosePct = tp1ClosePctFor(entryVolClass);
+
+    const res = paper.openPaperTrade?.({
+      symbol: sym, direction: side,
+      entry, qty, stopLoss: ticket.stopLoss, target1: ticket.t1, target2: ticket.t2,
+      market: execMarket, leverage,
+      feeBreakevenPrice: feeBePrice,
+      t1ClosePct: entryT1ClosePct,
+      atrPct: entryAtrPct,
+      source: 'uc-flip-reverse',
+      sourceMeta: {
+        flippedFrom: `${sym} ${b.side}`, flipCloseReason: b.closeReason || null,
+        score: boardRow?.superScore ?? b.score ?? null, tier: boardRow?.tier ?? b.tier ?? null,
+        leverage, walletINR: effectiveWalletINR,
+        walletDeployPct: w95.walletDeployPct, deployedWalletINR: w95.deployedWalletINR,
+        feeBreakevenPrice: feeBePrice,
+      },
+      label: `UC FLIP-REVERSE · ${boardRow?.tier ?? b.tier ?? 'FLIP'} ${boardRow?.superScore ?? b.score ?? '—'} · ${side} (was ${b.side}) · ${isUsd ? (isSim ? 'USDC' : 'USDT') : '₹'}`,
+    });
+    if (!res || res.error || res.ok === false) {
+      _logEvent('flip-skip', `🔁 UC FLIP-REVERSE ${sym}: paper open failed — ${res?.error || 'unavailable'}`);
+      return null;
+    }
+
+    // LIVE reverse order — sirf REAL desks (FUTURES perps / INDIA);
+    // EQUITY SIM desk paper/SIM-only hai (CoinDCX par listed hi nahi).
+    let liveOrderResult = null;
+    const wantLiveOrder = !isSim && (cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false));
+    if (wantLiveOrder) {
+      if (typeof p.liveExecute !== 'function') {
+        if (res?.trade?.id != null && typeof paper.closePaperTrade === 'function') {
+          try { paper.closePaperTrade(res.trade.id, p.quotes); } catch { /* ignore */ }
+        }
+        _logEvent('flip-skip', `🔁 UC FLIP-REVERSE ${sym}: live handler unavailable — no untraded reverse entry`);
+        return null;
+      }
+      try {
+        liveOrderResult = await p.liveExecute({
+          symbol: sym, market: execMarket, side,
+          entry, stopLoss: ticket.stopLoss, target1: ticket.t1, target2: ticket.t2,
+          qty, leverage,
+          walletINR: effectiveWalletINR,
+          walletDeployPct: w95.walletDeployPct,
+          deployedWalletINR: w95.deployedWalletINR,
+          deployedWalletUSDT: w95.deployedWalletUSDT,
+          buyingPowerINR: w95.buyingPowerINR,
+          buyingPowerUSDT: w95.buyingPowerUSDT,
+          row: boardRow,
+        });
+        if (!liveOrderResult?.ok) {
+          if (res?.trade?.id != null && typeof paper.closePaperTrade === 'function') {
+            try { paper.closePaperTrade(res.trade.id, p.quotes); } catch { /* ignore */ }
+          }
+          _logEvent('flip-skip', `🔁 UC FLIP-REVERSE ${sym}: live order not executed — ${liveOrderResult?.error || liveOrderResult?.reason || 'not filled'}`);
+          return null;
+        }
+      } catch (e) {
+        if (res?.trade?.id != null && typeof paper.closePaperTrade === 'function') {
+          try { paper.closePaperTrade(res.trade.id, p.quotes); } catch { /* ignore */ }
+        }
+        _logEvent('flip-skip', `🔁 UC FLIP-REVERSE ${sym}: live order error — ${e?.message || e}`);
+        return null;
+      }
+    }
+
+    const finalQty = Number(liveOrderResult?.filled?.qty) > 0 ? Number(liveOrderResult.filled.qty) : qty;
+    const finalEntry = Number(liveOrderResult?.filled?.price) > 0 ? Number(liveOrderResult.filled.price) : entry;
+    const finalSl = Number(liveOrderResult?.filled?.stopLoss) > 0 ? Number(liveOrderResult.filled.stopLoss) : ticket.stopLoss;
+    const finalT1 = Number(liveOrderResult?.filled?.t1) > 0 ? Number(liveOrderResult.filled.t1) : ticket.t1;
+    const finalT2 = Number(liveOrderResult?.filled?.t2) > 0 ? Number(liveOrderResult.filled.t2) : ticket.t2;
+    const finalRiskPerUnit = Math.max(finalEntry * 0.004, Math.abs(finalEntry - finalSl));
+
+    const rec = {
+      paperId: res?.trade?.id ?? null,
+      liveOrderId: liveOrderResult?.orderId ?? liveOrderResult?.filled?.orderId ?? null,
+      livePositionId: liveOrderResult?.position?.exchangePositionId ?? liveOrderResult?.position?.id ?? null,
+      executionMode: liveOrderResult?.ok ? 'LIVE' : 'PAPER',
+      traded: true,
+      fullControl: Boolean(liveOrderResult?.ok),
+      openedInLiveMode: Boolean(wantLiveOrder),
+      symbol: sym, market: b.market, execMarket, ccy: isSim ? 'USDC' : (isUsd ? 'USDT' : 'INR'),
+      fxUsed: isUsd ? fxRate : null,
+      side,
+      score: boardRow?.superScore ?? b.score ?? null,
+      tier: boardRow?.tier ?? b.tier ?? 'FLIP',
+      mode: b.mode || cfg.mode || 'INTRADAY', holdMin: b.holdMin || cfg.holdMin || null,
+      entry: finalEntry, stopLoss: finalSl, initialStopLoss: finalSl, trailedStopLoss: finalSl, peakPrice: finalEntry,
+      t1: finalT1, t2: finalT2, qty: finalQty,
+      leverage, walletINR: Math.round(effectiveWalletINR),
+      walletDeployPct: w95.walletDeployPct,
+      deployedWalletINR: w95.deployedWalletINR,
+      deployedWalletUSDT: w95.deployedWalletUSDT,
+      buyingPowerINR: w95.buyingPowerINR,
+      buyingPowerUSDT: w95.buyingPowerUSDT,
+      feeBreakevenPrice: feeBePrice,
+      deepMonitorStage: 'STAGE_0_INITIAL_GUARD',
+      deepMonitorLabel: 'Stage 0 · UC Flip-Reverse Entry (SL Auto-Trail Ready)',
+      atrPct: entryAtrPct, volClass: entryVolClass, momentumState: null, t1ClosePct: entryT1ClosePct,
+      trendStatus: `🔁 UC FLIP ${b.side}→${side} · ${side === 'SHORT' ? 'BEARISH' : 'BULLISH'} REVERSE LIVE WATCH`,
+      marginINR: +(finalQty * finalEntry * (isUsd ? fxRate : 1) / leverage).toFixed(2),
+      marginUsdt: isUsd ? +(finalQty * finalEntry / leverage).toFixed(4) : null,
+      riskINR: +(finalQty * finalRiskPerUnit * (isUsd ? fxRate : 1)).toFixed(2),
+      riskUsdt: isUsd ? +(finalQty * finalRiskPerUnit).toFixed(4) : null,
+      notional: +(finalQty * finalEntry * (isUsd ? fxRate : 1)).toFixed(2),
+      notionalUsdt: isUsd ? +(finalQty * finalEntry).toFixed(4) : null,
+      flipEntry: true,
+      flippedFrom: String(b.side || ''),
+      openedAt: now, dayKey: dayKeyFor(execMarket, new Date(now)),
+      status: 'OPEN', closeReason: null, closedAt: null, pnl: null,
+      drivers: [`UC FLIP-REVERSE: board ${side} PAKKA (${boardRow?.triggerFired ? 'trigger FIRED' : `score ${boardRow?.superScore ?? '—'}`}) — ${b.side} trade ${b.closeReason || 'closed'} hua, reverse entry open`],
+    };
+    const stx = _loadState();
+    stx.book.push(rec);
+    stx.dayCount += 1;
+    stx.perSymbolLast[sym] = now;
+    _persistState();
+    // Direction lock atomic flip: purana release (paper _closePart ne already
+    // kiya hoga — idempotent) + naya opposite-side acquire (LIVE adopted rows
+    // ke liye yahi authoritative release hai).
+    releaseDirectionLock(sym, { clearCooldown: true });
+    acquireDirectionLock({ symbol: sym, side, source: 'uc-flip-reverse', now });
+    out.opened.push(rec);
+    _logEvent('flip-reverse', `🔁 UC FLIP-REVERSE ${sym}: ${b.side} → ${side} @ ${finalEntry} · SL ${finalSl} · T1 ${finalT1} · T2 ${finalT2} · qty ${finalQty} (${rec.executionMode}) — purana trade '${b.closeReason}' pe band hua (minimal-loss protective)`);
+    if (typeof p.notify === 'function') {
+      try {
+        await p.notify(`🔁 MTF AUTO UC FLIP-REVERSE: ${sym} ${b.side}→${side} @ ${finalEntry} | SL ${finalSl} | T1 ${finalT1} | T2 ${finalT2} | (${rec.executionMode}) — board ${side} PAKKA, purana trade minimal-loss close`);
+      } catch { /* non-fatal */ }
+    }
+    return rec;
+  } catch (e) {
+    _logEvent('flip-skip', `🔁 UC FLIP-REVERSE ${b?.symbol || '?'}: error — ${e?.message || e}`);
+    return null;
+  }
+}
+
 // ---------------- TICK ----------------
 /**
  * One auto-link tick. PURE-ish: sab IO (boards, paper engine, quotes)
@@ -899,6 +1256,23 @@ export async function mtfAutoTick(p = {}) {
       b.deepMonitorStage = deepEval.stageCode;
       b.deepMonitorLabel = deepEval.stageLabel;
       b.trendStatus = deepEval.trendStatus;
+      // v21.23.7 VOL-ADAPTIVE STAMPS: live ATR% vol-class + momentum state ko
+      // book record pe persist karo — 3s fast loop (jo boardRow nahi dekh
+      // sakta) inhi stamps se SAME vol regime trail karta hai.
+      b.atrPct = deepEval.atrPct ?? b.atrPct ?? null;
+      b.volClass = deepEval.volClass || b.volClass || null;
+      b.momentumState = deepEval.momentumState || b.momentumState || null;
+      b.t1ClosePct = deepEval.t1ClosePct || b.t1ClosePct || 0.5;
+      // TP1 se PEHLE vol-class shift hui ho to paper engine ka TP1 partial %
+      // live-update karo (HIGH vol me runner bada — user spec item 6).
+      if (deepEval.tp1Hit !== true && livePaper?.id != null
+        && Math.abs((livePaper.t1ClosePct ?? 0.5) - deepEval.t1ClosePct) > 1e-6
+        && typeof paper.updatePaperTradeT1ClosePct === 'function') {
+        try {
+          paper.updatePaperTradeT1ClosePct(livePaper.id, deepEval.t1ClosePct);
+          livePaper.t1ClosePct = deepEval.t1ClosePct;
+        } catch { /* non-fatal */ }
+      }
       if (deepEval.slTrailed && deepEval.trailedStopLoss > 0) {
         const prevSl = b.trailedStopLoss ?? b.stopLoss;
         b.trailedStopLoss = deepEval.trailedStopLoss;
@@ -961,7 +1335,26 @@ export async function mtfAutoTick(p = {}) {
         )
       );
 
-      if (shouldExitByReversalOrTrail) {
+      // v21.23.8 UC FLIP-AND-REVERSE (user: "UC ne LONG se SHORT pakka hone pe
+      // update karta hai status tab minimal loss ke sath vo long trade close karke
+      // IMMEDIATELY wahi trade short me lagna chahiye"): revByRow = UC-status ka
+      // PAKKA flip (board side === oppSide && triggerFired/score>=65) — wahi
+      // v21.23.6 TRUE-flip definition. Ab loss/fee-not-covered territory me
+      // fee-guard HOLD nahi — MINIMAL-LOSS protective exit + turant reverse entry.
+      // "Thoda pullback" (board same-side) kabhi flip nahi hota — pullback trades
+      // SL-trail/vol-adaptive profile ke saath SAFALTA se chalte hain (TP1/TP2 tak).
+      const ucFlipConfirmed = revByRow;
+      const ucFlipAgeOk = !isRuntimeClock || tradeAgeMs >= (isLivePos ? UC_FLIP_MIN_AGE_MS_LIVE : UC_FLIP_MIN_AGE_MS_PAPER);
+      const ucFlipProtectiveExit = Boolean(
+        ucFlipConfirmed
+        && cfg.ucFlipReverse !== false
+        && ucFlipAgeOk
+        && !deepEval.tp2Hit
+        && !shouldExitByReversalOrTrail
+      );
+      const shouldExitNow = shouldExitByReversalOrTrail || ucFlipProtectiveExit;
+
+      if (shouldExitNow) {
         if (b.executionMode === 'LIVE' && typeof p.liveClose === 'function') {
           try { await p.liveClose(b); } catch { /* non-fatal */ }
         }
@@ -973,7 +1366,9 @@ export async function mtfAutoTick(p = {}) {
         if (r?.ok || b.executionMode === 'LIVE') {
           const ccyPrefix = b.ccy === 'USDT' ? '$' : '₹';
           b.status = 'CLOSED';
-          b.closeReason = revEval?.shouldExit ? revEval.stage : (deepEval.exitReason || 'DEEP_MONITOR_PROFIT_BOOK');
+          b.closeReason = ucFlipProtectiveExit
+            ? 'UC_FLIP_MINIMAL_LOSS_EXIT'
+            : (revEval?.shouldExit ? revEval.stage : (deepEval.exitReason || 'DEEP_MONITOR_PROFIT_BOOK'));
           b.closedAt = now;
           b.pnl = r?.trade?.realizedPnl ?? revEval?.netTotalPnl ?? deepEval.grossPnl;
           out.closed.push({
@@ -985,12 +1380,29 @@ export async function mtfAutoTick(p = {}) {
             feeBePrice: revEval?.feeBePrice ?? deepEval.feeBreakevenPrice,
             trailedStopLoss: b.trailedStopLoss ?? b.stopLoss,
           });
-          _logEvent('reversal-exit', `REVERSAL FEE-SAFE EXIT ${b.symbol} @ ${rawQuote} (reason ${b.closeReason} · fee floor ${deepEval.feeBreakevenPrice}) — pnl ${ccyPrefix}${b.pnl ?? '—'} (ZERO LOSS)`);
+          _logEvent(ucFlipProtectiveExit ? 'flip-exit' : 'reversal-exit', ucFlipProtectiveExit
+            ? `🔁 UC FLIP MINIMAL-LOSS EXIT ${b.symbol} ${b.side} @ ${rawQuote} — board ${oppSide} PAKKA hone par full SL (-1R) se pehle bacha liya (R ${deepEval.currentR})`
+            : `REVERSAL FEE-SAFE EXIT ${b.symbol} @ ${rawQuote} (reason ${b.closeReason} · fee floor ${deepEval.feeBreakevenPrice}) — pnl ${ccyPrefix}${b.pnl ?? '—'} (ZERO LOSS)`);
           if (typeof p.notify === 'function') {
-            try { await p.notify(`🛡️ MTF AUTO Deep Monitor Exit: ${b.symbol} ${b.side} closed @ ${rawQuote} (${b.closeReason}) — net pnl ${ccyPrefix}${b.pnl ?? '—'}`); } catch { /* non-fatal */ }
+            try {
+              const exitMsg = ucFlipProtectiveExit
+                ? `🔁 MTF AUTO UC FLIP: ${b.symbol} ${b.side} closed @ ${rawQuote} MINIMAL LOSS (${deepEval.currentR}R) — board ${oppSide} PAKKA, reverse entry opening...`
+                : `🛡️ MTF AUTO Deep Monitor Exit: ${b.symbol} ${b.side} closed @ ${rawQuote} (${b.closeReason}) — net pnl ${ccyPrefix}${b.pnl ?? '—'}`;
+              await p.notify(exitMsg);
+            } catch { /* non-fatal */ }
+          }
+          // v21.23.8: UC-confirmed flip ke baad IMMEDIATE same-symbol reverse
+          // entry (minimal-loss close + reverse = ek atomic smart move). TP2
+          // complete hua ho to flip NAHI — "TP1/TP2 tak full trade complete"
+          // ho chuka hai, naya signal normal entry path se aayega.
+          if (ucFlipConfirmed && cfg.ucFlipReverse !== false && !deepEval.tp2Hit) {
+            await _tryOpenUcFlipReverse({
+              b, boardRow, ltp: rawQuote, p, cfg, out, now,
+              isLiveSession: cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false),
+            });
           }
         }
-      } else if (revByRow && revEval && !revEval.feeCovered) {
+      } else if (revByRow && revEval && !revEval.feeCovered && !(cfg.ucFlipReverse !== false && ucFlipAgeOk)) {
         _logEvent('reversal-hold', `REVERSAL FEE-GUARD HOLD ${b.symbol}: ltp ${rawQuote} has not cleared fee-breakeven ${revEval.feeBePrice} — holding to prevent fee loss (SL tightened to ${b.trailedStopLoss ?? b.stopLoss})`);
       }
     }
@@ -1085,8 +1497,26 @@ export async function mtfAutoTick(p = {}) {
     if (openForDesk >= effectiveMaxOpenPositions || _openLinked().length >= effectiveMaxOpenPositions) { out.skipped.push(`${market}: max open positions (${openForDesk}/${effectiveMaxOpenPositions})`); continue; }
     if (_openNotionalINR() >= cfg.maxPositionsINR) { out.skipped.push(`${market}: notional budget full (₹${Math.round(_openNotionalINR())}/${cfg.maxPositionsINR})`); continue; }
 
-    const poolRows = market === 'CRYPTO' && Array.isArray(board.metalsRows)
-      ? [...board.rows, ...board.metalsRows.filter(m => !board.rows.some(r => r?.symbol === m?.symbol))]
+    // v21.23.8 USER SPEC: "sirf FUTURES USDT & EQUITY SIM aur GOLD & SILVER
+    // me hi trade lagna chahiye" — crypto-desk auto-pool ab teen ALLOWED
+    // domain ka hai: FUTURES USDT perps (board.rows) + GOLD/SILVER XAU/XAG
+    // perps (metalsRows) + EQUITY SIM US-desk rows (equitySimRows → paper
+    // GLOBALFUTURES/USDC sim entries — CoinDCX par listed nahi, SIM only).
+    // CoinDCX SPOT (SYM-INR) is pool me KABHI tha hi nahi (execMarket hamesha
+    // FUTURES/GLOBALFUTURES/INDIA), aur v21.23.8 ne executeSignal ko SPOT
+    // FULL-STOP gate diya hai — spot ka koi auto path bachta hi nahi.
+    const poolRows = market === 'CRYPTO'
+      ? [
+          ...(board.rows || []),
+          ...(Array.isArray(board.metalsRows)
+            ? board.metalsRows.filter(m => !(board.rows || []).some(r => r?.symbol === m?.symbol))
+            : []),
+          ...(Array.isArray(board.equitySimRows)
+            ? board.equitySimRows.filter(m =>
+                !(board.rows || []).some(r => r?.symbol === m?.symbol)
+                && !(Array.isArray(board.metalsRows) ? board.metalsRows : []).some(r => r?.symbol === m?.symbol))
+            : []),
+        ]
       : board.rows;
     // When 0 positions are currently open in Live Auto mode, bypass stale symbol cooldown so user's Live Auto click always fires
     const effectiveLastEntryAt = (isLiveExecActive && _openLinked().length === 0) ? {} : stDay.perSymbolLast;
@@ -1181,10 +1611,17 @@ export async function mtfAutoTick(p = {}) {
       // watcher ke qualified `FUTURES|SYM` USDT quote se manage hote hain
       // (INR quote se false SL kabhi nahi).
       const isUsd = market === 'CRYPTO';
+      // v21.23.8: per-ROW exec market — EQUITY SIM rows (GLOBALFUTURES) ab
+      // pool me hain: wo USDC paper/SIM me khulte hain (live impossible —
+      // CoinDCX par US equities listed nahi); baaki crypto rows FUTURES USDT.
+      const rowExecMarket = isUsd
+        ? (String(row.market || '').toUpperCase() === 'GLOBALFUTURES' ? 'GLOBALFUTURES' : 'FUTURES')
+        : 'INDIA';
+      const isSimRow = rowExecMarket === 'GLOBALFUTURES';
+      const execMarket = rowExecMarket;
       // live fx (caller) > config; clamp safety ke liye
       const fxRate = clampN(p.fx ?? cfg.inrPerUsdt, 40, 150, 84);
-      const execMarket = isUsd ? 'FUTURES' : 'INDIA';
-      if (isUsd && p.usdtQuotes) {
+      if (isUsd && !isSimRow && p.usdtQuotes) {
         const q = p.usdtQuotes instanceof Map ? p.usdtQuotes.get(sym) : p.usdtQuotes[sym];
         if (!(Number(q) > 0)) { out.skipped.push(`${sym}: no live USDT perp quote (feed coverage)`); continue; }
         // Real-time Pre-Execution Anti-Reversal & Anti-Chase Guard:
@@ -1203,6 +1640,27 @@ export async function mtfAutoTick(p = {}) {
           : (livePx < entry - 0.55 * riskPerUnit);
         if (chasedTick) {
           out.skipped.push(`${sym}: live price (${livePx}) already ran past ${row.side} entry (${entry}) — anti-late-chase guard blocked entry`);
+          continue;
+        }
+      }
+      // v21.23.8 EQUITY SIM quote gate: GLOBALFUTURES rows ke paas CoinDCX perp
+      // quote nahi hota — board row ka live ltp (Yahoo/global-rt 5s cache) hi
+      // anti-reversal/anti-chase truth hai. No ltp → koi entry nahi.
+      if (isUsd && isSimRow) {
+        const livePx = Number(row.ltp) || 0;
+        if (!(livePx > 0)) { out.skipped.push(`${sym}: no live USDC sim quote (equity-sim feed coverage)`); continue; }
+        const adverseTick = row.side === 'LONG'
+          ? (livePx < entry - 0.25 * riskPerUnit)
+          : (livePx > entry + 0.25 * riskPerUnit);
+        if (adverseTick) {
+          out.skipped.push(`${sym}: sim price (${livePx}) reversing against ${row.side} entry (${entry}) — anti-reversal guard blocked entry`);
+          continue;
+        }
+        const chasedTick = row.side === 'LONG'
+          ? (livePx > entry + 0.55 * riskPerUnit)
+          : (livePx < entry - 0.55 * riskPerUnit);
+        if (chasedTick) {
+          out.skipped.push(`${sym}: sim price (${livePx}) already ran past ${row.side} entry (${entry}) — anti-late-chase guard blocked entry`);
           continue;
         }
       }
@@ -1230,13 +1688,23 @@ export async function mtfAutoTick(p = {}) {
       });
       const feeBePrice = feeBreakevenFloor({ entry, side: row.side, market: execMarket });
       const isEliteOrStrong = row.tier === 'ELITE' || row.tier === 'STRONG' || row.tier === 'ACTION' || Number(row.superScore) >= (Number(cfg.minScore) || 75);
-      const wantLiveOrder = (cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false)) && isEliteOrStrong;
+      // v21.23.8: EQUITY SIM (GLOBALFUTURES) rows KABHI live order nahi lagati
+      // — CoinDCX par US equities listed nahi, SIM/paper-only desk hai.
+      const wantLiveOrder = !isSimRow && (cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false)) && isEliteOrStrong;
 
       // In strict live-only mode, only ELITE/STRONG rows auto-place
       if (cfg.executionMode === 'live' && !isEliteOrStrong) {
         out.skipped.push(`${sym}: live mode requires ELITE/STRONG tier (got ${row.tier} ${row.superScore})`);
         continue;
       }
+
+      // v21.23.7 ENTRY-STAMP: volatility class entry-time board context se —
+      // deep monitor + paper engine TP1-partial inhi se chalenge (LIVE ATR%
+      // 15s tick pe refresh hoti rehti hai). HIGH vol 40% / EXTREME 35%
+      // partial (runner bada), LOW/NORMAL 50% (as-is).
+      const entryAtrPct = Number(row.context?.atrPct) > 0 ? Number(row.context.atrPct) : null;
+      const entryVolClass = entryAtrPct != null ? classifyVolatility(entryAtrPct) : (row.context?.volClass || VOL_CLASS.NORMAL);
+      const entryT1ClosePct = tp1ClosePctFor(entryVolClass);
 
       const res = paper.openPaperTrade?.({
         symbol: sym,
@@ -1245,6 +1713,8 @@ export async function mtfAutoTick(p = {}) {
         market: execMarket,
         leverage,
         feeBreakevenPrice: feeBePrice,
+        t1ClosePct: entryT1ClosePct,
+        atrPct: entryAtrPct,
         // v21.17.0 / v21.22.0 AUDIT: kis board row / score / mode / leverage / 100% wallet se link hua
         source: 'mtf-auto',
         sourceMeta: {
@@ -1337,7 +1807,7 @@ export async function mtfAutoTick(p = {}) {
         traded: true,
         fullControl: Boolean(liveOrderResult?.ok),
         openedInLiveMode: Boolean(wantLiveOrder),
-        symbol: sym, market, execMarket, ccy: isUsd ? 'USDT' : 'INR', fxUsed: isUsd ? fxRate : null,
+        symbol: sym, market, execMarket, ccy: isSimRow ? 'USDC' : (isUsd ? 'USDT' : 'INR'), fxUsed: isUsd ? fxRate : null,
         side: row.side,
         score: row.superScore, tier: row.tier, mode: row.mode, holdMin: row.holdMin,
         entry: finalEntry, stopLoss: finalSl, initialStopLoss: finalSl, trailedStopLoss: finalSl, peakPrice: finalEntry,
@@ -1351,6 +1821,12 @@ export async function mtfAutoTick(p = {}) {
         feeBreakevenPrice: feeBreakevenFloor({ entry: finalEntry, side: row.side, market: execMarket }),
         deepMonitorStage: 'STAGE_0_INITIAL_GUARD',
         deepMonitorLabel: 'Stage 0 · Initial SL Guard',
+        // v21.23.7 ENTRY-STAMP: vol class + TP1 partial pct — 15s deep tick
+        // LIVE boardRow se refresh karta hai; 3s fast loop inhi se padhta hai.
+        atrPct: entryAtrPct,
+        volClass: entryVolClass,
+        momentumState: null,
+        t1ClosePct: entryT1ClosePct,
         trendStatus: `📡 ${row.side === 'SHORT' ? 'BEARISH' : 'BULLISH'} LIVE WATCH (+0.00R)`,
         marginINR: +(finalQty * finalEntry * (isUsd ? fxRate : 1) / leverage).toFixed(2),
         marginUsdt: isUsd ? +(finalQty * finalEntry / leverage).toFixed(4) : null,
@@ -1505,8 +1981,8 @@ export function mtfAutoStatus(liveQuotes = {}) {
     lastTick: st.lastTick,
     paperOnly: cfg.executionMode !== 'live',
     note: cfg.executionMode === 'live'
-      ? `LIVE AUTO MODE ACTIVE — 100% CoinDCX Wallet Deployment + ${computeMtfWalletLeverage(cfg.walletAmountINR, cfg)}x leverage (Wallet < ₹10,000 → 10x · ≥ ₹10,000 → 5x) + Full CoinDCX Active Position Control (TP1/TP2 Trailing SL + Reversal Profit Book).`
-      : 'MTF AUTO-LINK PAPER mode me hai (Live Mode activate karne par ELITE/STRONG trades 100% CoinDCX Wallet + <₹10k=10x / ≥₹10k=5x leverage ke saath auto lagte hain; Full CoinDCX Active Position Control + TP1/TP2 Trailing SL + Reversal Profit Book).',
+      ? `LIVE AUTO MODE ACTIVE — 100% CoinDCX Wallet Deployment + ${computeMtfWalletLeverage(cfg.walletAmountINR, cfg)}x leverage (Wallet < ₹10,000 → 10x · ≥ ₹10,000 → 5x) + Full CoinDCX Active Position Control (TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.`
+      : 'MTF AUTO-LINK PAPER mode me hai (Live Mode activate karne par ELITE/STRONG trades 100% CoinDCX Wallet + <₹10k=10x / ≥₹10k=5x leverage ke saath auto lagte hain; Full CoinDCX Active Position Control + TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.',
   };
 }
 

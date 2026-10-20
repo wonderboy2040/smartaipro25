@@ -1,5 +1,107 @@
 # Changelog
 
+## v21.23.9 — FULL-SITE DEEP RECHECK: CRITICAL SHORT-inversion + 8 aur audit fixes (2026-10-20)
+
+**User ask: "V21.23.8 latest full site code ko deep sabhi features and functions working flow deep recheck karo sabhi working fine hai kya and issues fix kardo"**
+
+Pura site audit hua — data-feed pipeline (mtf/cxWsCandles/cxSpotWs/cxRtStream/ultrafastVerifier/healthMonitor), order-execution pipeline (futures.js/coindcxOrders.js SPOT gate/port.js/positionManager/reversalEngine/globalFutures/directionLock/mtfDualBoard), auto-trade engine (mtfAutoLink UC-flip + volTrail + loops recheck) — 9 defects mile, sab fix.
+
+### 1) CRITICAL — futuresOrderBody SHORT-inversion (server/ai/futures.js + server/exec/port.js)
+- **Root cause**: `futuresOrderBody` ka `long = side !== 'SHORT'` SILENT-LONG-default tha; exec-port adapter `side: 'buy'/'sell'` vocabulary pass karta tha → `'SELL' !== 'SHORT'` → long=true → **SHORT entry exchange par ulta BUY order** (5-10x leverage). execPort tests stubbed mock ke against pin the, isliye real builder kabhi run hi nahi hota tha.
+- **Fix**: dual-vocabulary honest map (`LONG/BUY` → buy, `SHORT/SELL` → sell), unknown side LOUD reject (throw) + `createFuturesOrder` builder-throw ko honest `{orderId:null, error}` me convert (network call se pehle); `port.js open()` ab invalid side ka honest `{ok:false}` reject (silent sell-default gaya); `reversalEngine.priceLevelsForLeg` unknown side → `{sl:null, tp:null}` honest refuse. Primary mtfDual live path pehle se sahi tha (reqSide validated LONG|SHORT) — ye EXEC_MODE=api/hybrid exec-stack path (/api/exec/enter + botRunner) ka cure hai.
+
+### 2) 3s fast-SL LIVE exchange sync ka dead param (routes.js)
+- **Root cause**: fastSlTrailLoop `updateCoinDcxPositionSl({..., newStopLoss: ...})` pass karta tha jabki signature `stopLoss` padhta hai → har pass `{ok:false,'invalid stopLoss'}` early-return → **3s ultra-fast LIVE SL sync 100% silent dead code** (sirf 15s deep monitor sync kar raha tha).
+- **Fix**: `newStopLoss:` → `stopLoss:` — ab LIVE trailed-SL + TP ladder (TP1-hit pe T1→T2) 4.5s throttled exchange par sync hota hai.
+
+### 3) Dead `./metals.js` imports — XAU/XAG fallback legs 100% down (routes.js ×2)
+- **Root cause**: dono quote-resolution sites `import('./metals.js')` karti thi jo repo me EXIST hi nahi karti → hamesha silent `{fetchMetalsPrices: null}` → metals 3-leg fallback chain (Binance fapi → gold-api → Yahoo COMEX) kabhi resolve hi nahi hui — CoinDCX RT book outage me XAU/XAG entries honest-skip + open metals positions board-ltp fallback par.
+- **Fix**: dono sites `./futures.js` ka real `fetchMetalsPrices` resolve karte hain (same row shape).
+
+### 4) mtf.js 4h overlay-bake (v21.23.5 cache-safety invariant violation)
+- **Root cause**: 4h resample OVERLAID 1h series se hota tha (`_indiaCandles('1h')` ki return overlay-applied hai) aur wo baked-overlay 4h `_yfCache.set` me jaata tha — file ke apne "cache holds RAW series" contract ka violation. Ek live-tick wala 4h tail 10-min TTL tak cache-hit reads par freeze ho sakta tha (weight-2.4 4h MTF vote stale intrabar print padhta tha).
+- **Fix**: `_indiaCandles(..., { raw: true })` passthrough — 4h ab RAW 1h payload se resample, overlay sirf per-READ; cache hamesha RAW.
+
+### 5) chartCandles freshness honesty (mtf.js)
+- **Root cause**: chart cache OVERLAID series store karta tha; 60s cache-hits stale forming bar serve karte the aur `fetchedAt: now` freshness OVERSTATE karta tha.
+- **Fix**: INDIA/GLOBALFUTURES hits per-READ `indiaOverlayCandles` refresh (domain-safe IN_<SYM>→.NS/INR legs only — CRYPTO/FUTURES legs blind re-apply NAHI, cross-domain lock preserved); `fetchedAt` ab honest `dataAt` (hit.at).
+
+### 6) Spot WS telemetry honesty (cxSpotWs + cxRtStream + healthMonitor)
+- **Root cause (a)**: producer `spotWsStatus()` `lastUpdateAt` emit karta tha, passthrough drop karta tha → `/api/health coindcxSpot.lastUpdateAt` permanently null; **(b)** healthMonitor ka `coindcxSpot.failStreak` top-level `cx.failStreak` (FUTURES socket ka streak) padhta tha — misattributed telemetry.
+- **Fix**: passthrough ab `lastUpdateAt` + spot ka APNA `failStreak` forward karta hai; healthMonitor spot entry ab spot ka streak padhta hai.
+
+### 7) Fut-book ts seconds normalization (cxBookState + cxWsCandles)
+- **Root cause**: `mergeFutBook` top-level ts to ms-normalize karta tha, magar per-row `btST/cmRT` fallbacks (CoinDCX SECONDS me bhejta hai — v10.13 note) raw bake hote the → `_futTick` ka `atMs < barTime(ms)` → futures live-bar overlay un rows par SILENT `skippedStale` (fails-safe, magar availability gap).
+- **Fix**: `_tsMs()` normalize btST/cmRT (ms values unchanged — no double-scale) + `_futTick` defensive seconds→ms scale; dead `row?.at` read gaya.
+
+### 8) GLOB-quiet false alerts (healthMonitor)
+- **Root cause**: armed GLOB-only (metals XAU/XAG) sessions US-premarket me legitimately minutes-tak attributable tick nahi dete — cxRtStream khud 5-7.5min quiet budget enforce karta hai, magar 90s `ws_stale` alert window budget-aware NAHI tha → poore quiet session me throttled false "🩺 WebSocket down — coindcxFutures" Telegram spam.
+- **Fix**: `globQuiet` honest field (connected + glob-only-armed + not-cooling) + alert-loop exemption; real network-down ab bhi alert hota hai (disconnect connected=false karta hai).
+
+### 9) Audit-verified-OK (no fix needed — documented)
+- SPOT FULL STOP gate-0 first/all-modes/no-bypass ✓; UC flip-reverse engine (churn caps/rollback/TP2-no-flip/atomic lock) ✓; directionLock no-permanent-stuck (release-on-close + 60s sweeper + restart) ✓; mtfDualBoard field parity ✓; equity-sim SIM-only double-wall ✓; overlay cross-domain locks (INR←spot-INR / USDT←fut-USDT / .NS←IN_SYM / Binance-unwrapped) ✓; vol-adaptive trail profile + monotonic ratchet ✓.
+- MTF live auto-arm of shared config: runtime-default me spot gate-0 hi authoritative wall hai (AI_SPOT_FULL_STOP=0 explicit operator opt-in ke under cross-desk arming by-choice) — no change.
+
+### Tests
+- NAYA `test/siteRecheck21239.test.ts` — 33 LOCKS (S1 inversion ×13 incl. THE 'sell'→sell lock + port validation ×3 + priceLevelsForLeg; S2 dead-param ×3; S3 metals ×3; S4 overlay-bake ×3; S5 chart ×3; S6 telemetry ×3; S7 ts-normalize ×4; S8 globQuiet ×2).
+- cxWsCandles.test.ts honest-updates ×2 (india wire count 2→3 chart-refresh wire; cache-safety pin new raw-passthrough form — intent stronger).
+- 222 files / 4119 tests PASS (4086+33), tsc 0, lint 0, dist 21.23.9, check:routes PASS.
+
+## v21.23.8 — UC FLIP-AND-REVERSE SUPER SMART INTELLIGENCE + CoinDCX SPOT FULL STOP + EQUITY SIM allowlist (2026-10-20)
+
+**User ask: "jab UC ne Long se short pakka hone pe update karta hai status tab minimal loss ke sath vo long trade close karke immedately wahi trade short me lagna chahiye aisa super smart intelligence se hona chahiye TP 1 and TP 2 tak full trade complete hoke full profit book hona chahiye aur coindcx spot trade... spot ko full stop kardo sirf futures usdt & equity sim aur gold & silver me hi sirf itne me hi trade lagna chahiye"**
+
+### 1) UC FLIP-AND-REVERSE (the "wrong trade se against trade" cure)
+- **Root cause**: confirmed board-flip (UC status LONG→SHORT PAKKA) hone par bhi fee-guard trade ko HOLD karwata tha jab tak fee-breakeven clear na ho — loss me trade poora -1R SL tak pahanchta tha, aur wahi move jo board ne SHORT PAKKA bola tha wo chhoot jaata tha
+- **Fix**: deep monitor sweep me 3-naya logic —
+  - **UC PAKKA flip** = board row side === opposite + (triggerFired || superScore ≥ 65) — wahi v21.23.6 TRUE-flip definition ("thoda pullback" kabhi flip NAHI hota — board row same-side hi rehta hai)
+  - **Loss / fee-not-covered me ab MINIMAL-LOSS protective exit** (`UC_FLIP_MINIMAL_LOSS_EXIT`) — full -1R SL se pehle trade bachao
+  - **IMMEDIATE same-symbol reverse entry** (`_tryOpenUcFlipReverse`) — minimal-loss close + opposite-side entry EK atomic smart move; reverse ticket current live price pe anchored (`deriveUcFlipReverseTicket`: flipped-row ka plan SL valid-side 0.3–5% band me ho to wahi, warna synthetic 1.2% / +1.25R / +2.4R)
+  - Profit me flip → reversal profit-book (existing) + reverse entry; **TP2 hit → full profit book, koi flip NAHI** (trade poora complete)
+- **Churn guards**: LIVE 60s / paper 30s minimum age, 4 flip-entries/symbol/day cap (protective exit hamesha allowed), daily quota + notional budget respected, direction-lock atomic flip (purana release + naya opposite-side acquire), LIVE strict traded-only (live order fail → paper mirror rollback + koi book row nahi)
+- Config: `ucFlipReverse` (default ON, explicit opt-out possible)
+
+### 2) CoinDCX SPOT FULL STOP (trade allowlist: FUTURES USDT + GOLD/SILVER + EQUITY SIM)
+- **`executeSignal` gate 0 (coindcxOrders.js)**: CoinDCX SPOT (SYM-INR) ka ek-matra order path — legacy 90s auto-executor, manual /api/ai/execute, telegram-approval, superagent — SAB ab runtime-default REJECT (`SPOT FULL STOP — sirf FUTURES USDT + GOLD/SILVER + EQUITY SIM`). `AI_SPOT_FULL_STOP=0` operator opt-in; NODE_ENV=test me hermetic-off
+- **Legacy 90s spot auto-executor PERMANENTLY disabled** (routes.js) — early-return audit shell, koi signal scan/journal spam nahi
+- **EQUITY SIM (GLOBALFUTURES USDC) rows ab auto-trade pool me**: crypto-desk pool ab FUTURES USDT perps + XAU/XAG metals + equitySimRows — SIM/paper entries only (live impossible), `GLOBALFUTURES|SYM` qualified-quote overlay (5 call-sites: deep monitor + 3s fast loop + status) se SL/T1/T2 evaluation live
+
+### 3) Tests
+- NAYA `test/ucFlipReverse21238.test.ts` — 23 LOCKS: ticket derivation (plan/synthetic/sides/geometry), minimal-loss flip close + immediate reverse (paper + LIVE adopted + strict traded-only fail case), profit-flip book+reverse, pullback-≠-flip, TP2-complete no-flip, churn caps + age guard + opt-out, SPOT FULL STOP (unit + gate + legacy-loop source pins), EQUITY SIM allowlist entry, wiring pins
+- 223/223 PASS across the 10 affected suites; full release gate `npm run check` PASS
+
+## v21.23.7 — AUTO-TRADE SUPER SMART SL TRAIL: VOLATILITY-ADAPTIVE + ULTRA-FAST TREND CAPTURE + CoinDCX-tab WS false-DOWN fix (2026-10-20)
+
+**User ask: "jab long or short pe TP1 & TP2 Profit book tak reach nhi ho raha hai bada profit amount book nhi ho raha hai bahut kam profit book karke trade exit ho raha hai isko advance pro level pe smart banao sl trail ko aur improvement karo trade volatile me" + "long or short trade signals trend ultra fast se capture hona chahiye" + "site me coindcx tab me FEEDS 2/2 · 4s WS ⚠ 1 DOWN isko bhi fix kardo"**
+
+### ROOT CAUSES (kyon TP1/TP2 tak pahunchne se pehle trades chhote profit pe band ho rahe the — 5 concrete, C1–C5)
+- **C1 — Stage thresholds FIXED the (volatility-blind)**: 0.18/0.30/0.50/0.80R static entries. HIGH-volatile market (ATR ≥ 1.8%) me 0.30R move NORMAL noise hai — magar system Stage-1 pe trail shuru kar deta tha aur har pullback SL tighten kar deta tha
+- **C2 — Stage-1/2 trails volatile markets me bahut aggressive**: −0.65R/−0.45R tighten — ek normal wick hi SL laga deti thi
+- **C3 — Chandelier width fixed 0.50R**: HIGH-vol me 0.50R pullback peak se ROUTINE hai — SL TP2 ke theek pehle hit (the "TP1/TP2 reach nahi hota" disease)
+- **C4 — Momentum-aware acceleration missing**: fast move ko trail ka ROOM chahiye (WIDEN), momentum fade ho to TIGHTEN
+- **C5 — Giveback thresholds static (45% / 0.28R)**: HIGH-vol me ek candle me hi 45% giveback ho jaata hai — true reversal nahi, sirf noise
+
+### FIXED — VOLATILITY-ADAPTIVE SUPER SMART SL TRAIL ENGINE (volTrail.js — naya pure module)
+1. **Volatility classification (ATR% → class)**: LOW (<0.8%) / NORMAL (0.8–1.8%) / HIGH (1.8–3.5%) / EXTREME (≥3.5%) — source: LIVE `boardRow.context.atrPct` > entry-stamp `trade.atrPct` > 15s-tick stamp `trade.volClass` > NORMAL default (no-data = v21.23.6 behavior)
+2. **Stage entry thresholds vol-scaled** (user spec exact): Stage1-Early 0.18/0.22/0.30/0.40 · Stage1 0.30/0.35/0.45/0.55 · Stage2 0.50/0.55/0.65/0.75 · Stage3 0.80/0.85/0.95/1.05 — HIGH/EXTREME me noise-level moves ab trail trigger NAHI karte (Stage-1 risk-halving ab 0.45R/0.55R pe, pehle 0.30R pe tha)
+3. **Chandelier + giveback widths vol-adaptive**: Stage-4 giveback 0.40/0.45/0.55/0.65 · Stage-5 chandelier 0.45/0.50/0.65/0.80 · Stage-3 giveback 0.32/0.35/0.42/0.50 · stage-1 early-BE bar stage1R+0.12 — volatile trends me runner ko TP2 tak room milta hai
+4. **Pullback giveback tolerance wider in volatile** (user spec): ratio 42/45/55/65% AND absolute floor 0.25/0.28/0.38/0.50R — HIGH-vol ka wahi pullback jo NORMAL me Stage-4 lock (0.75R) pe book karta tha, ab +0.65R floor pe SURVIVE karta hai (measurable delta — test-locked)
+5. **Reversal-risk hint lock vol-aware**: LOW/NORMAL peak−0.50R / HIGH/EXTREME peak−0.65R — volatile regimes me routine exhaustion flags trade ko tight lock se nahi rokte
+6. **TP1 partial book reduced in volatile (runner BIGGER)**: LOW/NORMAL 50% (as-is) / HIGH 40% / EXTREME 35% — open-stamp (row context ATR%) + deep monitor 15s LIVE vol-class shift pe `updatePaperTradeT1ClosePct` se refresh (TP1 se pehle hi effective); paper engine `t1ClosePct` field (open/restore/persist round-trip); unsplittable-1-lot BE contract intact
+7. **C4 MOMENTUM-AWARE ACCELERATION** (user: "trend ultra fast se capture hona chahiye"): board trigger roc1/roc3/volRatio se momentum state — SURGING (fast move in-direction + volume) → chandelier ×1.15 + giveback +0.10R + hint +0.15R (ride the fast move) / FADING (against + dry volume) → chandelier ×0.85 + hint −0.15R (profit lock) / STEADY/UNKNOWN neutral. Hard clamps: chandelier ∈ [0.40, 1.00]R, stage4 ≤ 0.70R, hint ∈ [0.40, 0.80]R — kabhi unbounded loose nahi
+8. **SAFETY (user spec)**: LOW-vol behavior v21.23.6-identical ya TIGHTER (chandelier 0.45 ≤ 0.50, giveback 42% ≤ 45%, floor 0.25 ≤ 0.28 — no regression); monotonic ratchet preserved (tightenSl engine — LIVE vol-class switch mid-trade pe SL kabhi loose nahi hota, test-locked); saare fee-aware guards as-is; har stage floor (+0.65R TP1 floor, +0.45R, +0.15R, −0.45R/−0.65R shields) unchanged
+
+### ULTRA-FAST TREND CAPTURE — 10s opportunistic entry probe (routes.js)
+9. **Entry latency worst-case ~15-21s → ~10s**: naya `fastEntryProbeLoop` (10s) — sirf WARM cached boards (≤8s, `peekDualMtfBoards`) padhta hai (board recompute KABHI nahi = zero compute cost); cheap pre-gates (auto-link ON, desks on, kill off, LIVE session-lock / max-positions clear); qualifying candidate dikhe (tier ELITE/STRONG ya score ≥ minScore, LONG/SHORT, not-open, no autoBlockers) → FULL `onAutoTradeDeepTick` escalation (fresh boards + live wallet + HAR gate re-check — cooldown/quota/elite/anti-chase probe me bypass nahi hota). Headless me probe no-op; 15s recheck + 60s sweep backbone unchanged. Busy-guard + 8s escalation dedup. `onAutoTradeDeepTick` named const hoist (recheck + probe shared)
+
+### CoinDCX TAB "WS ⚠ 1 DOWN" PERMANENT FALSE-POSITIVE — ROOT-CAUSED + FIXED
+10. **THE BUG**: healthMonitor ka `coindcxSpot` entry `healthy: cx.spotWs.healthy === true` padhta tha — jabki `cxRtWsStatus().spotWs` me `healthy` field KABHI EXIST hi nahi karta tha → hamesha false. `armed` fut/glob domains (`_cxArmed`) se aata tha — CoinDCX tab (futures subscribed) par spot tier PERMANENT red "1 DOWN" dikhta tha chahe socket perfectly healthy ho. **FIX (3 layers)**: (a) `cxSpotWs.spotWsStatus()` ab honest derived `healthy` (enabled + connected + book-update ≤120s silent-kill window) + `demandAgeMs` + `cooldownRemainMs` expose karta hai; (b) `cxRtWsStatus().spotWs` healthy/demandAgeMs/cooldownRemainMs passthrough; (c) healthMonitor `coindcxSpot.armed` ab SPOT DEMAND se (ticker-fetch/SSE heartbeat ≤2min = real subscriber; idle ≠ down doctrine) + `ageSec` + `cooldownReason: 'handshake-streak'` jab genuinely cooling. Ab: healthy socket → green; koi demand nahi → grey IDLE; real cooldown → honest DOWN with reason
+
+### Engineering
+- **NAYA test/volTrail21237.test.ts — 55 LOCKS**: vol classification boundaries (0.8/1.8/3.5) · resolve priority · TRAIL_TABLE 4-class × 10-param exact (user spec verbatim) · structural monotonicity/clamps · vol-scaled stage entries (LOW v21.23.6-identical + HIGH/EXTREME windows + EXTREME Stage-3 preemption honest pin) · chandelier per class + TP1 floor · giveback matrix (HIGH 1.2R→0.7R HOLD vs NORMAL same-move BOOK delta + EXTREME + LOW tighter + HIGH deep-giveback book) · hint locks (NORMAL 0.50R / HIGH 0.65R wider) · momentum unit (SURGING 0.57R / FADING 0.43R / clamps 0.92 & 0.40) + engine LONG/SHORT · monotonic ratchet across LOW→HIGH→EXTREME live switch · TP1 partial paper engine (default 50% + HIGH 40% + EXTREME 35% + INDIA ceil + 1-lot BE) + updatePaperTradeT1ClosePct freeze/reject · mtfAutoTick entry-stamp (HIGH-vol row → t1ClosePct 0.40 + atrPct) · deep-monitor stamps + live-sync + entry-stamp source pins · WS false-DOWN fix pins (cxSpotWs healthy derivation + cxRt passthrough + healthMonitor spotArmed + regression pin) · ultra-fast probe wiring pins · profile consumption + hardcoded-GONE pins
+- v2126 source pins HONESTLY updated (user SAFETY spec: "All existing test source pins verified against new constants"): pullback/chandelier/giveback pins ab profile-driven forms pe (NORMAL default = v21.23.6 values — behavioral locks unchanged)
+- Saare affected suites green: v2122 (17) + mtfAutoLink (14) + profitTrail21236 (26) + intradayCrypto (15) + mtfUsdtDomain (21) + healthMonitor + cxSpotWs + v1810UltraFast (13) + v2111 + wsFeedView (9)
+
 ## v21.23.6 — AUTO-TRADE PROFIT MAXIMIZATION (strong-trend premature-close cures + 5-min post-success cooldown + LIVE elite-only re-entry) (2026-10-20)
 
 **User ask: "TP1/TP2 + SL Trail + Reversal Profit-Book smartly hona chahiye — trade TP1 or TP2 hone par SL trail TOP me (long) / SHORT me utna NEECHE ho. Ek ek baar thoda pull back hota hai — SL trail smartly adjust karna chahiye, hogye utna jyada se jyada profit book ho. Strong signal LONG pe jab price UPAR jata rehta hai trade AUTO CLOSE ho raha hai (short me bhi thode profit pe) — sab smartly superfast manage karo. Aur jab trade successful close ho, LIVE auto trade pe 5 min COOLDOWN lagake phir ELITE top trade VERIFY karke hi lagana chahiye."**

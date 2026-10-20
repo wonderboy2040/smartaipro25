@@ -999,14 +999,27 @@ export function cxRtWsStatus() {
     // freshMarkets, markets, ageMs, cooling }. servable = a fresh
     // full book (>=25 markets): the direct ultra-fast INR pushes are
     // LIVE and REST is just the enrichment pass.
+    // v21.23.7: healthy/demandAgeMs/cooldownRemainMs passthrough —
+    // healthMonitor coindcxSpot entry inhi se honest classification
+    // karta hai (pehle healthy field EXIST nahi karta tha → permanent
+    // false "WS DOWN" on the CoinDCX tab).
     spotWs: {
       enabled: spot.enabled,
       connected: spot.connected,
+      healthy: spot.healthy === true,
       servable: spot.servable,
       freshMarkets: spot.freshMarkets,
       markets: spot.markets,
       ageMs: spot.ageMs,
+      demandAgeMs: spot.demandAgeMs ?? null,
+      cooldownRemainMs: spot.cooldownRemainMs ?? 0,
       cooling: spot.cooling,
+      // v21.23.9 [F3/F4]: producer cxSpotWs.spotWsStatus() dono fields emit
+      // karta tha magar passthrough drop karta tha — healthMonitor ka
+      // coindcxSpot.lastUpdateAt PERMANENT null tha aur failStreak futures
+      // socket ka (misattributed) dikhta tha. Ab honest forward.
+      lastUpdateAt: spot.lastUpdateAt ?? null,
+      failStreak: Number.isFinite(spot.failStreak) ? spot.failStreak : 0,
     },
   };
 }

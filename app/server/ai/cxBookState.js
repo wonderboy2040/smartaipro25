@@ -42,6 +42,16 @@ const _num = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
+// v21.23.9 [F5]: CoinDCX per-row stamps (btST/cmRT) SECONDS me aate hain
+// (v10.13 note) — top-level ts to line-53 pe normalize hota tha, magar
+// ts- absent updates me seconds-timestamp row me bake ho jata tha →
+// cxWsCandles overlay atMs<barTime(ms) dekh kar SILENT skippedStale —
+// futures live-bar overlay un rows par kabhi fire nahi karta tha.
+const _tsMs = (v) => {
+  const n = _num(v);
+  return n > 0 && n < 1e12 ? n * 1000 : n;
+};
+
 /**
  * Merge one book update into the state.
  * @param {object} pricesObj the parsed `prices` object of an update
@@ -65,7 +75,7 @@ export function mergeFutBook(pricesObj, tsMs) {
         ? _num(raw.pc)
         : (prev.changePct ?? 0),
       volume: _num(raw.v) || prev.volume || 0,
-      ts: ts || _num(raw.btST) || _num(raw.cmRT) || prev.ts || at,
+      ts: ts || _tsMs(raw.btST) || _tsMs(raw.cmRT) || prev.ts || at,
       at,
     };
     // A heartbeat-only row (no ls/mp/v/pc) still refreshes `at` — the

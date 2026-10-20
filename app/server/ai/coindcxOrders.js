@@ -438,6 +438,28 @@ function marginExitBody({ marginPair, side }) {
 
 // ---------------- THE EXECUTION GAUNTLET ----------------
 /**
+ * v21.23.8 SPOT FULL STOP — CoinDCX spot (SYM-INR) trading ka ek-matra
+ * policy switch (user: "coindcx spot trade... spot ko full stop kardo —
+ * sirf futures USDT & equity sim aur gold & silver me hi trade lagna
+ * chahiye").
+ *
+ *   • RUNTIME (npm start / serve): DEFAULT-ON — executeSignal ka har
+ *     mode (live/notify/paper) reject ho jata hai.
+ *   • AI_SPOT_FULL_STOP=0: operator ka EXPLICIT opt-in — purana spot
+ *     gauntlet wapas live ho jata hai (migration/emergency ke liye).
+ *   • AI_SPOT_FULL_STOP=1: hamesha ON (explicit).
+ *   • NODE_ENV=test (default): off — purane hermetic gauntlet locks
+ *     (aiOrders.test.ts) apna contract padhte rahein; full-stop ke apne
+ *     locks ucFlipReverse21238.test.ts me env=1 ke saath hain.
+ */
+export function spotTradeFullStop() {
+  const v = String(process.env.AI_SPOT_FULL_STOP ?? '').trim().toLowerCase();
+  if (v === '0') return false;
+  if (v === '1') return true;
+  return String(process.env.NODE_ENV || '').trim().toLowerCase() !== 'test';
+}
+
+/**
  * executeSignal({ symbol, side, mode, qtyINR, leverage, getFreshSignal, wantAuto })
  *
  * v6.6 LEVERAGE: `qtyINR` is the MARGIN (₹ you commit). With leverage L
@@ -470,6 +492,25 @@ export async function executeSignal(opts) {
     pushEntry(j, { ...entry, status: 'REJECTED', reason, ...extra });
     saveJournal(j);
   }).then(() => ({ ok: false, error: error || reason }));
+
+  // --- gate 0: v21.23.8 SPOT FULL STOP (user: "coindcx spot ko full stop
+  // kardo — sirf FUTURES USDT & EQUITY SIM & GOLD & SILVER me hi trade
+  // lagna chahiye") ---
+  // executeSignal = CoinDCX SPOT (SYM-INR) ka EK-MATRA order path — legacy
+  // 90s auto-executor, manual /api/ai/execute, telegram-approval aur
+  // superagent spot loop SAB isi gauntlet se guzarte hain. Runtime par ye
+  // gate DEFAULT-ON hai: koi bhi mode (live/notify/paper) spot entry pass
+  // NAHI ho sakta. AI_SPOT_FULL_STOP=0 explicit operator opt-in se hi off
+  // hota hai. NODE_ENV=test me default off hai taaki hermetic gauntlet
+  // locks (aiOrders.test.ts) apne purane contract padhte rahein — spot
+  // full-stop ke apne dedicated locks ucFlipReverse21238.test.ts me hain
+  // (env=1 ke saath).
+  if (spotTradeFullStop()) {
+    return reject(
+      'SPOT FULL STOP (v21.23.8) — CoinDCX spot trading disabled: sirf FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM me hi trade hota hai',
+      'SPOT FULL STOP — CoinDCX spot band hai (v21.23.8). FUTURES USDT / GOLD & SILVER / EQUITY SIM desks use karo.',
+    );
+  }
 
   // --- gate 1: kill switch ---
   if (cfg.killSwitch) {
