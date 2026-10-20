@@ -411,7 +411,14 @@ async function getMarginPairName(pair, creds) {
 }
 
 function marginOrderBody({ marginPair, side, qty, leverage, marginINR }) {
-  const long = String(side).toUpperCase() !== 'SHORT';
+  // v21.23.10 [SIDE-VOCAB]: v21.23.9 ne futuresOrderBody me 'SELL'!=='SHORT'
+  // silent-LONG-default fix kiya tha — yahan SPOT margin body me WAHI hazard
+  // zinda tha ('SELL' → buy!). Dual-vocabulary map + unknown-side LOUD throw.
+  const s = String(side || '').toUpperCase();
+  const long = s === 'LONG' || s === 'BUY';
+  if (!long && s !== 'SHORT' && s !== 'SELL') {
+    throw new Error(`marginOrderBody: invalid side "${side}" (LONG/BUY or SHORT/SELL required)`);
+  }
   return {
     side: long ? 'buy' : 'sell',
     pair: marginPair,

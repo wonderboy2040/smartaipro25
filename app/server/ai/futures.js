@@ -600,10 +600,14 @@ let _instrumentMetaCache = new Map();
  *  The endpoint shape is documented with max_leverage_long/short; qty
  *  precision/min-quantity keys vary by API revision — every plausible
  *  key is tried (the CoinDCX field-name lesson, learned twice). */
-export async function fetchFuturesInstrumentMeta(pair) {
+export async function fetchFuturesInstrumentMeta(pair, { bust = false } = {}) {
   const key = String(pair).toUpperCase();
   const hit = _instrumentMetaCache.get(key);
-  if (hit && Date.now() - hit._at < 6 * 3600_000) return hit;
+  // v21.23.10 [META-TTL]: 'unknown' (fallback/guessed) meta sirf 60s cache —
+  // pehle 6h! Ek network hiccup ka guessed qtyPrecision/minQty:0 us window
+  // ke saare live orders ko galat precision/laddar rejects me dhakelta tha.
+  if (!bust && hit && Date.now() - hit._at < (hit._fallback ? 60_000 : 6 * 3600_000)) return hit;
+  if (bust) _instrumentMetaCache.delete(key);
   try {
     const url = `${INSTRUMENT_URL}?pair=${encodeURIComponent(key.toLowerCase())}&margin_currency_short_name=USDT`;
     const r = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) });
@@ -640,7 +644,7 @@ export async function fetchFuturesInstrumentMeta(pair) {
       }
     }
   } catch { /* fall back to the conservative default */ }
-  const meta = { pair: key, maxLeverage: 10, qtyPrecision: guessPrecision(key), minQty: 0, status: 'unknown', _at: Date.now() };
+  const meta = { pair: key, maxLeverage: 10, qtyPrecision: guessPrecision(key), minQty: 0, status: 'unknown', _fallback: true, _at: Date.now() };
   _instrumentMetaCache.set(key, meta);
   return meta;
 }
@@ -750,7 +754,9 @@ export async function futuresExecutePrecheck(opts) {
       const notionalUSDT = r2(qty * price);
       const marginUsed = r2(notionalUSDT / effLev);
       const liquidation = effLev > 1 && plan?.stopLoss != null
-        ? pRound(signal.side !== 'SHORT' ? price * (1 - 0.95 / effLev) : price * (1 + 0.95 / effLev)) : null;
+        // v21.23.10 [SIDE-VOCAB]: precheck bhi BUY/SELL vocabulary samjhe —
+        // pehle sirf 'SHORT' check hota tha ('SELL' ulta LONG estimate deta).
+        ? pRound(!['SHORT', 'SELL'].includes(String(signal.side || '').toUpperCase()) ? price * (1 - 0.95 / effLev) : price * (1 + 0.95 / effLev)) : null;
       if (saneLev != null && lev > saneLev) {
         out.warnings.push(`leverage auto-reduced ${lev}x → ${saneLev}x (liquidation would fire before the ${r2(slDistPct)}% SL)`);
         // v21.4.1 [C3]: LIVE execute is requested leverage pe HARD-REJECT
@@ -2054,7 +2060,12 @@ export async function executeMtfDualLiveOrder(opts = {}) {
   }
   // Auto-sync live mode config when user triggers Live execution from MTF Dual Board
   // (keep legacy spot allowAuto=false so legacy 90s spot loop never places a 2nd competing trade)
-  if (cfg.mode !== 'live' || cfg.allowAuto) {
+  // v21.23.10 [AUTO-SYNC SCOPE]: ye auto-sync ab sirf MANUAL board clicks
+  // (source 'mtf-dual-board') ke liye — AUTO engine ticks (source
+  // 'mtf-auto-live') pehle CHUPKE se global site config ko mode:'live'
+  // likh dete the (typed-LIVE validation bypass) — engine ka apna live
+  // mode cfg.executionMode se aata hai, global flip ki zaroorat nahi.
+  if ((cfg.mode !== 'live' || cfg.allowAuto) && source !== 'mtf-auto-live') {
     try {
       ordersMod.saveConfig({ ...cfg, mode: 'live', allowAuto: false, liveConfirmedAt: Date.now() });
     } catch { /* best-effort */ }
@@ -2078,6 +2089,19 @@ export async function executeMtfDualLiveOrder(opts = {}) {
     const row = rows.find(r => r.pair === pair || r.base === base || r.symbol === base);
     if (row && Number(row.last ?? row.ltp ?? row.mark) > 0) {
       livePx = Number(row.last ?? row.ltp ?? row.mark);
+    }
+    // v21.23.10 [FRESH-PRICE GATE]: live MARKET order ke liye sirf FRESH +
+    // OFFICIAL (CoinDCX) row — fetchFuturesPrices ki failure-ladder 180s
+    // deep-stale cache tak aur Binance/Bybit cross-venue synth rows tak gir
+    // sakti thi. 3-minute-old ya cross-venue price par qty sizing + SL/T1/T2
+    // re-anchor = instant premature stop / galta notional. Stale/synth row
+    // → planEntry (board price, seconds-old) fallback — wo bhi missing to
+    // neeche honest reject.
+    if (livePx != null) {
+      const rowTs = Number(row?.ts || 0);
+      const rowSrc = String(row?.source || row?.src || '');
+      const freshOfficial = rowTs > 0 && Date.now() - rowTs <= 30_000 && !/binance|bybit/i.test(rowSrc);
+      if (!freshOfficial) livePx = null;
     }
   } catch { /* fallback to planEntry */ }
 
@@ -2125,7 +2149,15 @@ export async function executeMtfDualLiveOrder(opts = {}) {
 
   // 3) Wallet-tier leverage (< ₹10,000 → 10x, ≥ ₹10,000 → 5x) + INR/USDT Futures Wallet margin check
   const usdInr = await fetchUsdInr().catch(() => COINDCX_INR_PER_USDT);
-  const meta = await fetchFuturesInstrumentMeta(pair).catch(() => null);
+  // v21.23.10 [META-RESCUE]: fallback/guessed meta (status 'unknown') par EK
+  // cache-busting fresh re-fetch — pehle ek network hiccup 6 GHANTE tak
+  // guessed qtyPrecision/minQty:0 cache karta tha → us window ka HAR live
+  // order galat precision/laddar par reject ("live orders not executing"
+  // class). fetchFuturesInstrumentMeta ab 'unknown' ko sirf 60s cache karta hai.
+  let meta = await fetchFuturesInstrumentMeta(pair).catch(() => null);
+  if (meta && String(meta.status) !== 'active') {
+    meta = await fetchFuturesInstrumentMeta(pair, { bust: true }).catch(() => meta);
+  }
   const proCfg = loadProTraderConfig();
   let freeUsdt = 0;
   let walletINR = Number(proCfg?.walletAmountINR) > 0 ? Number(proCfg.walletAmountINR) : 8000;
@@ -2141,7 +2173,18 @@ export async function executeMtfDualLiveOrder(opts = {}) {
     if (wInfo.combinedFreeINR > 0) {
       walletINR = wInfo.combinedFreeINR;
     }
-  } catch { /* non-fatal: proceed to order attempt */ }
+  } catch (e) {
+    // v21.23.10 [WALLET-FAIL BLOCK]: wallet read FAILURE (network/auth —
+    // empty wallet NAHI, wo legit [] hota hai) par live order block karo.
+    // Pehle ₹8000 proTrader default guess se sizing hoti thi → 7-rung ladder
+    // × 2 margin-retries = 14 real exchanges POSTs har attempt "insufficient
+    // funds" par barbaad (backoff ke bina har ~10s repeat).
+    return {
+      ok: false, blocked: true,
+      reason: `CoinDCX futures wallet read failed — order blocked (sizing unreliable): ${String(e?.message || e).slice(0, 140)}`,
+      error: 'futures wallet read failed',
+    };
+  }
 
   const tierLev = walletINR > 0 && walletINR < 10000 ? 10 : 5;
   const maxInstLev = Number(meta?.maxLeverage) >= 1 ? Math.floor(Number(meta.maxLeverage)) : 20;
@@ -2281,6 +2324,9 @@ export async function executeMtfDualLiveOrder(opts = {}) {
             walletDeployPct,
             deployedWalletINR,
             deployedWalletUSDT,
+            // v21.23.10 [FILLED-CONTRACT ALIASES] — alreadyOpen path par bhi.
+            walletDeployINR: deployedWalletINR,
+            buyingPowerINR: Math.round(Number(deployedWalletINR) * Number(lev || leverage || 1)),
             walletTotalINR: Math.round(walletINR * 100) / 100,
             qty: Math.abs(Number(sameActiveExch.activePos) || existingSame?.qty || qty),
             price: pRound(Number(sameActiveExch.avgPrice) || existingSame?.entryPrice || price),
@@ -2322,6 +2368,9 @@ export async function executeMtfDualLiveOrder(opts = {}) {
                 walletDeployPct,
                 deployedWalletINR,
                 deployedWalletUSDT,
+                // v21.23.10 [FILLED-CONTRACT ALIASES] — alreadyOpen path par bhi.
+                walletDeployINR: deployedWalletINR,
+                buyingPowerINR: Math.round(Number(deployedWalletINR) * Number(lev || leverage || 1)),
                 walletTotalINR: Math.round(walletINR * 100) / 100,
                 qty: Math.abs(Number(exchRow?.activePos) || pos.qty || qty),
                 price: pRound(Number(exchRow?.avgPrice) || pos.entryPrice || price),
@@ -2478,6 +2527,13 @@ export async function executeMtfDualLiveOrder(opts = {}) {
           walletDeployPct,
           deployedWalletINR,
           deployedWalletUSDT,
+          // v21.23.10 [FILLED-CONTRACT ALIASES]: caller (mtfAutoLink:1952+ /
+          // recordLiveMtfBoardTrade) `filled.walletDeployINR` +
+          // `filled.buyingPowerINR` padhte the — producer ye naam KABHI nahi
+          // bhejta tha (mock-drift: tests khud walletDeployINR waale mocks
+          // dete the). Honest aliases ab producer-side guaranteed.
+          walletDeployINR: deployedWalletINR,
+          buyingPowerINR: Math.round(Number(deployedWalletINR) * Number(lev || leverage || 1)),
           walletTotalINR: Math.round(walletINR * 100) / 100,
           qty, price: pRound(price), notionalUSDT, notionalINR: inrOfUsdt(notionalUSDT, usdInr),
           leverage: lev, marginUSDT: marginUsed, stopLoss: sl, t1: tp1, t2: tp2,
@@ -2682,9 +2738,30 @@ export async function updateCoinDcxPositionSl({ positionId, symbol, pair, stopLo
 
   if (exchPosId && loadCredsForOrder()) {
     const res = await createFuturesTpsl({ positionId: exchPosId, stopLoss: sl, takeProfit: tp }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+    // v21.23.10 [UUID-RESCUE]: entry-time position-id poll (3×900ms) miss ho
+    // jaye to caller internal journal UUID pass karta hai — createFuturesTpsl
+    // 400 deta hai aur pair-based resolver kabhi chance hi nahi paata tha
+    // (`positionId ||` trust). Failed id + normPair → EK pair-based re-resolve
+    // + retry — warna LIVE SL sync us position ke liye hamesha ke liye dead.
+    if (!res?.ok && normPair && String(exchPosId) !== String(jPos?.exchangePositionId || '')) {
+      const exchList = await listFuturesPositions().catch(() => []);
+      const row = exchList.find(p => p.pair === normPair && p.activePos !== 0);
+      if (row?.id && String(row.id) !== String(exchPosId)) {
+        const retry = await createFuturesTpsl({ positionId: row.id, stopLoss: sl, takeProfit: tp }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+        if (retry?.ok && jPos) {
+          jPos.exchangePositionId = String(row.id);
+          try { saveJournalFresh(j); } catch { /* best-effort id adoption */ }
+        }
+        return { ok: Boolean(retry?.ok), positionId: row.id, stopLoss: sl, error: retry?.error || null };
+      }
+    }
     return { ok: Boolean(res?.ok), positionId: exchPosId, stopLoss: sl, error: res?.error || null };
   }
-  return { ok: Boolean(jPos), positionId: exchPosId, stopLoss: sl };
+  // v21.23.10 [HONEST VERDICT]: journal-only update (exchange id unresolvable)
+  // ab ok:false deta hai — pehle ok:true tha → 15s tick b.lastExchangeSl
+  // stamp kar deta tha aur ≥0.05% delta-gate AAGE ke chhote trail syncs
+  // SKIP kar deta tha jabki exchange SL kabhi badla hi nahi (silent dead SL).
+  return { ok: false, synced: false, journalOnly: true, positionId: exchPosId, stopLoss: sl, error: 'exchange position id not resolvable — journal updated only' };
 }
 
 /**
@@ -2721,7 +2798,18 @@ export async function closeCoinDcxActivePosition({ positionId, symbol, pair } = 
     if (row?.id) exchPosId = row.id;
   }
   if (exchPosId && loadCredsForOrder()) {
-    return exitFuturesPosition(exchPosId).catch(e => ({ ok: false, error: String(e?.message || e) }));
+    const out1 = await exitFuturesPosition(exchPosId).catch(e => ({ ok: false, error: String(e?.message || e) }));
+    // v21.23.10 [UUID-RESCUE]: internal-UUID id fail ho to pair-based
+    // re-resolve + EK retry (SL-sync twin fix — warna ye position kabhi
+    // engine se close nahi hoti, sirf native SL bachata).
+    if (!out1?.ok && normPair && String(exchPosId) !== String(jPos?.exchangePositionId || '')) {
+      const exchList = await listFuturesPositions().catch(() => []);
+      const row = exchList.find(p => p.pair === normPair && p.activePos !== 0);
+      if (row?.id && String(row.id) !== String(exchPosId)) {
+        return exitFuturesPosition(row.id).catch(e => ({ ok: false, error: String(e?.message || e) }));
+      }
+    }
+    return out1;
   }
   return { ok: false, error: 'Active CoinDCX position not found' };
 }

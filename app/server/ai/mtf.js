@@ -30,8 +30,8 @@
 //   • all 6 fetches fan out in parallel; a missing TF degrades to a
 //     "N/A" chip and is excluded from the vote (never blocks the board)
 // ============================================================
-import { fetchCoinDcxCandles, fetchBinanceKlines } from './data.js';
-import { fetchFuturesCandles, futuresPairFor } from './futures.js';
+import { fetchCoinDcxCandles, fetchBinanceKlines, isNseOpen } from './data.js';
+import { fetchFuturesCandles, futuresPairFor, isMetalsBase, fetchMetalsFapiCandles, fetchMetalsYahooCandles } from './futures.js';
 import { usdInrFallback } from './lib/usdinr.js';
 import { computeIndicatorsFromCandles, atr as atrOf } from './lib/indicators.js';
 // v21.23.5 CoinDCX Ultrafast WS candle overlay — the REST chain stays the
@@ -125,6 +125,24 @@ async function _yahooCandles(yh, interval, range) {
   } catch { return null; }
 }
 
+// v21.23.10 [STALE-DATA AGE GATE] — pure helper: Yahoo per-IP cache HTTP
+// 200 ke saath DAY-OLD intraday series de sakta hai (live-probe: NSE OPEN
+// session me bhi RELIANCE 15m last-bar 1456 min purana + fetchedAt=abhi).
+// Cache-TTL FETCH-time par hai, DATA-time par nahi → committees kal ki
+// bars par "fresh" vote marti thi. Ye gate stale ko pakadta hai; null
+// result v21.23.4 honest-degrade ladder (suppress + dataDegraded) me jaata
+// hai. Session-closed me purani session LEGITIMATE hai (gate inert) aur
+// daily bars by-definition stale hain (tf '1d' exempt).
+export function isStaleIntradaySeries(rows, tf, { sessionOpen = true, now = Date.now() } = {}) {
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  if (!sessionOpen) return false;
+  if (String(tf) === '1d') return false;
+  const tfMs = { '1m': 60_000, '5m': 300_000, '15m': 900_000, '1h': 3_600_000, '4h': 14_400_000 }[String(tf)] || 900_000;
+  const lastBarAt = Number(rows[rows.length - 1]?.time || 0);
+  if (!(lastBarAt > 0)) return false;
+  return now - lastBarAt > 3 * tfMs + 10 * 60_000;
+}
+
 async function _indiaCandles(symbol, tf, market = 'INDIA', { raw = false } = {}) {
   const yh = market === 'GLOBALFUTURES'
     ? String(symbol || '').toUpperCase()
@@ -135,7 +153,13 @@ async function _indiaCandles(symbol, tf, market = 'INDIA', { raw = false } = {})
   // v21.23.5: the CACHE holds the RAW Yahoo series; the live-bar overlay
   // (Groww liveFeed print) is applied per-READ so the forming bar never
   // bakes a stale live close into the shared cache.
-  if (hit && Date.now() - hit.at < ttl) return raw ? hit.payload : indiaOverlayCandles(symbol, tf, hit.payload);
+  // v21.23.10 [NULL-MINI-TTL]: null payload 60s mini-TTL se serve hota hai
+  // — pehle ek transient Yahoo 429 poore TTL (1d=30min!) tak leg ko blank
+  // rakhta tha jabki Yahoo recover ho chuka hota (signals.js ka _ltfMiss
+  // pattern yahan missing tha).
+  if (hit && Date.now() - hit.at < (hit.payload == null ? 60_000 : ttl)) {
+    return raw ? hit.payload : (hit.payload == null ? null : indiaOverlayCandles(symbol, tf, hit.payload));
+  }
   let out = null;
   if (tf === '4h') {
     // 4h resampled from the cached 1h series — zero extra Yahoo call.
@@ -154,6 +178,10 @@ async function _indiaCandles(symbol, tf, market = 'INDIA', { raw = false } = {})
     const range = tf === '1m' ? '5d' : (tf === '5m' || tf === '15m') ? '1mo' : tf === '1h' ? '3mo' : '2y';
     out = await _yahooCandles(yh, interval, range);
   }
+  // v21.23.10 [STALE-DATA AGE GATE]: stale-last-bar intraday = null →
+  // v21.23.4 honest-degrade ladder (full-missing suppress + dataDegraded
+  // + banner) handle karta hai. NSE-closed me gate inert.
+  if (market === 'INDIA' && isStaleIntradaySeries(out, tf, { sessionOpen: isNseOpen() })) out = null;
   _yfCache.set(key, { at: Date.now(), payload: out });
   while (_yfCache.size > YF_CACHE_MAX) {
     const k = _yfCache.keys().next().value;
@@ -185,12 +213,29 @@ function _resample(candles, minutes) {
   return out.length >= 30 ? out : null;
 }
 
+// v21.23.10 [METALS-LEGS]: shared metals candle chain (fapi XAUUSDT/XAGUSDT
+// klines → Yahoo COMEX GC=F/SI=F). Per-TF VOTES scale-invariant hain isliye
+// anchor-rescale is layer par zaroori nahi (plan path rawTfCandlesUsdt me
+// ltp-anchor rescale hota hai).
+async function _metalsCandlesFor(base, tf) {
+  const res = FUT_TF_RES[String(tf || '15m').toLowerCase()] || '15';
+  const fapi = await fetchMetalsFapiCandles(base, res, 240).catch(() => null);
+  if (Array.isArray(fapi) && fapi.length >= 30) return cxFutOverlayCandles(base, tf, fapi);
+  const comex = await fetchMetalsYahooCandles(base, res, 240).catch(() => null);
+  if (Array.isArray(comex) && comex.length >= 30) return cxFutOverlayCandles(base, tf, comex);
+  return null;
+}
+
 async function _candlesFor(symbol, market, tf) {
   try {
     if (market === 'CRYPTO' || market === 'FUTURES') {
       // strip only namespace markers (FUT_/GLOB_) — a leading "B" is part
       // of real tickers (BTC/BNB!) and must NEVER be eaten
       const base = String(symbol || '').toUpperCase().replace(/^(FUT_|GLOB_)/, '');
+      // v21.23.10 [METALS-LEGS]: raw 'CRYPTO'/'FUTURES' market string bhi
+      // metals base ho sakta hai (agent/wire6 callers normalize nahi karte)
+      // — unhe bhi metals chain par route karo.
+      if (isMetalsBase(base)) return await _metalsCandlesFor(base, tf);
       // v18.5: the full chain the board uses — CoinDCX INR first, then
       // Binance/Bybit USDT klines (public, geo-robust). Per-TF VOTES are
       // scale-invariant (EMA/RSI/MACD/ADX are relative); the structure
@@ -203,6 +248,13 @@ async function _candlesFor(symbol, market, tf) {
       // USDT candles ko INR tick kabhi nahi milega, v20.9.3 lesson).
       if (Array.isArray(c) && c.length >= 30) return cxSpotOverlayCandles(base, tf, c);
       return await fetchBinanceKlines(base, tf).catch(() => null);
+    }
+    if (market === 'METALS') {
+      // v21.23.10 [METALS-LEGS]: _candlesFor me METALS branch KABHI tha hi
+      // nahi — XAU/XAG 'INDIA' default me gir kar 'XAU.NS' Yahoo nonsense
+      // fetch karte the. Ab metals chain (fapi → COMEX).
+      const base = String(symbol || '').toUpperCase().replace(/^(FUT_|GLOB_)/, '');
+      return await _metalsCandlesFor(base, tf);
     }
     if (market === 'GLOBALFUTURES') {
       // US equity perps (GLOB_ domain) — Yahoo equity series
@@ -633,6 +685,39 @@ export async function rawTfCandlesUsdt(symbol, tf, opts = {}) {
       }
     }
   } catch { /* fall through */ }
+  // Leg 1.5 — v21.23.10 [METALS-LEGS]: XAU/XAG ke liye purpose-built metals
+  // chain (Binance fapi XAUUSDT klines → Yahoo COMEX GC=F/SI=F rescaled to
+  // live anchor). Pehle ye desk Leg-2/3 pe gir thi: Binance SPOT XAUUSDT =
+  // PERMANENT -1121 invalid symbol + CoinDCX spot me XAUINR exist hi nahi
+  // karta → CoinDCX futures REST blip par Gold/Silver board rows ka plan
+  // build KABHI nahi hota tha (live-probe: dono boards pe 'context candles
+  // (15m) unavailable/thin'). Repo me chain pehle se thi (futures.js
+  // fetchMetalsFapiCandles + fetchMetalsYahooCandles) par mtf.js me wired
+  // NAHI thi. Anchor rescale desk-ltp se (fapi leg 1:1 USDT hai, rescale
+  // sirf COMEX leg ko chahiye — contango ~0.3-0.8%).
+  if (isMetalsBase(base)) {
+    const res = FUT_TF_RES[String(tf || '15m').toLowerCase()] || '15';
+    const fapi = await fetchMetalsFapiCandles(base, res, 240).catch(() => null);
+    if (Array.isArray(fapi) && fapi.length >= 30) {
+      return { candles: cxFutOverlayCandles(base, tf, fapi), ccy: 'USDT', src: 'binance-fapi-metals', fx: null, base };
+    }
+    const anchor = Number(opts.ltp) > 0 ? Number(opts.ltp) : null;
+    const comex = await fetchMetalsYahooCandles(base, res, 240).catch(() => null);
+    if (Array.isArray(comex) && comex.length >= 30) {
+      let candles = comex;
+      if (anchor > 0) {
+        const last = Number(comex[comex.length - 1]?.close) || 0;
+        const scale = last > 0 ? anchor / last : 0;
+        if (Number.isFinite(scale) && scale > 0.5 && scale < 2) {
+          candles = comex.map(c => ({
+            time: c.time, volume: c.volume,
+            open: c.open * scale, high: c.high * scale, low: c.low * scale, close: c.close * scale,
+          }));
+        }
+      }
+      return { candles: cxFutOverlayCandles(base, tf, candles), ccy: 'USDT', src: 'yahoo-comex-metals', fx: null, base };
+    }
+  }
   // Leg 2 — Binance/Bybit USDT (data.js chain: spot + keyless mirror + Bybit 200-bar cached)
   try {
     const bk = await fetchBinanceKlines(base, tf, { limit: 200, ...opts }).catch(() => null);

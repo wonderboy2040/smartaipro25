@@ -12,7 +12,7 @@
 //                           always a FRESH single-symbol run
 // ============================================================
 import { computeIndicatorsFromCandles } from './lib/indicators.js';
-import { buildMTFSnapshot, mtfWire6Payload, __clearMtfCaches } from './mtf.js';
+import { buildMTFSnapshot, mtfWire6Payload, __clearMtfCaches, isStaleIntradaySeries } from './mtf.js';
 import {
   INDIA_UNIVERSE, CRYPTO_UNIVERSE, fetchTVIndiaBatch, fetchTVIndiaBatchChunked, fetchTVCryptoBatch,
   fetchCoinDcxCandles, fetchBinanceKlines, fetchYahooQuotes, isNseOpen,
@@ -455,6 +455,13 @@ export async function fetchYahooIntradayCandles(symbol, market) {
       }
     }
   } catch { out = null; }
+  // v21.23.10 [STALE-DATA AGE GATE]: Yahoo per-IP cache HTTP 200 + day-old
+  // 15m series de sakta hai (live-probe: NSE OPEN me bhi last-bar 1456 min
+  // purana). Pehle fetch-time cache hi fresh tha, DATA-time nahi —
+  // committee kal ki bars par "fresh" vote marti thi. Stale = null →
+  // v21.23.4 ladder (dataDegraded / suppress) honestly handle karta hai.
+  // NSE-closed me purani session LEGITIMATE hai (gate inert).
+  if (out && mkt === 'INDIA' && isStaleIntradaySeries(out, '15m', { sessionOpen: isNseOpen() })) out = null;
   if (out) cacheSet(key, out);
   else { _ltfMiss.set(key, Date.now()); _capMissMap(_ltfMiss); }
   return out;

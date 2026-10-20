@@ -293,9 +293,23 @@ async function _fetchQuotes(symMarket) {
   // serve 3min tak ho sakta hai) Date.now() se replace karke fresh dikhana jhooth tha.
   if (futures.length > 0) {
     try {
-      const { fetchFuturesPrices } = await import('../ai/futures.js');
-      const rows = await fetchFuturesPrices({ maxAgeMs: 5000 }).catch(() => null);
+      const futMod = await import('../ai/futures.js');
+      const rows = await futMod.fetchFuturesPrices({ maxAgeMs: 5000 }).catch(() => null);
       const byBase = new Map((Array.isArray(rows) ? rows : []).map(x => [String(x.base).toUpperCase(), x]));
+      // v21.23.10 [METALS-QUOTES]: fetchFuturesPrices ki universe me XAU/XAG
+      // NAHI hain (FUTURES_UNIVERSE perps only; leg-3 Binance synth bhi wahi
+      // universe scan karta hai) → CoinDCX RT dark hote hi metals (Gold &
+      // Silver desk) ke manual paper trades ki SL/T1/T2 evaluation SILENT
+      // freeze hoti thi ("profit kabhi book nahi hota" symptom). Rows missing
+      // → fetchMetalsPrices se fill (same row shape: base/last/changePct/ts).
+      const missingMetals = futures.filter(s => !byBase.has(s) && futMod.isMetalsBase(s));
+      if (missingMetals.length > 0) {
+        const mrows = await futMod.fetchMetalsPrices().catch(() => null);
+        for (const m of (Array.isArray(mrows) ? mrows : [])) {
+          const mb = String(m?.base || m?.symbol || '').toUpperCase();
+          if (missingMetals.includes(mb)) byBase.set(mb, m);
+        }
+      }
       for (const sym of futures) {
         const r = byBase.get(sym);
         const price = parseFloat(r?.last ?? r?.price);

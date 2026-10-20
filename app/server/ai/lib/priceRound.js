@@ -63,7 +63,12 @@ const _bump = (p) => (p >= 8 ? 12 : p === 2 ? 4 : p + 2);
  *   zero-distance ladder (caller's logic bug), never throwing.
  */
 export function pRoundLadder({ side, entry, stopLoss, targets = [] }) {
-  const long = String(side || '').toUpperCase() !== 'SHORT';
+  // v21.23.10 [SIDE-VOCAB]: 'SELL' bhi SHORT hai — pehle `!== 'SHORT'`
+  // default-long 'SELL' ladders ko ULTA order karta tha (futuresOrderBody
+  // fix ki hi class). LONG/BUY → long; SHORT/SELL → short; khali → long
+  // (legacy docstring default, callers hamesha LONG/SHORT dete hain).
+  const s = String(side || '').toUpperCase();
+  const long = !(s === 'SHORT' || s === 'SELL');
   const e = Number(entry), sl = Number(stopLoss);
   const ts = (Array.isArray(targets) ? targets : []).map(Number);
   const round = (v, p) => Number(Number(v).toFixed(p));

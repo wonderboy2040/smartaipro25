@@ -332,7 +332,13 @@ describe('v21.23.5 wiring pins — mtf.js + ultrafastVerifier.js', () => {
 
   it('Binance fallback legs stay UN-overlaid (cross-domain by design) — exact occurrence counts', () => {
     expect((MTF_SRC.match(/cxSpotOverlayCandles\(/g) || []).length).toBe(2); // CRYPTO branch + Leg-3 only
-    expect((MTF_SRC.match(/cxFutOverlayCandles\(/g) || []).length).toBe(1);  // Leg-1 only
+    // v21.23.10 [METALS-LEGS] honest-update: 1 → 5 — naye 4 wires sab METALS
+    // chain me hain (rawTfCandlesUsdt Leg-1.5 fapi + COMEX-rescaled, aur
+    // _metalsCandlesFor fapi + COMEX). Domain-matched: cxFutOverlayCandles
+    // sirf B-XAU_USDT/B-XAG_USDT futures-book ticks lagata hai USDT-domain
+    // metals candles par (koi cross-domain apply NAHI). Binance fallback
+    // legs (rawTfCandlesUsdt Leg-2 generic / CRYPTO branch) ab bhi UN-overlaid.
+    expect((MTF_SRC.match(/cxFutOverlayCandles\(/g) || []).length).toBe(5);  // Leg-1 + 4 metals-chain wires
     // v21.23.9 [F2] honest-update: 2 → 3 — naya 3rd wire = chartCandles
     // INDIA/GLOBALFUTURES cache-hit per-READ overlay refresh (same-domain
     // IN_<SYM> tick → .NS/INR candles; crypto/fut legs refresh NAHI hote —

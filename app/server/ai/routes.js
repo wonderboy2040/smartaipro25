@@ -36,7 +36,7 @@ import { getSignals, getDeepSignal, getFreshSignalForExec, getFreshFuturesSignal
 // symbol happened to be a paper position (setScanSymbols existed but was
 // only ever called by /api/intraday-scanner, which no frontend polls).
 import { setScanSymbols as intradaySetScanSymbols, getLatestQuotes } from '../intraday/stream.js';
-import { openPaperTrade as openPaperTradeExec, closePaperTrade as closePaperTradeExec, getPaperSummary as getPaperSummaryExec, updatePaperTradeStopLoss, updatePaperTradeT1ClosePct, evaluatePaper } from '../intraday/paperTrading.js';
+import { openPaperTrade as openPaperTradeExec, closePaperTrade as closePaperTradeExec, voidPaperTrade as voidPaperTradeExec, getPaperSummary as getPaperSummaryExec, updatePaperTradeStopLoss, updatePaperTradeT1ClosePct, evaluatePaper } from '../intraday/paperTrading.js';
 // v20.2 ACCOUNTABILITY: the board's ACTIONABLE signals (STRONG + ACTION
 // with a plan) feed the signal Track Record — the panel's "har published
 // signal track hota hai" promise is finally true for the board the user
@@ -213,7 +213,7 @@ import { dhanConnect, dhanDisconnect, dhanConnected, dhanProfile, scripMasterSta
 import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 // v21.16.0 + v21.20.0 MTF SIGNALS BOARD (Dual-Timeframe) + AUTO-LINK engine
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
-import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isGenuinelyTradedEntry } from './mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isGenuinelyTradedEntry, isLiveAttemptBackoffActive } from './mtfAutoLink.js';
 // v21.23.1: cross-engine direction-lock release-on-close sweeper (directionLock.js)
 import { reconcileDirectionLocks } from './directionLock.js';
 // v21.23.4: runtime direction certificate (user demand: "accurately fix
@@ -1056,7 +1056,10 @@ export function registerAITradingRoutes(app, deps) {
       // India desk live execution
       const outIndia = await executeIndiaSignal({
         symbol: baseSym, side, mode: 'live',
-        getFreshSignal: (sym, o) => getFreshSignalForExec(sym, 'INDIA', depsForSignals(), o),
+        // v21.23.10 CRITICAL FIX: `getFreshSignal` → `getFreshIndiaSignal`
+        // (executeIndiaSignal ka destructure naam) — pehle India arm hote hi
+        // gate-4 TypeError deta tha → manual MTF board India LIVE bhi dead.
+        getFreshIndiaSignal: (sym, o) => getFreshSignalForExec(sym, 'INDIA', depsForSignals(), o),
         source: 'mtf-board-live-ui', sendTelegram,
       });
       if (!outIndia?.ok) {
@@ -1125,6 +1128,14 @@ export function registerAITradingRoutes(app, deps) {
     };
     const liveExecute = async (order) => {
       if (order.market === 'FUTURES' || order.market === 'CRYPTO' || order.market === 'METALS') {
+        // v21.23.10 [DESK-PRE-FLIGHT]: creds absent = GUARANTEED reject —
+        // pehle engine har candidate par poora executeMtfDualLiveOrder ladder
+        // (wallet fetch + 7-rung order POSTs + journal FAILED row) chalata
+        // tha. Ab pre-flight honest blocked verdict — engine per-symbol backoff
+        // stamp karta hai, gauntlet/journal spam nahi hota.
+        if (!hasEnvOrSavedCreds) {
+          return { ok: false, blocked: true, reason: 'CoinDCX API key & secret not connected — add COINDCX_API_KEY + COINDCX_SECRET in .env or connect in Portfolio tab', error: 'CoinDCX API key & secret not connected' };
+        }
         return executeMtfDualLiveOrder({
           symbol: order.symbol,
           side: order.side,
@@ -1141,11 +1152,24 @@ export function registerAITradingRoutes(app, deps) {
         });
       }
       if (order.market === 'INDIA') {
+        // v21.23.10 [DESK-PRE-FLIGHT]: India desk un-armed = GUARANTEED
+        // gate-2 reject (indiaOrders 'type LIVE in the console first') —
+        // live-probe me is reject ne minutes me ~100 journal REJECTED rows
+        // mint kiye. Ab engine-side pre-flight + honest source tag.
+        if (tcfg.indiaMode !== 'live') {
+          return { ok: false, blocked: true, reason: 'India LIVE mode is not armed — type LIVE in the console first (India arming is separate from crypto)', error: 'India LIVE mode is not armed' };
+        }
         const qtyINR = Math.round((order.qty || 1) * (order.entry || 0));
         return executeIndiaSignal({
           symbol: order.symbol, side: order.side, mode: 'live',
-          qtyINR, getFreshSignal: (sym, o) => getFreshSignalForExec(sym, 'INDIA', depsForSignals(), o),
-          source: 'india-agent', sendTelegram,
+          qtyINR,
+          // v21.23.10 CRITICAL FIX: param ka naam `getFreshSignal` tha jabki
+          // executeIndiaSignal `getFreshIndiaSignal` destructure karta hai —
+          // India arm hote hi gate-4 `getFreshIndiaSignal(sym)` TypeError
+          // deta (undefined call) → MTF-auto India LIVE STRUCTURALLY dead.
+          // Manual console path (1979) pehle se sahi naam use karta tha.
+          getFreshIndiaSignal: (sym, o) => getFreshSignalForExec(sym, 'INDIA', depsForSignals(), o),
+          source: 'mtf-auto-india', sendTelegram,
         });
       }
       return { ok: false, error: 'unsupported live market' };
@@ -1304,7 +1328,7 @@ export function registerAITradingRoutes(app, deps) {
       const liveCtx = await mtfAutoLiveCtx(cfg);
       const out = await mtfAutoTick({
         boards,
-        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
+        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
         quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
         killSwitch,
         fx: fxLive,
@@ -3111,7 +3135,7 @@ export function registerAITradingRoutes(app, deps) {
       }
       await mtfAutoTick({
         boards,
-        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
+        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
         quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
         fx: fxLive,
         usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
@@ -3171,7 +3195,16 @@ export function registerAITradingRoutes(app, deps) {
               // early-return → 3s ultra-fast LIVE exchange SL sync SILENT
               // DEAD CODE tha (15s deep monitor hi sync kar raha tha).
               stopLoss: tr.trailedStopLoss,
-              takeProfit: tr.tp1Hit ? tr.t2 : tr.t1,
+              // v21.23.10 [TP-LADDER FIX]: takeProfit ab HAMESHA t2 — pehle
+              // pre-TP1 pe exchange-native TP T1 par re-arm hota tha
+              // (`tr.tp1Hit ? tr.t2 : tr.t1`). CoinDCX create_tpsl FULL
+              // position close karta hai, isliye pehli SL-trail (Stage-1
+              // Early, +0.22R) par LIVE position POORI T1 par band ho jaati
+              // thi — TP1-partial + TP2-runner design live me kabhi chalta
+              // hi nahi tha (paper engine me partial hota hai isliye tests
+              // me dikha nahi). Entry-arming (createFuturesTpsl tp2) + 15s
+              // deep tick (b.t2) dono pehle se TP2 — ab teeno aligned.
+              takeProfit: tr.t2,
             }).catch(() => null);
           }
         }
@@ -3261,13 +3294,21 @@ export function registerAITradingRoutes(app, deps) {
           const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
           if (!on) continue;
           if (market === 'INDIA' && !isNseOpen() && !hasOpenIndia) continue;
-          boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, fx: fxLive }).catch(() => null);
+          // v21.23.10 [BOARDSIGS PARITY]: 15s deep tick (jo ACTUAL entry path
+          // hai — 10s probe isi me escalate karta hai) pehle boardSigs ke
+          // BINA board banata tha → P0 direction guards (boardOpposes −12/
+          // cap64, svaOpposes, councilHardNo, winProb NO-EDGE) is fastest
+          // path par kabhi fire nahi hote the + superScore ka boardBase
+          // weight redistribute → 15s vs 60s views diverge. Ab 60s loop
+          // (3134) jaisa hi warm signals pass.
+          const base = await getSignals(market, depsForSignals(), { warmOnly: true }).catch(() => null);
+          boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: base?.signals || [], fx: fxLive }).catch(() => null);
         }
         await mtfAutoTick({
           boards,
           // v21.23.7: updatePaperTradeT1ClosePct — deep monitor LIVE vol-class
           // shift pe paper trade ka TP1 partial % refresh karta hai (volTrail).
-          paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
+          paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
           quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
           fx: fxLive,
           usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
@@ -3343,8 +3384,19 @@ export function registerAITradingRoutes(app, deps) {
       const openSyms = new Set((st?.book || [])
         .filter(b => b.status === 'OPEN')
         .map(b => String(normalizeLinkSymbol(b.symbol, b.market)).toUpperCase()));
-      const hot = warm.some(bd => bd?.ok && Array.isArray(bd.rows) && bd.rows.some(r =>
+      // v21.23.10 [PROBE-PARITY]: probe sirf bd.rows scan karta tha —
+      // metalsRows (XAU/XAG) + equitySimRows 10s ultra-fast path se bahar
+      // the (tick pool me dono included hain). Ab teeno arrays.
+      const rowsOf = (bd) => [
+        ...(Array.isArray(bd?.rows) ? bd.rows : []),
+        ...(Array.isArray(bd?.metalsRows) ? bd.metalsRows : []),
+        ...(Array.isArray(bd?.equitySimRows) ? bd.equitySimRows : []),
+      ];
+      const hot = warm.some(bd => bd?.ok && rowsOf(bd).some(r =>
         r?.ok
+        // v21.23.10 [THRASH-CURE]: backoff-me symbols par free escalation
+        // band — full tick inhe wapas skip karta hi tha (wasted deep work).
+        && !isLiveAttemptBackoffActive(r.symbol)
         && (r.side === 'LONG' || r.side === 'SHORT')
         && (r.tier === 'ELITE' || r.tier === 'STRONG' || Number(r.superScore) >= minScore)
         && !(r.autoBlockers?.length)

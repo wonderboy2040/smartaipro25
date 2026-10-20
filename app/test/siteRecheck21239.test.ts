@@ -141,8 +141,13 @@ describe('v21.23.9 S2 — fastSlTrailLoop LIVE exchange SL sync (dead `newStopLo
     expect(ROUTES_SRC).toContain('stopLoss: tr.trailedStopLoss,');
     expect(ROUTES_SRC).not.toContain('newStopLoss: tr.trailedStopLoss,');
   });
-  it('takeProfit TP1→T1 / TP1-hit→T2 ladder param intact', () => {
-    expect(ROUTES_SRC).toContain('takeProfit: tr.tp1Hit ? tr.t2 : tr.t1,');
+  it('takeProfit HAMESHA t2 — v21.23.10 TP-LADDER FIX (honest update: v21.23.9 ka "TP1→T1 ladder" pin hi live bug tha)', () => {
+    // CoinDCX create_tpsl FULL position close karta hai — pre-TP1 TP=T1 arm
+    // karna matlab pehli Stage-1 trail par LIVE position POORI T1 par exit
+    // (TP1-partial + TP2-runner design kabhi live me nahi chala). Entry
+    // arming (tp2) + 15s deep tick (b.t2) pehle se TP2 — 3s loop ab aligned.
+    expect(ROUTES_SRC).toContain('takeProfit: tr.t2,');
+    expect(ROUTES_SRC).not.toContain('takeProfit: tr.tp1Hit ? tr.t2 : tr.t1,');
   });
   it('paper-side sync (updatePaperTradeStopLoss) untouched — positional signature', () => {
     expect(ROUTES_SRC).toContain('updatePaperTradeStopLoss(tr.paperId ?? tr.symbol, tr.trailedStopLoss)');
@@ -176,8 +181,13 @@ describe('v21.23.9 S4 — 4h resample ab RAW 1h se (overlay-bake fix — cache h
   it('purana overlaid-1h resample call GONE', () => {
     expect(MTF_SRC).not.toContain("const base = await _indiaCandles(symbol, '1h', market);");
   });
-  it('raw passthrough: cache-hit + return dono overlay gate (per-READ discipline)', () => {
-    expect(MTF_SRC).toContain('return raw ? hit.payload : indiaOverlayCandles(symbol, tf, hit.payload);');
+  it('raw passthrough: cache-hit + return dono overlay gate (per-READ discipline) — v21.23.10 null-mini-TTL honest update', () => {
+    // v21.23.10: cache-hit line ab null-payload ko 60s mini-TTL se serve
+    // karti hai (null ko poore 1d-TTL=30min tak cache karna ek transient
+    // Yahoo 429 ke liye leg ko aadha ghanta blank rakhta tha) — RAW-cache
+    // + per-READ overlay discipline INTACT (null path me overlay no-op).
+    expect(MTF_SRC).toContain('if (hit && Date.now() - hit.at < (hit.payload == null ? 60_000 : ttl)) {');
+    expect(MTF_SRC).toContain('return raw ? hit.payload : (hit.payload == null ? null : indiaOverlayCandles(symbol, tf, hit.payload));');
     expect(MTF_SRC).toContain('return raw ? out : indiaOverlayCandles(symbol, tf, out);');
   });
 });

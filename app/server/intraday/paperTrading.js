@@ -689,6 +689,25 @@ export function closePaperTrade(id, quotes) {
   return { ok: true, trade: t };
 }
 
+/** v21.23.10 LIVE-ATTEMPT ROLLBACK VOID (mtfAutoLink _voidRollbackPaperTrade):
+ *  Ek failed LIVE attempt ka optimistic paper-mirror (jo abhi exchange par
+ *  kabhi aaya hi nahi) ko CLOSE nahi — VOID karo: row ko _state.trades se
+ *  bina cost-accounting / realizedPnl / recordTradeClose ke REMOVE karo.
+ *  Pehle har live-reject ek 2ms-lived phantom paper trade mint karta tha
+ *  (openPaperTrade → closePaperTrade('MANUAL')) jo round-trip costs book
+ *  karta tha — live-probe me minutes me 46 fake closes (net −₹2,206) paper
+ *  track-record / UI stats / EOD review ko poison kar rahe the. Quote ki
+ *  zaroorat NAHI (close ke Unlike) — quote-gap par bhi phantom OPEN kabhi
+ *  nahi rehta. Sirf OPEN rows void hoti hain; CLOSED row idempotent no-op.
+ */
+export function voidPaperTrade(id) {
+  const idx = _state.trades.findIndex(x => x.id === id && x.status !== 'CLOSED');
+  if (idx === -1) return { ok: true, alreadyAbsent: true };
+  const [t] = _state.trades.splice(idx, 1);
+  _persist();
+  return { ok: true, voided: true, trade: t };
+}
+
 /** v21.23.0 ULTRA-FAST REALTIME SL TRAIL SYNC:
  *  Ratchets `t.stopLoss` on an open paper trade (by id or symbol) strictly in the
  *  favorable direction (LONG: higher SL only; SHORT: lower SL only). */

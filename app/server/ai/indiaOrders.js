@@ -62,6 +62,19 @@ export async function executeIndiaSignal(opts) {
 
   const reject = (reason, error, extra = {}) => withJournalLock(() => {
     const j = loadJournal();
+    // v21.23.10 [REJECT-DEDUP]: identical consecutive reject (same symbol +
+    // reason) 5-min window me dubara journal me NAHI likha jata — pehle
+    // engine ke bina-backoff retries 500-entry journal window ko ~70 min
+    // me reject-spam se bhar dete the (genuine entries displaced). Repeat
+    // count + fresh ts update-in-place, nayi row nahi.
+    const lastE = Array.isArray(j.entries) ? j.entries[j.entries.length - 1] : null;
+    if (lastE && lastE.status === 'REJECTED' && String(lastE.symbol) === String(sym)
+        && String(lastE.reason) === String(reason)
+        && Date.now() - Number(lastE.ts || 0) < 5 * 60_000) {
+      lastE.__repeatCount = (Number(lastE.__repeatCount) || 1) + 1;
+      lastE.ts = Date.now();
+      return saveJournal(j);
+    }
     pushEntry(j, { ...entry, status: 'REJECTED', reason, ...extra });
     saveJournal(j);
   }).then(() => ({ ok: false, error: error || reason }));

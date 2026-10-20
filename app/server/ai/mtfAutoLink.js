@@ -172,7 +172,14 @@ export function loadMtfAutoConfig() {
 }
 
 function _sanitizeCfg(cfg) {
-  const out = { ...cfg };
+  // v21.23.10 [F10-DEAD-KEYS]: pehle `{ ...cfg }` passthrough spread config ke
+  // HAR dead key ko persist karta tha — `markets` (['CRYPTO']) aur
+  // `liveExecution` dono repo me KAHIN bhi read nahi hote (grep-verified),
+  // jabki user 'markets:[CRYPTO]' dekh kar samajhta tha sirf crypto hi
+  // chalega (real switch `desks` hai). Allowlist = MTF_AUTO_DEFAULTS keys —
+  // legacy keys ab sanitize par drop ho kar save me se bhi gayab ho jayenge.
+  const out = {};
+  for (const k of Object.keys(MTF_AUTO_DEFAULTS)) out[k] = cfg[k];
   out.enabled = Boolean(cfg.enabled);
   out.mode = MODES.has(String(cfg.mode).toUpperCase()) ? String(cfg.mode).toUpperCase() : 'INTRADAY';
   out.holdMin = (() => {
@@ -294,6 +301,47 @@ export const computeWallet100Deployment = computeWallet95Deployment;
  *     Risk hints (reversalRisk / context.exhausted / opposingFlow) ab SIRF SL
  *     profit-lock tighten karte hain (peak − profile.hintGivebackR), book NAHI.
  */
+
+// v21.23.10 [BOARD-ROTATION CACHE]: live boards har 6-15s re-rank hoti hain
+// (top-6 trim) — ek OPEN trade ka symbol mid-trade top-6 se BAHAR chala
+// jaye to boardRow null ho jata tha → UC-flip / reversal detection SILENT
+// dead (trade poora −1R ride karta tha — exact wahi scenario jiske liye
+// flip banaya gaya tha). Last-seen row ka halka snapshot (120s TTL, memory
+// only — persisted book me nahi jata) detection zinda rakhta hai.
+const _lastBoardRowSeenMap = new Map();
+const BOARD_ROW_SNAPSHOT_TTL_MS = 120_000;
+function _rememberBoardRow(symbol, row, now) {
+  const key = String(symbol || '').toUpperCase();
+  if (!key || !row) return;
+  _lastBoardRowSeenMap.set(key, {
+    at: now,
+    side: String(row.side || '').toUpperCase(),
+    triggerFired: Boolean(row.triggerFired),
+    superScore: Number(row.superScore) || 0,
+    triggerDir: Number(row.triggerDir) || 0,
+    contextDir: Number(row.context?.dir) || 0,
+    atrPct: Number(row.context?.atrPct) > 0 ? Number(row.context.atrPct) : null,
+  });
+  if (_lastBoardRowSeenMap.size > 64) {
+    const firstKey = _lastBoardRowSeenMap.keys().next().value;
+    if (firstKey !== undefined) _lastBoardRowSeenMap.delete(firstKey);
+  }
+}
+function _snapshotRowFor(symbol, now) {
+  const key = String(symbol || '').toUpperCase();
+  const s = _lastBoardRowSeenMap.get(key);
+  if (!s || now - Number(s.at || 0) > BOARD_ROW_SNAPSHOT_TTL_MS) return null;
+  return {
+    symbol: key,
+    side: s.side,
+    triggerFired: s.triggerFired,
+    superScore: s.superScore,
+    triggerDir: s.triggerDir,
+    context: { dir: s.contextDir, ...(s.atrPct != null ? { atrPct: s.atrPct } : {}) },
+    __snapshot: true,
+  };
+}
+
 export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const side = String(trade.side || trade.direction || 'LONG').toUpperCase();
   const isLong = side !== 'SHORT';
@@ -566,6 +614,14 @@ function _loadState() {
     day: raw.day || null,
     dayCount: Number(raw.dayCount) || 0,
     perSymbolLast: raw.perSymbolLast && typeof raw.perSymbolLast === 'object' ? raw.perSymbolLast : {},
+    // v21.23.10 [THRASH-CURE]: failed-LIVE-attempt per-symbol backoff map
+    // { SYM: { at, count, reason } } — pehle reject hone par KOI bhi
+    // cooldown/backoff stamp nahi hota tha (perSymbolLast sirf SUCCESS par
+    // likha jata tha + live+flat bypass use wipe bhi kar deta tha) → teen
+    // loops (10s probe / 15s recheck / 60s sweep) same symbol ko har ~10s
+    // retry karte the (live-probe: 44 reject events + 46 phantom paper
+    // trades minutes me). Ab escalating backoff: 5m → 10m → 20m → cap 240m.
+    failedLiveAttempts: raw.failedLiveAttempts && typeof raw.failedLiveAttempts === 'object' ? raw.failedLiveAttempts : {},
     book: Array.isArray(raw.book) ? raw.book.slice(-100) : [],
     events: Array.isArray(raw.events) ? raw.events.slice(-MAX_EVENTS) : [],
     lastTick: raw.lastTick || null,
@@ -594,9 +650,64 @@ function _rollDayIfNeeded() {
     st.day = key;
     st.dayCount = 0;
     st.perSymbolLast = {};
+    st.failedLiveAttempts = {}; // v21.23.10: naya din = naya backoff episode
     _persistState();
   }
   return st;
+}
+
+// ---------------- v21.23.10 [THRASH-CURE] failed-LIVE-attempt backoff ----------------
+// User symptom: "live mode pe not working" — engine LIVE order attempt karta
+// hai, reject hota hai (creds absent / India not armed / exchange error), KUCH
+// bhi stamp nahi hota, aur 10s/15s/60s teen loops phir wahi attempt dohrate
+// hain. Fix: har failed live-attempt par per-symbol ESCALATING backoff
+// (5m→10m→20m→40m… cap 4h). SUCCESS kabhi backoff nahi lagata. In-flight
+// transient lock backoff nahi lagata. Map persisted (restart-safe) + day
+// rollover par reset. Probe loop isLiveAttemptBackoffActive() consult karta
+// hai, candidates pool blocker ke roop me padhta hai.
+const LIVE_FAIL_BACKOFF_BASE_MS = 5 * 60_000;
+const LIVE_FAIL_BACKOFF_MAX_MS = 240 * 60_000;
+const LIVE_FAIL_EPISODE_RESET_MS = 6 * 3600_000;
+function _liveFailBackoffMs(count) {
+  const n = Math.max(1, Number(count) || 1);
+  return Math.min(LIVE_FAIL_BACKOFF_MAX_MS, LIVE_FAIL_BACKOFF_BASE_MS * Math.pow(2, n - 1));
+}
+export function isLiveAttemptBackoffActive(symbol, now = Date.now()) {
+  const f = _loadState().failedLiveAttempts?.[String(symbol || '').toUpperCase()];
+  if (!f) return false;
+  return _liveFailBackoffMs(f.count) - (now - Number(f.at || 0)) > 0;
+}
+function _stampLiveAttemptFailure(sym, reason, now = Date.now()) {
+  const st = _loadState();
+  if (!st.failedLiveAttempts || typeof st.failedLiveAttempts !== 'object') st.failedLiveAttempts = {};
+  const key = String(sym || '').toUpperCase();
+  if (!key) return;
+  const prev = st.failedLiveAttempts[key];
+  const prevAt = Number(prev?.at || 0);
+  // 6h se purani failure = naya episode (count reset) — transient glitch
+  // purane din ka count carry nahi karta.
+  const count = (prev && now - prevAt < LIVE_FAIL_EPISODE_RESET_MS) ? (Number(prev.count) || 0) + 1 : 1;
+  st.failedLiveAttempts[key] = { at: now, count, reason: String(reason || '').slice(0, 160) };
+  const keys = Object.keys(st.failedLiveAttempts);
+  if (keys.length > 64) for (const k of keys.slice(0, keys.length - 64)) delete st.failedLiveAttempts[k];
+  _persistState();
+  _logEvent('live-backoff', `LIVE attempt failed on ${key} → backoff ${Math.round(_liveFailBackoffMs(count) / 60000)}m (attempt #${count}: ${String(reason || '').slice(0, 120)})`);
+}
+// v21.23.10 [PHANTOM-TRADE-CURE]: failed live-attempt ka paper-mirror rollback
+// ab CLOSE nahi — VOID hai. Pehle har reject ek 2ms-lived paper trade mint
+// karta tha (openPaperTrade → closePaperTrade rollback) jo round-trip COSTS
+// book karta tha (live-probe: 46 fake MANUAL closes, net −₹2,206 poison in
+// paper track-record + stats). voidPaperTrade row ko bina cost/journal ke
+// hata deta hai; legacy fallback close sirf tab jab void available na ho.
+function _voidRollbackPaperTrade(paper, res, quotes) {
+  if (res?.trade?.id == null) return;
+  if (typeof paper.voidPaperTrade === 'function') {
+    try { paper.voidPaperTrade(res.trade.id); } catch { /* ignore */ }
+    return;
+  }
+  if (typeof paper.closePaperTrade === 'function') {
+    try { paper.closePaperTrade(res.trade.id, quotes); } catch { /* ignore */ }
+  }
 }
 
 // ---------------- symbol normalization ----------------
@@ -748,6 +859,14 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
       if (!(existing.trailedStopLoss > 0)) existing.trailedStopLoss = existing.stopLoss;
       if (!(existing.t1 > 0)) existing.t1 = t1;
       if (!(existing.t2 > 0)) existing.t2 = t2;
+      // v21.23.10 [ADOPTED-VOL-STAMP]: paper/manual row LIVE adopt hote waqt
+      // vol stamps missing the → NORMAL-tight trail; SL-distance proxy se stamp.
+      if (!(existing.atrPct > 0) && entry > 0 && initialSl > 0) {
+        const slPct = Math.abs(entry - initialSl) / entry * 100;
+        existing.atrPct = +(slPct * 0.8).toFixed(3);
+        existing.volClass = existing.volClass || classifyVolatility(existing.atrPct);
+        if (!(existing.t1ClosePct > 0)) existing.t1ClosePct = tp1ClosePctFor(existing.volClass);
+      }
       changed = true;
       synced.push(existing);
       continue;
@@ -762,6 +881,16 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
       cfg,
     });
     const feeBePrice = feeBreakevenFloor({ entry, side, market: 'FUTURES' });
+    // v21.23.10 [ADOPTED-VOL-STAMP]: adopted/manual CoinDCX positions par
+    // pehle KOI atrPct/volClass entry-stamp nahi tha → resolveVolClass har
+    // tick NORMAL par bottom-out (tight v21.23.6 trail) — "kam profit book"
+    // symptom specifically in positions par. Exchange SL-distance (% of
+    // entry) ko ATR% proxy ke roop me stamp karo (SL ≈ 1.25×ATR typical →
+    // atrPct ≈ 0.8 × slPct) — honest estimate, LIVE 15s tick board-row
+    // milne par asli atrPct se refresh ho jata hai.
+    const adoptedSlPct = entry > 0 && initialSl > 0 ? Math.abs(entry - initialSl) / entry * 100 : 0;
+    const adoptedAtrPct = adoptedSlPct > 0 ? +(adoptedSlPct * 0.8).toFixed(3) : null;
+    const adoptedVolClass = adoptedAtrPct != null ? classifyVolatility(adoptedAtrPct) : null;
     const rec = {
       paperId: null,
       liveOrderId: pos.orderId || pos.exchangeOrderId || pos.id || `cdx-pos-${sym}`,
@@ -800,6 +929,12 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
       feeBreakevenPrice: feeBePrice,
       deepMonitorStage: 'STAGE_0_INITIAL_GUARD',
       deepMonitorLabel: 'Stage 0 · Initial SL Guard (CoinDCX Full Control)',
+      // v21.23.10 [ADOPTED-VOL-STAMP]: adopted positions ab vol-aware trail
+      // chalati hain (pehle hamesha NORMAL tight profile).
+      atrPct: adoptedAtrPct,
+      volClass: adoptedVolClass || null,
+      momentumState: null,
+      t1ClosePct: adoptedVolClass ? tp1ClosePctFor(adoptedVolClass) : 0.5,
       trendStatus: `📡 ${side === 'SHORT' ? 'BEARISH' : 'BULLISH'} COINDCX ACTIVE POSITION CONTROL`,
       marginINR: +(qty * entry * fxRate / leverage).toFixed(2),
       marginUsdt: +(qty * entry / leverage).toFixed(4),
@@ -1017,9 +1152,8 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now, isLiv
     const wantLiveOrder = !isSim && (cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false));
     if (wantLiveOrder) {
       if (typeof p.liveExecute !== 'function') {
-        if (res?.trade?.id != null && typeof paper.closePaperTrade === 'function') {
-          try { paper.closePaperTrade(res.trade.id, p.quotes); } catch { /* ignore */ }
-        }
+        _voidRollbackPaperTrade(paper, res, p.quotes);
+        _stampLiveAttemptFailure(sym, 'flip-reverse: live handler unavailable', now);
         _logEvent('flip-skip', `🔁 UC FLIP-REVERSE ${sym}: live handler unavailable — no untraded reverse entry`);
         return null;
       }
@@ -1037,16 +1171,14 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now, isLiv
           row: boardRow,
         });
         if (!liveOrderResult?.ok) {
-          if (res?.trade?.id != null && typeof paper.closePaperTrade === 'function') {
-            try { paper.closePaperTrade(res.trade.id, p.quotes); } catch { /* ignore */ }
-          }
+          _voidRollbackPaperTrade(paper, res, p.quotes);
+          if (liveOrderResult?.inFlight !== true) _stampLiveAttemptFailure(sym, `flip-reverse: ${liveOrderResult?.error || liveOrderResult?.reason || 'not filled'}`, now);
           _logEvent('flip-skip', `🔁 UC FLIP-REVERSE ${sym}: live order not executed — ${liveOrderResult?.error || liveOrderResult?.reason || 'not filled'}`);
           return null;
         }
       } catch (e) {
-        if (res?.trade?.id != null && typeof paper.closePaperTrade === 'function') {
-          try { paper.closePaperTrade(res.trade.id, p.quotes); } catch { /* ignore */ }
-        }
+        _voidRollbackPaperTrade(paper, res, p.quotes);
+        _stampLiveAttemptFailure(sym, `flip-reverse error: ${e?.message || e}`, now);
         _logEvent('flip-skip', `🔁 UC FLIP-REVERSE ${sym}: live order error — ${e?.message || e}`);
         return null;
       }
@@ -1201,6 +1333,11 @@ export async function mtfAutoTick(p = {}) {
         ...(mktBoard?.equitySimRows || []),
       ];
       const boardRow = allBoardRows.find(r => normalizeLinkSymbol(r?.symbol, b.market) === b.symbol);
+      // v21.23.10 [BOARD-ROTATION CACHE]: row milte hi snapshot yaad rakho;
+      // row na mile (top-6 rotation) to ≤120s purana snapshot fallback —
+      // warna UC-flip/reversal detection usi tick SILENT mar jaati thi.
+      if (boardRow) _rememberBoardRow(b.symbol, boardRow, now);
+      const effRow = boardRow || _snapshotRowFor(b.symbol, now);
       const livePaper = (summary.open || []).find(t => t.id === b.paperId);
       const rawQuote = (() => {
         if (b.ccy === 'USDT' && p.usdtQuotes) {
@@ -1222,9 +1359,9 @@ export async function mtfAutoTick(p = {}) {
 
       const oppSide = b.side === 'LONG' ? 'SHORT' : 'LONG';
       const revByRow = Boolean(
-        boardRow && (
-          (String(boardRow.side || '').toUpperCase() === oppSide && (boardRow.triggerFired || Number(boardRow.superScore) >= 65))
-          || (boardRow.context?.dir != null && ((b.side === 'LONG' && boardRow.context.dir < 0 && boardRow.triggerDir < 0) || (b.side === 'SHORT' && boardRow.context.dir > 0 && boardRow.triggerDir > 0)))
+        effRow && (
+          (String(effRow.side || '').toUpperCase() === oppSide && (effRow.triggerFired || Number(effRow.superScore) >= 65))
+          || (effRow.context?.dir != null && ((b.side === 'LONG' && effRow.context.dir < 0 && effRow.triggerDir < 0) || (b.side === 'SHORT' && effRow.context.dir > 0 && effRow.triggerDir > 0)))
         )
       );
 
@@ -1243,7 +1380,7 @@ export async function mtfAutoTick(p = {}) {
         qty: Number(livePaper?.qty ?? b.qty ?? 1),
       }, {
         ltp: rawQuote,
-        boardRow,
+        boardRow: effRow,
         reversalConfirmed: revByRow,
       });
 
@@ -1303,7 +1440,7 @@ export async function mtfAutoTick(p = {}) {
         qty: Number(livePaper?.qty ?? b.qty ?? 1),
         market: b.execMarket || b.market,
         reversalConfirmed: true,
-        reversalReasons: [`board flipped ${oppSide} (${boardRow?.superScore ?? '—'})`],
+        reversalReasons: [`board flipped ${oppSide} (${effRow?.superScore ?? '—'}${effRow?.__snapshot ? ' · snap' : ''})`],
       }) : null;
 
       // v21.22.0 CONCRETE PREMATURE-CLOSE FIREWALL ON LIVE POSITIONS:
@@ -1355,8 +1492,25 @@ export async function mtfAutoTick(p = {}) {
       const shouldExitNow = shouldExitByReversalOrTrail || ucFlipProtectiveExit;
 
       if (shouldExitNow) {
+        // v21.23.10 [LIVE-CLOSE-VERDICT]: exchange close ka verdict CHECK hota
+        // hai. closeCoinDcxActivePosition FAILURE par {ok:false} deta hai
+        // (throw kabhi nahi) — pehle wo verdict ignore hota tha + `|| LIVE`
+        // clause book row ko CLOSED book kar deta tha jabki exchange par
+        // leveraged position ABHI BHI KHULA tha (user "trade band ho gaya"
+        // samajh baithta, sync usi ko naye row me re-adopt karta — fabricated
+        // close record + churn). Ab {ok:false} = row OPEN + syncError stamp +
+        // agle tick retry. undefined/legacy stub contract permissive rehta hai.
+        let liveCloseFailed = null;
         if (b.executionMode === 'LIVE' && typeof p.liveClose === 'function') {
-          try { await p.liveClose(b); } catch { /* non-fatal */ }
+          try {
+            const lc = await p.liveClose(b);
+            if (lc && lc.ok === false) liveCloseFailed = lc.error || lc.reason || 'exchange close failed';
+          } catch { /* non-fatal — legacy permissive close, sync re-adopts */ }
+        }
+        if (liveCloseFailed) {
+          b.syncError = String(liveCloseFailed).slice(0, 200);
+          _logEvent('live-close-failed', `⚠️ LIVE close FAILED ${b.symbol} — book row OPEN raha (exchange par position abhi bhi hai): ${b.syncError} — next tick retry`);
+          continue;
         }
         const r = paper.closePaperTrade(b.paperId, {
           ...(p.quotes || {}),
@@ -1397,7 +1551,7 @@ export async function mtfAutoTick(p = {}) {
           // ho chuka hai, naya signal normal entry path se aayega.
           if (ucFlipConfirmed && cfg.ucFlipReverse !== false && !deepEval.tp2Hit) {
             await _tryOpenUcFlipReverse({
-              b, boardRow, ltp: rawQuote, p, cfg, out, now,
+              b, boardRow: effRow, ltp: rawQuote, p, cfg, out, now,
               isLiveSession: cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false),
             });
           }
@@ -1520,7 +1674,19 @@ export async function mtfAutoTick(p = {}) {
       : board.rows;
     // When 0 positions are currently open in Live Auto mode, bypass stale symbol cooldown so user's Live Auto click always fires
     const effectiveLastEntryAt = (isLiveExecActive && _openLinked().length === 0) ? {} : stDay.perSymbolLast;
-    const picks = dualAutoCandidates(poolRows, cfg, { openSymbols, lastEntryAt: effectiveLastEntryAt, now });
+    // v21.23.10 [THRASH-CURE]: failed-LIVE-attempt per-symbol ESCALATING backoff
+    // (5m→10m→20m→…cap 4h) — success-cooldown bypass isse affect NAHI hota
+    // (user ka "Live Auto click always fires" intent intact), par ek REJECTED
+    // attempt (creds/arming/exchange error) ab symbol ko cooldown me daalta
+    // hai — pehle teen loops same reject har ~10s dohrate the.
+    const failMap = stDay.failedLiveAttempts || {};
+    const picks = dualAutoCandidates(poolRows, cfg, { openSymbols, lastEntryAt: effectiveLastEntryAt, now }).map(r => {
+      const f = failMap[String(r?.symbol || '').toUpperCase()];
+      if (!f) return r;
+      const leftMs = _liveFailBackoffMs(f.count) - (now - Number(f.at || 0));
+      if (leftMs > 0) return { ...r, autoPickBlockers: [...r.autoPickBlockers, `live-attempt backoff (${Math.ceil(leftMs / 60_000)}m left · #${f.count})`] };
+      return r;
+    });
     out.considered += picks.length;
     let eligible = picks.filter(r =>
       r.autoPickBlockers.length === 0
@@ -1561,6 +1727,13 @@ export async function mtfAutoTick(p = {}) {
         (r.side === 'LONG' || r.side === 'SHORT')
         && r.directionVerified === true
         && r.triggerFired === true
+        // v21.23.10 [THRASH-CURE HOLE #2]: ye fallback autoPickBlockers BYPASS
+        // karta tha — dualAutoCandidates ke cooldown/already-open blockers aur
+        // (naya) live-attempt backoff dono is second-chance path se sidhe
+        // skip ho jaate the → backoff ke baad bhi har 10s re-attempt is
+        // fallback se hota tha. "MUST NOT bypass blockers" doctrine ab yahan
+        // bhi apply (P0-3 note ka completion).
+        && (r.autoPickBlockers || []).length === 0
         // P0-3 FIX: fallback MUST NOT bypass quality blockers (cost≥0.5R, netRR<0, grade C,
         // winProb NO-EDGE, direction conflict, SVA FLIP, AI council hard disagree).
         && (r.autoBlockers || []).length === 0
@@ -1742,9 +1915,8 @@ export async function mtfAutoTick(p = {}) {
       let finalT2 = t2;
       if (wantLiveOrder) {
         if (typeof p.liveExecute !== 'function') {
-          if (res?.trade?.id != null && typeof paper.closePaperTrade === 'function') {
-            try { paper.closePaperTrade(res.trade.id, p.quotes); } catch { /* ignore */ }
-          }
+          _voidRollbackPaperTrade(paper, res, p.quotes);
+          _stampLiveAttemptFailure(sym, 'live execution handler unavailable', now);
           out.skipped.push(`${sym}: live execution handler unavailable — skipped to prevent untraded entry`);
           continue;
         }
@@ -1766,10 +1938,12 @@ export async function mtfAutoTick(p = {}) {
             row,
           });
           if (!liveOrderResult?.ok) {
-            if (res?.trade?.id != null && typeof paper.closePaperTrade === 'function') {
-              try { paper.closePaperTrade(res.trade.id, p.quotes); } catch { /* ignore */ }
-            }
+            _voidRollbackPaperTrade(paper, res, p.quotes);
             const errReason = liveOrderResult?.error || liveOrderResult?.reason || 'order not filled';
+            // v21.23.10 [THRASH-CURE]: in-flight transient lock backoff nahi
+            // lagata (doosra concurrent attempt hi tha); baaki har reject
+            // escalating per-symbol backoff stamp karta hai.
+            if (liveOrderResult?.inFlight !== true) _stampLiveAttemptFailure(sym, errReason, now);
             _logEvent('live-skip', `LIVE ORDER NOT EXECUTED on ${sym} (no untraded entry added): ${errReason}`);
             out.skipped.push(`${sym}: live order not executed (${errReason})`);
             continue;
@@ -1781,9 +1955,8 @@ export async function mtfAutoTick(p = {}) {
           if (Number(liveOrderResult?.filled?.t2) > 0) finalT2 = Number(liveOrderResult.filled.t2);
           _logEvent('live-entry', `LIVE ORDER PLACED ${sym} ${row.side} @ ${finalEntry} · ${leverage}x leverage · ${w95.walletDeployPct}% Wallet (₹${w95.deployedWalletINR} / ₹${Math.round(effectiveWalletINR)}) · qty ${finalQty}`);
         } catch (e) {
-          if (res?.trade?.id != null && typeof paper.closePaperTrade === 'function') {
-            try { paper.closePaperTrade(res.trade.id, p.quotes); } catch { /* ignore */ }
-          }
+          _voidRollbackPaperTrade(paper, res, p.quotes);
+          _stampLiveAttemptFailure(sym, e?.message || 'live order error', now);
           const errMsg = e?.message || 'error';
           _logEvent('live-skip', `LIVE ORDER exception on ${sym} (no untraded entry added): ${errMsg}`);
           out.skipped.push(`${sym}: live order error (${errMsg})`);
@@ -2118,9 +2291,10 @@ export function __resetMtfAutoForTests(seed = null) {
   _cfg = null;
   _state = null;
   _mtfAutoTickInFlight = false;
+  _lastBoardRowSeenMap.clear(); // v21.23.10: board-rotation snapshot cache bhi module state hai
   __resetDirectionLocksForTests();
   try { fs.unlinkSync(CFG_FILE()); } catch { /* absent */ }
   try { fs.unlinkSync(STATE_FILE()); } catch { /* absent */ }
   if (seed?.config) { _cfg = _sanitizeCfg({ ...MTF_AUTO_DEFAULTS, ...seed.config, desks: { ...MTF_AUTO_DEFAULTS.desks, ...(seed.config.desks || {}) } }); _save(CFG_FILE(), _cfg); }
-  if (seed?.state) { _state = { day: seed.state.day ?? null, dayCount: seed.state.dayCount ?? 0, perSymbolLast: seed.state.perSymbolLast || {}, book: seed.state.book || [], events: [], lastTick: null }; _save(STATE_FILE(), _state); }
+  if (seed?.state) { _state = { day: seed.state.day ?? null, dayCount: seed.state.dayCount ?? 0, perSymbolLast: seed.state.perSymbolLast || {}, failedLiveAttempts: seed.state.failedLiveAttempts || {}, book: seed.state.book || [], events: [], lastTick: null }; _save(STATE_FILE(), _state); }
 }

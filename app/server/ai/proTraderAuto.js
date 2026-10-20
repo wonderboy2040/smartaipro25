@@ -333,6 +333,11 @@ export function proTraderGate(sig, cfg = PROTRADER_DEFAULTS) {
   // liye India desk kabhi trade hi nahi kar pata tha. INDIA ke liye gate
   // grade STRONG + plan + side (upar enforce) par chalta hai.
   if (sig?.executable === false && String(sig?.market || '').toUpperCase() !== 'INDIA') reasons.push('not-executable');
+  // v21.23.10 [V21.23.4 PARITY]: dataDegraded signals (FRESH-TAPE-ABSENT /
+  // INTRADAY-TF-THIN) agent.js Engine A/C + indiaAgent dono me blocked hain
+  // — SAPTA gate me ye check KABHI tha hi nahi (grep-verified) → banned
+  // 29%-WR degenerate class ek engine par blocked, dusre par TRADABLE.
+  if (sig?.dataDegraded) reasons.push('data-degraded:' + sig.dataDegraded);
   if (sig?.symbol && (side === 'LONG' || side === 'SHORT')) {
     const dirLock = checkDirectionLock(sig.symbol, side);
     if (dirLock && !dirLock.allowed) reasons.push(`direction-lock:${dirLock.lockedSide}`);
