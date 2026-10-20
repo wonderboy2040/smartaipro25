@@ -200,6 +200,14 @@ export async function scripMasterStatus() {
  */
 export function dhanOrderBody({ symbol, securityId, side, quantity, kind = 'ENTRY', triggerPrice = null }) {
   const s = String(side || '').toUpperCase();
+  // v21.23.12 [DOCTRINE HONESTY]: comment "unknown value BUY default nahi
+  // karti (fail-honest: SELL bhi nahi)" bolta tha par code `buy = s ===
+  // 'BUY' || s === 'LONG'` unknown ko SILENT-SELL kar deta tha — v21.23.9
+  // ka futuresOrderBody doctrine yahan apply: unknown side = LOUD THROW
+  // (call-site fix maangti hai), kabhi silent order nahi.
+  if (s !== 'BUY' && s !== 'SELL' && s !== 'LONG' && s !== 'SHORT') {
+    throw Object.assign(new Error(`dhanOrderBody: unknown side "${side}" — BUY/SELL/LONG/SHORT hi allowed (fail-honest)`), { status: 400 });
+  }
   const buy = s === 'BUY' || s === 'LONG';
   const body = {
     transactionType: kind === 'SL' ? (buy ? 'SELL' : 'BUY') : buy ? 'BUY' : 'SELL', // SL order is the protective EXIT side

@@ -78,6 +78,7 @@ function vote(dir, conf, reasons, na = false) {
 // before going live for real users. Default OFF — enable with
 // AI_ENABLE_V2_MODELS=true (also accepts 1/on/yes).
 import { sentimentVote } from './sentiment.js';
+import { ensureAscending } from './lib/candles.js'; // v21.23.12 [L2.5]: structurePro/maCross/srMatrix mirror-guards
 import { instFlowVote } from './instFlow.js';
 import { fundamentalsVote } from './fundamentals.js';
 // v21.12.0 MASTER ACCURACY SWITCH — stale-.env 13-seat pin disease ka
@@ -226,7 +227,10 @@ function _lastCross(fast, slow) {
 
 /** PURE cross read from candles — signals.js pass-2/deep revival bhi
  * isi se 15m payload banata hai (ctx.__maCross). */
-export function maCrossFromCandles(candles) {
+export function maCrossFromCandles(candlesIn) {
+  // v21.23.12 [L2.5 SEAT GUARD]: closes-tail cross read — mirrored input
+  // golden/death cross ULTE padhe jaate the. ensureAscending guard.
+  const candles = ensureAscending(candlesIn);
   if (!Array.isArray(candles) || candles.length < 60) return null;
   const closes = candles.map(c => Number(c?.close)).filter(Number.isFinite);
   if (closes.length < 60) return null;
@@ -513,7 +517,9 @@ function srMatrix(ctx) {
     if (Math.abs(d) > 1.8) { score -= Math.sign(d) * 0.4; pts.push('Extended far from pivot'); }
   }
   // Prior-day candle high/low levels (from candles when available).
-  const candles = ctx.candles;
+  // v21.23.12 [L2.5]: candles[len-2] prev-day read — mirrored input pe
+  // "prev-day" = kal ki jagah KAL se bhi purana bar ban jaata tha.
+  const candles = ensureAscending(ctx.candles);
   if (Array.isArray(candles) && candles.length >= 2) {
     const prev = candles[candles.length - 2];
     if (ctx.ltp > prev.high) { score += 0.4; pts.push('Above prev-day high'); }
@@ -641,7 +647,10 @@ import { fibonacciRetracement, volumeProfile, supplyDemandZones } from './lib/in
 // Supply/Demand zones + EMA100/200 macro. Structure authority = SMC.
 // (Statistical safety-net: seatCorrelation.js guard bhi live hai.)
 export function structurePro(ctx) {
-  const candles = Array.isArray(ctx?.candles) ? ctx.candles : null;
+  // v21.23.12 [L2.5 SEAT GUARD]: Fib/VP/S&D sab candle-geometry +
+  // candles[len-1].close ltp read — mirrored input ULTA structure vote
+  // (seat weight 1.0). ensureAscending guard.
+  const candles = ensureAscending(Array.isArray(ctx?.candles) ? ctx.candles : null);
   const ind = ctx?.ind || {};
   if (!candles || candles.length < 60) {
     return vote(0, 0, ['StructurePro: candles nahi — Fib/VP/S&D sab candle-geometry hai (abstain)']);

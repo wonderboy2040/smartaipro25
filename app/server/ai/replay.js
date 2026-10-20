@@ -28,6 +28,7 @@
 //   • max one open position, 5-bar cooldown after a close
 // ============================================================
 import { computeIndicatorsFromCandles } from './lib/indicators.js';
+import { ensureAscending } from './lib/candles.js'; // v21.23.12 [L2.5]: _resample mirror-guard
 import { rawTfCandles } from './mtf.js';
 
 const WARM_5M = 120;          // bars before the first replayable bar
@@ -55,7 +56,10 @@ const inNseSession = (ts) => {
 };
 
 /** Bucket 5m candles up (15m / 1h). */
-function _resample(candles, minutes) {
+function _resample(candlesIn, minutes) {
+  // v21.23.12 [L2.5]: mtf.js/signals.js resampler twins ke saath parity —
+  // mirrored input MIRRORED buckets banata tha (bucket.close = oldest).
+  const candles = ensureAscending(candlesIn);
   const widthMs = minutes * 60_000;
   const out = [];
   let b = null;

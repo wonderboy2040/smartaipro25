@@ -149,7 +149,7 @@ const r1 = (v) => Math.round(v * 10) / 10;
  * @param {object} [opts] { mtfAgreement?: number|null }
  */
 export function aggregateVotes(votes, gates = DEFAULT_GATES, opts = {}) {
-  const valid = (votes || []).filter(v => v && typeof v.dir === 'number' && v.dir !== 0 && (v.conf || 0) > 0 && (v.weight || 0) > 0);
+  const valid = (votes || []).filter(v => v && typeof v.dir === 'number' && Number.isFinite(v.dir) && v.dir !== 0 && (v.conf || 0) > 0 && (v.weight || 0) > 0);
   const votingWeight = valid.reduce((a, v) => a + v.weight, 0);
   // v11.8: the quorum denominator = seats that could serve this market.
   // `na: true` marks structural abstains (see header). Weight-0 seats
@@ -772,6 +772,19 @@ export function evaluateExecutionGate(signal, { side, gates = DEFAULT_GATES, max
   const wantSide = SIDE_ALIAS[String(side || signal.side).toUpperCase()]
     || String(side || signal.side).toUpperCase();
   const sigSide = SIDE_ALIAS[String(signal.side).toUpperCase()] || String(signal.side);
+  // v21.23.12 [v21.23.4 CONTRACT PARITY — gauntlet side]: dataDegraded /
+  // freshTapeAbsent signals (INTRADAY-TF-THIN hybrid / FRESH-TAPE-ABSENT
+  // 29%-WR degenerate mode) ko board/agent/SAPTA layers block karte the,
+  // par order-time ka LAST-LINE gauntlet nahi — manual desk click / auto
+  // path inhi 4 gauntlet call-sites (crypto/india/futures/global) se guzarta
+  // hai. Ab LIVE/PAPER-real order data-degraded signal par HARD-REFUSE hota
+  // hai; practice (paper journaling) allowed rehta hai (v21.23.4 design).
+  if (!practice && (signal.dataDegraded || signal.freshTapeAbsent)) {
+    return {
+      ok: false,
+      reason: `data-degraded (${signal.dataDegraded || 'FRESH-TAPE-ABSENT'}${signal.degradedReason ? ` — ${String(signal.degradedReason).slice(0, 120)}` : ''}) — live/PAPER-real order blocked, reference-only signal (v21.23.4 contract)`,
+    };
+  }
   // FLAT / planless vetoes FIRST (a FLAT signal is not a "flip" — saying
   // so would mislead; the honest reason is there is no consensus side).
   if (signal.side === 'FLAT' || !signal.plan) return { ok: false, reason: 'no tradeable side/plan in the current consensus' };
@@ -852,7 +865,14 @@ export function evaluateExecutionGate(signal, { side, gates = DEFAULT_GATES, max
 export function computeTrailSl(opts) {
   if (!opts || typeof opts !== 'object') return null;
   const { side, entryPrice, peakPrice, currentSl, initialRisk, price, armR = 1.0, offsetR = 1.0 } = opts;
-  const long = String(side).toUpperCase() !== 'SHORT';
+  // v21.23.12 [v21.23.9 DOCTRINE SWEEP — unknown side ≠ silent-LONG]:
+  // `String(side) !== 'SHORT'` har unknown value (BUY/SELL vocab, garbage)
+  // ko LONG trail math me daal deta tha — wahi disease-class jisme
+  // futuresOrderBody SHORT entry ko ULTA BUY banata tha. Ab honest alias
+  // map; unknown vocabulary → NO trail move (fail-honest null).
+  const _LONG_SIDE = { LONG: true, BUY: true, SHORT: false, SELL: false };
+  const long = _LONG_SIDE[String(side || '').toUpperCase()];
+  if (long == null) return null;
   const entry = Number(entryPrice), peak = Number(peakPrice), risk = Number(initialRisk), ltp = Number(price);
   if (!(entry > 0) || !(peak > 0) || !(risk > 0) || !(ltp > 0)) return null;
   const arm = Number.isFinite(Number(armR)) && armR > 0 ? armR : 1.0;
@@ -917,7 +937,13 @@ export function fitPlanToRiskCap(signal, maxRiskPct = 5) {
     return { signal, note: null };
   }
   if (riskPct <= maxRiskPct) return { signal, note: null };
-  const long = signal.side !== 'SHORT';
+  // v21.23.12 [v21.23.9 DOCTRINE SWEEP]: `signal.side !== 'SHORT'` unknown
+  // side ko LONG maan kar SL ko entry ke NEECHE fit karta tha — ek 'SELL'
+  // vocab side ka SL galat side par. Honest alias map; unknown → unfitted
+  // (fail-honest — caller reject kare, kabhi galat-side SL na bane).
+  const _LONG_SIDE = { LONG: true, BUY: true, SHORT: false, SELL: false };
+  const long = _LONG_SIDE[String(signal?.side || '').toUpperCase()];
+  if (long == null) return { signal, note: null };
   const capDist = ltp * (maxRiskPct / 100);
   const stopLoss = long ? ltp - capDist : ltp + capDist;
   const target1 = long ? ltp + capDist : ltp - capDist;

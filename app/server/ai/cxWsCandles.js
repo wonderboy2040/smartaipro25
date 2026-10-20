@@ -56,6 +56,9 @@
 import { spotWsPrice } from './cxSpotWs.js';
 import { futBookSnapshot } from './cxBookState.js';
 import { getTick as liveGetTick } from '../liveFeed.js';
+// v21.23.11 MIRROR-SHIELD L2: overlay forming-bar = TRUE newest bar,
+// chahe fetch-chain se kisi rare path me descending series aaye.
+import { ensureAscending } from './lib/candles.js';
 
 // ---- timeframe ladder (the 15m — D1 MTF-6 set + 1m/5m LTF legs) ----
 export const TF_MS = {
@@ -146,6 +149,11 @@ export function cxWsCandlesStatus() {
 export function overlayTickOnCandles(candles, tick, tf, counters = null) {
   const tfMs = TF_MS[tf];
   if (!Array.isArray(candles) || candles.length < 2 || !tfMs) return candles || null;
+  // v21.23.11 [MIRROR-SHIELD L2]: barTime must be the NEWEST bar's open
+  // slot. A descending (time-mirrored) series would read the OLDEST bar
+  // as "forming" → live print roll karta ek bogus bar oldest ke baad —
+  // poora tail corrupt. Entry pe canonicalize (zero-copy jab asc).
+  candles = ensureAscending(candles);
   const price = Number(tick?.price);
   const atMs = Number(tick?.atMs ?? tick?.time);
   if (!(price > 0) || !Number.isFinite(atMs)) return candles;

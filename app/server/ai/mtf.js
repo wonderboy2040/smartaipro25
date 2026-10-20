@@ -34,6 +34,9 @@ import { fetchCoinDcxCandles, fetchBinanceKlines, isNseOpen } from './data.js';
 import { fetchFuturesCandles, futuresPairFor, isMetalsBase, fetchMetalsFapiCandles, fetchMetalsYahooCandles } from './futures.js';
 import { usdInrFallback } from './lib/usdinr.js';
 import { computeIndicatorsFromCandles, atr as atrOf } from './lib/indicators.js';
+// v21.23.11 MIRROR-SHIELD: descending (time-mirrored) series → ascending
+// before ANY vote/resample/overlay consumes it.
+import { ensureAscending } from './lib/candles.js';
 // v21.23.5 CoinDCX Ultrafast WS candle overlay — the REST chain stays the
 // series anchor (official OHLCV + volume); the live forming bar tracks
 // the WS price books (~1s) instead of freezing for the REST TTL
@@ -194,6 +197,9 @@ async function _indiaCandles(symbol, tf, market = 'INDIA', { raw = false } = {})
 /** Bucket candles into `minutes`-wide bars (open/high/low/close/volume). */
 function _resample(candles, minutes) {
   if (!Array.isArray(candles) || candles.length < 2) return null;
+  // v21.23.11 [MIRROR-SHIELD L2]: resampler ko descending series
+  // milti thi to buckets bhi mirrored ban te the — entry pe seedha karo.
+  candles = ensureAscending(candles);
   const out = [];
   let bucket = null;
   const widthMs = minutes * 60_000;
@@ -269,6 +275,9 @@ async function _candlesFor(symbol, market, tf) {
 // Per-TF vote
 // ------------------------------------------------------------
 function _tfVote(candles, tf) {
+  // v21.23.11 [MIRROR-SHIELD L2]: per-TF vote entry — descending
+  // (time-mirrored) series kabhi vote nahi karegi (zero-copy jab asc).
+  candles = ensureAscending(candles);
   const li = computeIndicatorsFromCandles(candles);
   if (!li) return null;
   const last = candles[candles.length - 1];
@@ -336,7 +345,9 @@ function _tfVote(candles, tf) {
 // ------------------------------------------------------------
 // Structure stop (15m swings, ATR-buffered)
 // ------------------------------------------------------------
-function _structureStop(candles15m, side, ltp) {
+function _structureStop(candles15mIn, side, ltp) {
+  // v21.23.12 [L2.5]: 15m swing scan mirror-guard (probrain structureStop twin).
+  const candles15m = ensureAscending(candles15mIn);
   if (!Array.isArray(candles15m) || candles15m.length < 45) return null;
   const a = atrOf(candles15m, 14);
   if (a == null || !(a > 0)) return null;

@@ -42,6 +42,7 @@ import { computeTrailSl, maxSaneLeverage, fitPlanToRiskCap, evaluateExecutionGat
 import { pRound } from './lib/priceRound.js';
 import { withJournalLock, pushEntry, todayIST, dailyStats, loadProTraderConfig } from './coindcxOrders.js';
 import { computeIndicatorsFromCandles } from './lib/indicators.js';
+import { canonicalizeCandles } from './lib/candles.js'; // v21.23.12: USDC candle-quote leg mirror-proof
 import { fetchFinnhubQuote } from './finnhubQuote.js';
 
 const r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
@@ -607,15 +608,22 @@ async function _fetchOneUsdcCandle(base) {
     const j = await r.json().catch(() => null);
     const rows = Array.isArray(j) ? j : (Array.isArray(j?.data) ? j.data : null);
     if (!rows || rows.length === 0) return null;
-    // sort by time asc, take the LAST candle with a positive close
-    const sorted = rows
-      .map(x => ({ t: Number(x.time) < 1e12 ? Number(x.time) * 1000 : Number(x.time), c: num(x.close), o: num(x.open) }))
-      .filter(c => c.c > 0 && c.o > 0)
-      .sort((a, b) => a.t - b.t);
-    const last = sorted[sorted.length - 1];
-    if (!last) return null;
-    const prev = sorted.length > 1 ? sorted[sorted.length - 2] : null;
-    return { price: last.c, changePct: prev && prev.c > 0 ? ((last.c - prev.c) / prev.c) * 100 : 0, ts: last.t };
+    // v21.23.12 [MIRROR-SHIELD SWEEP — LAST UNCANONICALIZED READER]: ye leg
+    // wahi legacy candlesticks wire padhta tha jiske liye MIRROR-SHIELD bana
+    // tha — `Number(x.time)` NaN hone par filter (sirf c/o check karta tha)
+    // rows ko PASS karta tha, sort comparator NaN → NO-OP, aur documented
+    // NEWEST-FIRST wire par sorted[len-1] = ~30-min-PEHLE ka OLDEST bar →
+    // stale "LTP" + ULTA-signed changePct, aur _gcPruneStale serve-time
+    // dekhta hai candle ke apne ts ko nahi → poison har refresh pe dohrata.
+    // (EQUITY_SIM paper/notify-only hai — par SL/TP/P&L inhi prices pe
+    // evaluate hote hain.) Ab canonicalizeCandles: alias-tolerant parse +
+    // NaN-row drop + orientation + ascending — wire chahe kuch bhi de,
+    // last = TRUE newest bar.
+    const candles = canonicalizeCandles(rows, { label: `glob-usdc:${String(base).toUpperCase()}` });
+    if (!candles || candles.length === 0) return null;
+    const last = candles[candles.length - 1];
+    const prev = candles.length > 1 ? candles[candles.length - 2] : null;
+    return { price: last.close, changePct: prev && prev.close > 0 ? ((last.close - prev.close) / prev.close) * 100 : 0, ts: last.time };
   } catch { return null; }
 }
 
@@ -724,7 +732,9 @@ export async function fetchGlobalCandles(symbol, { maxAgeMs = 150_000 } = {}) {
               close: q.close[i], volume: q.volume?.[i] || 0,
             });
           }
-          if (rows.length >= 60) candles = rows;
+          // v21.23.12 [S2-PARITY — LOCAL SORT INVARIANT]: wire-order bharosa
+          // nahi — output hamesha locally-sorted ascending (mirror-proof).
+          if (rows.length >= 60) candles = rows.sort((a, b) => a.time - b.time);
         }
       }
     } catch { /* honest degrade to null */ }

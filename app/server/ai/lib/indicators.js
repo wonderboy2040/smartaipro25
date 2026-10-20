@@ -11,6 +11,9 @@
 //   • null-safety: every function returns null when inputs are
 //     insufficient — models treat null as "no vote", never as 0.
 // ============================================================
+// v21.23.11 MIRROR-SHIELD L3: the one import this pure module carries —
+// canonical orientation fixer (see lib/candles.js for the full story).
+import { ensureAscending } from './candles.js';
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 
@@ -1360,6 +1363,14 @@ export function computeWorldTopIndicators(candles, targetSide = null) {
 // ---------------- aggregate from candles (one call) ----------------
 export function computeIndicatorsFromCandles(candles) {
   if (!Array.isArray(candles) || candles.length < 30) return null;
+  // v21.23.11 [MIRROR-SHIELD L3]: compute-layer LAST-LINE — kisi bhi
+  // un-audited path (store read, resample output, bots, direct caller)
+  // se TIME-MIRRORED (descending) series aaye to indicator stack se
+  // PEHLE wapas seedha do. Zero-copy jab series already ascending (har
+  // legit path); O(n) reverse sirf desc detect hone par (the live
+  // disease). Yahi defense internal-consistency tests ka wo blind
+  // spot band karta hai jo "sab signals opposite" live rehta tha.
+  candles = ensureAscending(candles);
   const closes = candles.map(c => c.close);
   const bb = bollinger(closes);
   const st = stochastic(candles);

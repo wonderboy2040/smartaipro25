@@ -20,6 +20,7 @@
 // ever sees candles[0..i].
 // ============================================================
 import { computeIndicatorsFromCandles } from './lib/indicators.js';
+import { ensureAscending } from './lib/candles.js'; // v21.23.12 [L2.5]: simulateSymbol mirror-guard
 import { fetchCoinDcxCandles } from './data.js';
 import { runQuantModels } from './models.js';
 import { aggregateVotes, buildTradePlan, applyRegimeWeights, classifyRegimeFromCandles } from './ensemble.js';
@@ -99,7 +100,11 @@ async function fetchYahooChart(yhTicker, interval, range) {
  * the model weights per bar. The A/B runner below runs BOTH legs on
  * identical data so the flag can be evaluated before going live.
  */
-export function simulateSymbol({ symbol, market, candles, minGrade = 'ACTION', maxRiskPct = 5, capitalPerTradeINR = 1000, maxHoldBars = 48, strategy = 'weighted', minConfidence = 0 }) {
+export function simulateSymbol({ symbol, market, candles: candlesIn, minGrade = 'ACTION', maxRiskPct = 5, capitalPerTradeINR = 1000, maxHoldBars = 48, strategy = 'weighted', minConfidence = 0 }) {
+  // v21.23.12 [L2.5 SEAT GUARD]: walk-forward edge-stats deep card pe
+  // dikhte hain — mirrored input ULTA edge stats banata tha (deep card
+  // ka "walk-forward replay" jhootha lagta tha live trades ke against).
+  const candles = ensureAscending(candlesIn);
   if (!Array.isArray(candles) || candles.length < WARMUP + 20) return null;
   const long = side => String(side).toUpperCase() !== 'SHORT';
   const trades = [];

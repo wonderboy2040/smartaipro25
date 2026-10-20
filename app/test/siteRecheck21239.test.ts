@@ -149,8 +149,11 @@ describe('v21.23.9 S2 — fastSlTrailLoop LIVE exchange SL sync (dead `newStopLo
     expect(ROUTES_SRC).toContain('takeProfit: tr.t2,');
     expect(ROUTES_SRC).not.toContain('takeProfit: tr.tp1Hit ? tr.t2 : tr.t1,');
   });
-  it('paper-side sync (updatePaperTradeStopLoss) untouched — positional signature', () => {
-    expect(ROUTES_SRC).toContain('updatePaperTradeStopLoss(tr.paperId ?? tr.symbol, tr.trailedStopLoss)');
+  it('paper-side sync (updatePaperTradeStopLoss) — v21.23.12 marketHint signature (cross-desk collision cure)', () => {
+    // v21.23.12 HONEST PIN UPDATE: positional signature ab 3rd marketHint
+    // param carry karta hai — same-name INDIA/CRYPTO paper trades me symbol
+    // fallback galat desk ki SL ratchet kar sakta tha.
+    expect(ROUTES_SRC).toContain('updatePaperTradeStopLoss(tr.paperId ?? tr.symbol, tr.trailedStopLoss, tr.market || tr.execMarket || null)');
   });
 });
 

@@ -415,12 +415,16 @@ describe('v20.8.3 frontend stale-build visibility', () => {
     const m = VERSION_TS.match(/APP_VERSION = '([^']+)'/);
     expect(m).toBeTruthy();
     expect(m![1]).toBe(PKG.version);
-    expect(PKG.version).toBe('21.23.9'); // v21.23.9 bump (full-site deep recheck: CRITICAL futuresOrderBody SHORT-inversion fix — exec-port 'sell' vocabulary ulta BUY order banati thi; 3s fast-SL LIVE sync dead-param; dead ./metals.js imports; 4h overlay-bake; chart freshness; spot WS telemetry honesty; fut-book ts seconds; GLOB-quiet false-alert)
+    expect(PKG.version).toBe('21.23.12'); // v21.23.12 bump (FULL-SITE DEEP RECHECK — India MTF-live wrapper arity bug cure, gauntlet-side dataDegraded veto, deep-path v21.23.4 ladder parity, India LIVE-close fill-verify, deep-monitor re-anchor lifecycle reset, crypto/futures reject-dedup + agent backoff, USDC-leg canonicalize, cert pass-semantics honesty, L2.5 seat guards sweep, orientation alias-tolerant time-read, honest confluence sweep)
   });
 
-  it('Watchdog bat: v20.8.3 title + auto-build line', () => {
+  it('Watchdog bat: v21.23.12 stamps + auto-build line + NO stale version stamps', () => {
     const bat = readFileSync(path.join(APP_ROOT, 'Start-SmartAI-Watchdog.bat'), 'utf8');
-    expect(bat).toContain('v21.23.9');
+    expect(bat).toContain('v21.23.12');
+    // v21.23.12 [D3]: title/REM lines me STALE stamps chhupe the (banner hi
+    // bumped hota tha) — console window title purana version dikhata tha.
+    expect(bat).not.toContain('v21.23.11');
+    expect(bat).not.toContain('v21.23.10');
     expect(bat).toContain('AUTO npm install');
   });
 

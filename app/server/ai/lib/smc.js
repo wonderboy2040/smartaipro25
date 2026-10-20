@@ -24,6 +24,7 @@
 // the net, confidence scales with how many concepts stack + how
 // fresh the sweep is. Weights live in models.js (SMC entry).
 // ============================================================
+import { ensureAscending } from './candles.js'; // v21.23.12 [L2.5]: smcVote mirror-guard
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -131,7 +132,11 @@ export function detectFvg(candles, nearPctMax = 1.2) {
  * (bounded 88) — strong LONG/SHORT signals ke liye.
  */
 export function smcVote(ctxOrCandles) {
-  const candles = Array.isArray(ctxOrCandles) ? ctxOrCandles : ctxOrCandles?.candles;
+  const candles0 = Array.isArray(ctxOrCandles) ? ctxOrCandles : ctxOrCandles?.candles;
+  // v21.23.12 [L2.5 SEAT GUARD]: sweep/OB/FVG/structure sab candle-tail
+  // geometry padhte hain — mirrored input har detector ko ULTA side de
+  // deta tha (weight 1.1 ka vote). ensureAscending entry-guard.
+  const candles = ensureAscending(candles0);
   if (!Array.isArray(candles) || candles.length < 30) {
     return { dir: 0, conf: 0, reasons: ['SMC: not enough candles'] };
   }

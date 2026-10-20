@@ -45,6 +45,8 @@
 // + cache + MarketClock lagata hai.
 // ============================================================
 import { ema, emaSeries, rsi, atr, adx, macd, vwap, supertrend, detectPatterns, computeWorldTopIndicators } from './lib/indicators.js';
+// v21.23.11 MIRROR-SHIELD L3: plan path candles directly padhta hai — entry pe canonical.
+import { ensureAscending } from './lib/candles.js';
 import { rawTfCandles, rawTfCandlesUsdt } from './mtf.js';
 import { estimateRoundTripCost } from './tradingCosts.js';
 import { isMarketOpenFor, marketPhaseFor, freshEntriesAllowedFor, getISTParts } from '../intraday/time.js';
@@ -670,6 +672,18 @@ export function tfFit({ triggerAtrPct, holdMin, triggerMin, riskPct, t1Pct, t2Pc
  *  now         epoch ms (tests ke liye injectable)
  */
 export function buildPlanFromCandles(p = {}) {
+  // v21.23.11 [MIRROR-SHIELD L3]: readContext/readTrigger/computeWorldTop-
+  // Indicators candles ko DIRECTLY padhte hain (lastBar/prevBar geometry,
+  // swing highs/lows). Time-mirrored (descending) series yahan tak aayi to
+  // poora PLAN — side + entry/SL/T1/T2 — systematically ulta banega (live
+  // "sab signals opposite" disease). Entry pe canonicalize: desc detect →
+  // reversed copy; asc → zero-copy. Internal-consistency tests isko kabhi
+  // nahi pakadte kyunki mocks hamesha assumed order me bante hain.
+  const _ctxC = ensureAscending(p.ctxCandles);
+  const _trigC = ensureAscending(p.trigCandles);
+  if (_ctxC !== p.ctxCandles || _trigC !== p.trigCandles) {
+    p = { ...p, ctxCandles: _ctxC, trigCandles: _trigC };
+  }
   const mode = PLAN_MODES[String(p.mode || 'INTRADAY').toUpperCase()] || PLAN_MODES.INTRADAY;
   const market = String(p.market || 'INDIA').toUpperCase();
   const holdMin = clamp(num(p.holdMin) ?? mode.defaultHoldMin, mode.minHoldMin, mode.maxHoldMin);
@@ -721,9 +735,18 @@ export function buildPlanFromCandles(p = {}) {
   // ---- confluence + confidence + v21.22.0 Pure 8 Institutional Top Indicators ----
   const worldCtx = computeWorldTopIndicators(p.ctxCandles, side);
   const worldTrig = computeWorldTopIndicators(p.trigCandles, side);
-  const worldAligned8Count = Math.round(((worldCtx?.aligned8Count ?? 5) * 0.55) + ((worldTrig?.aligned8Count ?? 5) * 0.45));
+  // v21.23.12 [HONEST CONFLUENCE — fabrication sweep]: ?? 5 / ?? 60 defaults
+  // ek leg ke DATA NAA hone par FABRICATED 5/8 count mint karte the (ek
+  // 25-29-bar trigger tape readTrigger ≥25 pass karta hai par world read
+  // ≥30 maangta hai → ?? 5 guess). directionVerified pehle-se per-leg real
+  // checks (≥5 ≥5) se honest tha, par payload display + conf-bonus + target
+  // heuristic fabricated count consume karte the — mtfDualBoard fuse
+  // (v21.23.2) null-propagate karta hai, planner twin nahi. Ab missing leg
+  // 0 contribute karta hai (conservative understate — inflate kabhi nahi);
+  // dono missing → 0 (unverified).
+  const worldAligned8Count = Math.round(((worldCtx?.aligned8Count ?? 0) * 0.55) + ((worldTrig?.aligned8Count ?? 0) * 0.45));
   const worldAlignedCount = worldAligned8Count;
-  const worldConfluencePct = Math.round(((worldCtx?.confluencePct ?? 60) * 0.55) + ((worldTrig?.confluencePct ?? 60) * 0.45));
+  const worldConfluencePct = Math.round(((worldCtx?.confluencePct ?? 0) * 0.55) + ((worldTrig?.confluencePct ?? 0) * 0.45));
   const trapVeto = Boolean(worldTrig?.trapVeto || worldCtx?.trapVeto);
   const zoneWallVeto = Boolean(worldTrig?.zoneWallVeto || worldCtx?.zoneWallVeto);
   const _ctxEmaRibbonDir = worldCtx?.indicators?.find(x => x.id === 'emaRibbon')?.dir ?? dir; // v21.23.1 lint: unused → `_` prefix

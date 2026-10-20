@@ -29,6 +29,7 @@
 // nahi. Ye win-rate PROOF nahi, MEASUREMENT hai.
 // ============================================================
 import { loadJSON, saveJSON } from '../lib/store.js';
+import { ensureAscending } from './lib/candles.js'; // v21.23.12 [L2.5]: outcome-walk mirror-guard
 
 const LEDGER_FILE = 'mtf-row-ledger.json';
 export const MTF_LEDGER_MAX_ROWS = 3000;
@@ -115,7 +116,10 @@ export function resolveRowOutcome(rec, candles) {
   const entry = Number(rec.entry), sl = Number(rec.stopLoss), t1 = Number(rec.t1);
   const risk = Math.abs(entry - sl);
   if (!(entry > 0) || !(sl > 0) || !(risk > 0) || (side !== 'LONG' && side !== 'SHORT')) return null;
-  const bars = Array.isArray(candles) ? candles : [];
+  // v21.23.12 [L2.5]: outcome walk ascending bars expect karti hai (`t > endTs` pe
+  // break) — desc series pe newest-first walk turant toot jaata tha (honest-abstain
+  // direction me, par ab deterministic guaranteed-asc hai).
+  const bars = ensureAscending(Array.isArray(candles) ? candles : null) || [];
   if (!bars.length) return null;
   const holdMs = Math.max(5, Number(rec.holdMin) || 45) * 60_000;
   const endTs = rec.ts + holdMs;

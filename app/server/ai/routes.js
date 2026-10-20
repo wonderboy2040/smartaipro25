@@ -387,6 +387,23 @@ export function registerAITradingRoutes(app, deps) {
     }
   });
 
+  // ---------------- v21.23.11: LIVE DIRECTION CERTIFICATE ----------------
+  // Synthetic selftest computation-layer prove karta hai; YE endpoint REAL
+  // network se app ke APNE candle chains audit karta hai — CoinDCX wire
+  // drift / mirrored series / scale corruption LIVE pakadta hai. "Signals
+  // opposite" complaint ka pehla diagnostic step: (1) /direction-selftest
+  // (computation) → (2) /direction-live-certificate (data chains).
+  app.get('/api/ai/direction-live-certificate', async (_req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store');
+      const { runLiveDirectionCertificate } = await import('./directionLiveCert.js');
+      const r = await runLiveDirectionCertificate();
+      res.status(r.pass ? 200 : 503).json(r);
+    } catch (e) {
+      jsonError(res, 500, 'direction live certificate failed', e);
+    }
+  });
+
   // ---------------- v18.7: AI ENGINE SENTINEL (status + recheck) ----------------
   // The "AI language engines offline" fix: the user finally SEES every
   // engine's real state (no-key / cooldown auto-retry / ready), why it
@@ -1059,7 +1076,19 @@ export function registerAITradingRoutes(app, deps) {
         // v21.23.10 CRITICAL FIX: `getFreshSignal` → `getFreshIndiaSignal`
         // (executeIndiaSignal ka destructure naam) — pehle India arm hote hi
         // gate-4 TypeError deta tha → manual MTF board India LIVE bhi dead.
-        getFreshIndiaSignal: (sym, o) => getFreshSignalForExec(sym, 'INDIA', depsForSignals(), o),
+        // v21.23.12 FIX (recheck HIGH — v21.23.10 ka "CRITICAL FIX" sirf param
+        // ka naam theek karta tha, function nahi): getFreshSignalForExec
+        // (pairOrSymbol, deps, opts) me market param HAI HI NAHI — 'INDIA'
+        // string deps-slot me jaati thi, real deps opts-slot me, aur market
+        // hardcoded 'CRYPTO' rehta tha → India symbol CRYPTO deep branch me
+        // (RELIANCE pe fetchTVCryptoBatch) guaranteed fail → gate-4 hamesha
+        // "No fresh ensemble signal available" → manual MTF board India LIVE
+        // STRUCTURALLY dead. Correct pattern (routes.js /india/execute +
+        // indiaAgent.js jaisa): getDeepSignal(sym,'INDIA',deps).
+        getFreshIndiaSignal: async (sym) => {
+          const deep = await getDeepSignal(sym, 'INDIA', depsForSignals()).catch(() => null);
+          return deep?.ok ? deep.signal : null;
+        },
         source: 'mtf-board-live-ui', sendTelegram,
       });
       if (!outIndia?.ok) {
@@ -1168,7 +1197,12 @@ export function registerAITradingRoutes(app, deps) {
           // India arm hote hi gate-4 `getFreshIndiaSignal(sym)` TypeError
           // deta (undefined call) → MTF-auto India LIVE STRUCTURALLY dead.
           // Manual console path (1979) pehle se sahi naam use karta tha.
-          getFreshIndiaSignal: (sym, o) => getFreshSignalForExec(sym, 'INDIA', depsForSignals(), o),
+          // v21.23.12 FIX: upar wala hi arity bug — getDeepSignal(sym,'INDIA',…)
+          // hi sahi wiring hai (mtf-auto India LIVE isi se chalta hai ab).
+          getFreshIndiaSignal: async (sym) => {
+            const deep = await getDeepSignal(sym, 'INDIA', depsForSignals()).catch(() => null);
+            return deep?.ok ? deep.signal : null;
+          },
           source: 'mtf-auto-india', sendTelegram,
         });
       }
@@ -3180,7 +3214,7 @@ export function registerAITradingRoutes(app, deps) {
       const deepMon = getActiveAutoTradesDeepMonitor(combinedQuotes);
       for (const tr of (deepMon?.trades || [])) {
         if (tr.trailedStopLoss > 0 && (tr.executionMode === 'PAPER' || tr.paperId != null)) {
-          try { updatePaperTradeStopLoss(tr.paperId ?? tr.symbol, tr.trailedStopLoss); } catch { /* non-fatal */ }
+          try { updatePaperTradeStopLoss(tr.paperId ?? tr.symbol, tr.trailedStopLoss, tr.market || tr.execMarket || null); } catch { /* non-fatal */ }
         }
         if (!tr.slTrailed || !(tr.trailedStopLoss > 0)) continue;
         if (tr.executionMode === 'LIVE' && loadCredsForOrder()) {

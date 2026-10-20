@@ -12,6 +12,7 @@
 //                           always a FRESH single-symbol run
 // ============================================================
 import { computeIndicatorsFromCandles } from './lib/indicators.js';
+import { ensureAscending } from './lib/candles.js'; // v21.23.12: seat-level L2.5 guards (tape/sessionVwap/resample)
 import { buildMTFSnapshot, mtfWire6Payload, __clearMtfCaches, isStaleIntradaySeries } from './mtf.js';
 import {
   INDIA_UNIVERSE, CRYPTO_UNIVERSE, fetchTVIndiaBatch, fetchTVIndiaBatchChunked, fetchTVCryptoBatch,
@@ -451,7 +452,9 @@ export async function fetchYahooIntradayCandles(symbol, market) {
             close: q.close[i], volume: q.volume?.[i] || 0,
           });
         }
-        if (rows.length >= 60) out = rows;
+        // v21.23.12 [S2-PARITY — LOCAL SORT INVARIANT]: Yahoo wire-order par
+        // bharosa nahi — output hamesha locally-sorted ascending (mirror-proof).
+        if (rows.length >= 60) out = rows.sort((a, b) => a.time - b.time);
       }
     }
   } catch { out = null; }
@@ -742,7 +745,10 @@ export async function buildIndiaIndexCtx(idx, regime, optionsCtx = null) {
 // SESSION VWAP from today's intraday bars (UTC-date grouping is safe for
 // NSE hours — no midnight crossing). Zero-volume series (Yahoo ^NSEI) →
 // null (honest abstain — NEVER the month-anchored series VWAP).
-function sessionVwapFromIntraday(candles) {
+function sessionVwapFromIntraday(candlesIn) {
+  // v21.23.12 [L2.5]: lastDay candles[len-1] se padha jaata hai — mirrored
+  // series pe galat din-group banata tha. ensureAscending entry-guard.
+  const candles = ensureAscending(candlesIn);
   if (!Array.isArray(candles) || !candles.length) return null;
   const lastDay = new Date(candles[candles.length - 1].time).toISOString().slice(0, 10);
   let pv = 0, vv = 0;
@@ -764,7 +770,11 @@ function sessionVwapFromIntraday(candles) {
 // Yahoo candles the pass-2 enrichment already fetches + the TV row's
 // TRUE session VWAP (the month-anchored candle VWAP is not a session
 // anchor — the scanner row is).
-function tapeFromCandles(candles, li, tvRow) {
+function tapeFromCandles(candlesIn, li, tvRow) {
+  // v21.23.12 [L2.5]: last3Pct RAW tail reads (last/bar3) karta hai — li
+  // compute-layer se canonical aa chuka tha par raw reads mirrored input pe
+  // ULTA momentum vote dete the (correct EMA, reversed 3-bar momentum).
+  const candles = ensureAscending(candlesIn);
   if (!Array.isArray(candles) || candles.length < 35 || !li) return null;
   const last = candles[candles.length - 1];
   const bar3 = candles[candles.length - 4] || candles[0];
@@ -856,7 +866,13 @@ async function fetchCrypto15mTape(base, ltp, tvRow, mkt) {
 /** Pure time-bucketed OHLCV resampler. Buckets align to epoch
  * boundaries (15m → :00/:15/:30/:45, 1h → UTC hours) exactly like
  * Yahoo's native bars. Exported for tests. */
-export function resampleCandles(candles, minutes) {
+export function resampleCandles(candlesIn, minutes) {
+  // v21.23.12 [L2.5]: mtf.js _resample ka twin — wahan L2 guard hai,
+  // yahan nahi tha. Mirrored input yahan MIRRORED BUCKETS banata tha jo
+  // downstream ensureAscending bhi repair nahi kar sakta (bucket.close
+  // = oldest-in-bucket corruption). India committee ka 15m→1h isi se
+  // banta hai (v21.23.4 core chain) — guard mandatory.
+  const candles = ensureAscending(candlesIn);
   if (!Array.isArray(candles) || candles.length < 2 || !(minutes > 0)) return null;
   const bucketMs = minutes * 60_000;
   const out = [];
@@ -927,7 +943,11 @@ export async function fetchYahoo5mCandles(symbol) {
 /** The MTF tape payload: { m5, m15, h1, agreement } — each a plain
  * tape snapshot (same shape ctx.tape uses), agreement vs the 15m
  * anchor. Pure; null on insufficient data. */
-export function tapeMTFFromBase(candles5m, candles15mNative, tvRow) {
+export function tapeMTFFromBase(candles5mIn, candles15mNative, tvRow) {
+  // v21.23.12 [L2.5]: 5m base + 15m native dono ko entry pe seedha kar
+  // lete hain — mkTape/resample legs isi base se derive hote hain.
+  const candles5m = ensureAscending(candles5mIn);
+  const candles15mNat = ensureAscending(candles15mNative);
   const mkTape = (candles) => {
     if (!Array.isArray(candles) || candles.length < 35) return null;
     const li = computeIndicatorsFromCandles(candles);
@@ -935,7 +955,7 @@ export function tapeMTFFromBase(candles5m, candles15mNative, tvRow) {
   };
   if (!Array.isArray(candles5m) || candles5m.length < 60) return null;
   const m5 = mkTape(candles5m);
-  const m15 = candles15mNative && candles15mNative.length >= 35 ? mkTape(candles15mNative) : mkTape(resampleCandles(candles5m, 15));
+  const m15 = candles15mNat && candles15mNat.length >= 35 ? mkTape(candles15mNat) : mkTape(resampleCandles(candles5m, 15));
   const h1 = mkTape(resampleCandles(candles5m, 60));
   if (!m5 || !m15) return null; // anchor + entry TF required; h1 optional
   const dirOf = (t) => {
@@ -3094,6 +3114,22 @@ async function _computeDeepSignal(sym, mkt, deps, opts, cacheKey) {
     return payload;
   }
 
+  // v21.23.12 [v21.23.4 LADDER PARITY — DEEP PATH]: board path (1970-1982)
+  // __tfDegraded (15m MISSING) ko suppress karta hai — deep path (jo
+  // execution gauntlet ka signal source hai: getFresh*ForExec → getDeepSignal)
+  // me ye handling KABHI nahi thi. Full-missing 15m = daily-view committee
+  // = the documented "90% opposite" disease — ab deep bhi honest reject
+  // karta hai (order-time par "No fresh ensemble signal" ka asli kaaran
+  // surface hota hai, fabricated direction kabhi nahi).
+  if (ctx.__tfDegraded) {
+    const payload = {
+      ok: false,
+      reason: `INTRADAY-TF-UNAVAILABLE — ${sym}: ${ctx.__tfDegraded}`,
+    };
+    cacheSet(cacheKey, payload);
+    return payload;
+  }
+
   // v10.6 WICK GUARD (deep path): a bad print must not drive a deep
   // dive's plan either — suppressed tick → honest unavailable answer.
   if (mkt === 'CRYPTO' || mkt === 'FUTURES') {
@@ -3309,6 +3345,20 @@ async function _computeDeepSignal(sym, mkt, deps, opts, cacheKey) {
     ...(_deepMtfAgreement != null ? { mtfAgreement: _deepMtfAgreement } : {}),
     regime,
   });
+  // v21.23.12 [v21.23.4 LADDER PARITY — DEEP PATH]: THIN case (15m present,
+  // 1h resample <30 bars) board pe dataDegraded='INTRADAY-TF-THIN' stamp
+  // leta hai (executable:false + agent skip + UI chip) — deep path pe stamp
+  // kabhi nahi lagta tha, isliye ek THIN hybrid STRONG gauntlet tak UNMARKED
+  // pahunchta tha. Ab deep bhi wahi stamp deta hai; buildSignal (ensemble)
+  // executable:false karta hai aur v21.23.12 ka gauntlet-side veto order
+  // tak block karta hai. Signal reference-display ke liye emit hota hai.
+  if (ctx.__tfDataThin && consensus) {
+    consensus = {
+      ...consensus,
+      dataDegraded: 'INTRADAY-TF-THIN',
+      degradedReason: '15m series present par 1h resample thin (<30 bars) — main ind daily-view hybrid. Auto-trade BLOCKED, reference only (v21.23.4 deep-path parity).',
+    };
+  }
   // ---------------- v6.12: quality verdict + EDGE stats ----------------
   let quality = null, edge = null, structureStopOpt = null;
   if (consensus.dir !== 0) {

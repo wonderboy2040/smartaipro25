@@ -25,6 +25,7 @@
 // Everything is PURE (no fetch, no clock-reading except the
 // explicitly-passed `now`) so tests can pin every rule.
 // ============================================================
+import { ensureAscending } from './lib/candles.js'; // v21.23.12 [L2.5]: structureStop mirror-guard
 
 const _clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const r1 = (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
@@ -309,7 +310,10 @@ export function extensionGuard({ market, side, changePct, rsi, adx }) {
 // formed. A pro puts the stop BEHIND the structure: the last
 // swing low (LONG) / high (SHORT), padded by noise, and never
 // wider than the risk cap allows.
-export function structureStop({ candles, side, ltp, atr, maxAtrMult = 2.2, noisePad = 0.12 }) {
+export function structureStop({ candles: candlesIn, side, ltp, atr, maxAtrMult = 2.2, noisePad = 0.12 }) {
+  // v21.23.12 [L2.5 SEAT GUARD]: trailing-window swing scan — mirrored
+  // input LONG swing-high / SHORT swing-low ulti padhta tha. ensureAscending.
+  const candles = ensureAscending(candlesIn);
   const want = String(side || '').toUpperCase() === 'SHORT' ? -1 : 1;
   const long = want > 0;
   const a = Number(atr);

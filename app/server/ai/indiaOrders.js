@@ -32,6 +32,28 @@ import { recordExecution, settlePositionOutcome } from './ledger.js';
 
 const r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
 
+/** v21.23.12 [CLOSE FILL-VERIFY — LIVE closes par entry-path parity]:
+ *  Dhan ack TRANSIT ke saath aata hai aur async-REJECT ho sakta hai
+ *  (v18.9 entry-path comment + 3× poll ka asli kaaran). Pehle HAR live
+ *  close orderId ko FILLED maan liya jaata tha → journal full win book
+ *  + protective SL-M CANCEL + row CLOSED — broker reject hone par REAL
+ *  shares SL ke BINA naked reh jaate the (agli square-off tak). Ab
+ *  entry-path jaisa 3× poll (300/600/600ms): TRADED/FILLED/COMPLETE →
+ *  filled=true; REJECT/TRANSIT-stuck → false (caller row OPEN rakhta
+ *  hai + honest retry, SL-M kabhi nahi kholta). */
+async function _dhanVerifyFill(orderId, _label = 'close') {
+  if (!orderId) return false;
+  for (let i = 0; i < 3; i++) {
+    await new Promise(res => setTimeout(res, i === 0 ? 300 : 600));
+    const st = await dhanOrderStatus(orderId).catch(() => null);
+    const os = String(st?.orderStatus || '').toUpperCase();
+    if (!os) continue;
+    if (os.includes('TRADED') || os.includes('FILLED') || os.includes('COMPLETE')) return true;
+    if (os.includes('REJECT')) return false;
+  }
+  return false;
+}
+
 // ---------------- IST clock helpers ----------------
 export function istHM(now = new Date()) {
   try {
@@ -67,12 +89,18 @@ export async function executeIndiaSignal(opts) {
     // engine ke bina-backoff retries 500-entry journal window ko ~70 min
     // me reject-spam se bhar dete the (genuine entries displaced). Repeat
     // count + fresh ts update-in-place, nayi row nahi.
-    const lastE = Array.isArray(j.entries) ? j.entries[j.entries.length - 1] : null;
-    if (lastE && lastE.status === 'REJECTED' && String(lastE.symbol) === String(sym)
-        && String(lastE.reason) === String(reason)
-        && Date.now() - Number(lastE.ts || 0) < 5 * 60_000) {
-      lastE.__repeatCount = (Number(lastE.__repeatCount) || 1) + 1;
-      lastE.ts = Date.now();
+    // v21.23.12 [DEDUP SCAN-20]: pehle sirf LAST journal entry check hoti
+    // thi — ek bhi interleaved entry (doosre symbol ka reject / WATCH_ERROR)
+    // chain tod deti thi aur duplicate REJECTED phir se likha jaata tha.
+    // Ab last 20 entries scan (time-ordered — window se purani pe break).
+    const _entries = Array.isArray(j.entries) ? j.entries : [];
+    for (let k = _entries.length - 1, n = 0; k >= 0 && n < 20; k--, n++) {
+      const e = _entries[k];
+      if (!e || e.status !== 'REJECTED') continue;
+      if (String(e.symbol) !== String(sym) || String(e.reason) !== String(reason)) continue;
+      if (Date.now() - Number(e.ts || 0) >= 5 * 60_000) break;
+      e.__repeatCount = (Number(e.__repeatCount) || 1) + 1;
+      e.ts = Date.now();
       return saveJournal(j);
     }
     pushEntry(j, { ...entry, status: 'REJECTED', reason, ...extra });
@@ -560,7 +588,15 @@ export async function watchIndiaPositions({ sendTelegram } = {}) {
       if (p.mode === 'live' && dhanConnected()) {
         try {
           const exit = await dhanPlaceOrder({ symbol: p.symbol, side: long ? 'SELL' : 'BUY', quantity: p.qty, kind: 'ENTRY' });
-          closed = !!exit.orderId;
+          // v21.23.12 [CLOSE FILL-VERIFY]: orderId ≠ filled (Dhan TRANSIT ack +
+          // async-reject). Unverified close = row OPEN + next-tick retry; SL-M
+          // cancel sirf VERIFIED fill ke baad (naked-shares disease).
+          closed = await _dhanVerifyFill(exit?.orderId, `watcher-close:${p.symbol}`);
+          if (!closed) {
+            pushEntry(j, { kind: 'WATCH_ERROR', day: todayIST(), pair: p.pair, symbol: p.symbol, market: 'INDIA', reason: `LIVE close UNVERIFIED (${close.kind}/${close.reason}) — broker TRANSIT/REJECT; position OPEN + SL-M armed, next tick retry` });
+            dirty = true;
+            continue;
+          }
         } catch (e) {
           pushEntry(j, { kind: 'WATCH_ERROR', day: todayIST(), pair: p.pair, symbol: p.symbol, market: 'INDIA', reason: String(e?.message || e).slice(0, 200) });
           dirty = true;
@@ -635,6 +671,12 @@ export async function closeIndiaPosition(positionId, opts = {}) {
         try {
           const exit = await dhanPlaceOrder({ symbol: p.symbol, side: long ? 'SELL' : 'BUY', quantity: closeQty, kind: 'ENTRY' });
           if (!exit.orderId) return { ok: false, error: 'Dhan partial close failed: no orderId returned' };
+          // v21.23.12 [CLOSE FILL-VERIFY]: partial leg bhi verified — unverified
+          // par qty/pnl book + SL cancel+replace KABHI nahi.
+          const partFilled = await _dhanVerifyFill(exit.orderId, `partial-close:${p.symbol}`);
+          if (!partFilled) {
+            return { ok: false, error: `Dhan partial close UNVERIFIED (${exit.orderId}) — position as-is rakha gaya, SL intact, dobara try karo` };
+          }
           // the protective SL must follow the REMAINING qty (cancel + replace)
           if (p.slOrderId) { await dhanCancelOrder(p.slOrderId).catch(() => { /* best-effort */ }); p.slOrderId = null; }
           if (p.sl > 0) {
@@ -663,6 +705,12 @@ export async function closeIndiaPosition(positionId, opts = {}) {
       try {
         const exit = await dhanPlaceOrder({ symbol: p.symbol, side: long ? 'SELL' : 'BUY', quantity: p.qty, kind: 'ENTRY' });
         if (!exit.orderId) return { ok: false, error: 'Dhan close failed: no orderId returned' };
+        // v21.23.12 [CLOSE FILL-VERIFY]: full close bhi entry-path jaisa
+        // verified — unverified par row CLOSED + SL-M cancel KABHI nahi.
+        const fullFilled = await _dhanVerifyFill(exit.orderId, `manual-close:${p.symbol}`);
+        if (!fullFilled) {
+          return { ok: false, error: `Dhan close UNVERIFIED (${exit.orderId} — broker TRANSIT/REJECT) — position OPEN rakha gaya, SL-M armed; dobara try karo (naked-close kabhi nahi)` };
+        }
       } catch (e) {
         return { ok: false, error: `Dhan close failed: ${e?.message || e}` };
       }

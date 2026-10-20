@@ -19,6 +19,7 @@
 //      endpoint, honest error when unreachable).
 // ============================================================
 import { computeIndicatorsFromCandles, emaSeries, obvSlope } from './lib/indicators.js';
+import { ensureAscending } from './lib/candles.js'; // v21.23.12 [L2.5]: scoreSwing/detectWhale mirror-guards
 import { INDIA_UNIVERSE as _INDIA_UNIVERSE, CRYPTO_UNIVERSE as _CRYPTO_UNIVERSE, fetchCoinDcxCandles } from './data.js';
 
 const r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
@@ -75,7 +76,10 @@ async function candlesFor(symbol, market) {
  *   volume 0.15 — 5-bar avg rel-volume direction
  * Score ≥ 62 → grade A (high-conviction swing), ≥ 48 → B, else pass.
  */
-export function scoreSwing(symbol, market, candles) {
+export function scoreSwing(symbol, market, candlesIn) {
+  // v21.23.12 [L2.5 SEAT GUARD]: slice(-20)/slice(-40,-20) RAW tail reads —
+  // mirrored input ULTA structure vote banata tha. ensureAscending guard.
+  const candles = ensureAscending(candlesIn);
   if (!Array.isArray(candles) || candles.length < 60) return null;
   const ind = computeIndicatorsFromCandles(candles);
   if (!ind || !(ind.ltp > 0)) return null;
@@ -158,7 +162,10 @@ export function scoreSwing(symbol, market, candles) {
  * Volume-spike scanner: last bar volume vs 20-bar average.
  * spike ≥ 3x + directional close ≥ 1% = whale footprint.
  */
-export function detectWhale(symbol, market, candles) {
+export function detectWhale(symbol, market, candlesIn) {
+  // v21.23.12 [L2.5 SEAT GUARD]: last-bar volume spike read — mirrored input
+  // pe distribution ko accumulation bol deta tha. ensureAscending guard.
+  const candles = ensureAscending(candlesIn);
   if (!Array.isArray(candles) || candles.length < 30) return null;
   const vols = candles.map(c => c.volume || 0);
   const lastV = vols[vols.length - 1];

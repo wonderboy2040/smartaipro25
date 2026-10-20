@@ -18,6 +18,8 @@
 // source degrades that market's signals — it never crashes the API.
 // ============================================================
 import { computeIndicatorsFromCandles as _computeIndicatorsFromCandles } from './lib/indicators.js';
+// v21.23.11 MIRROR-SHIELD: candle wire-format drift → canonical ascending series.
+import { canonicalizeCandles } from './lib/candles.js';
 import { fetchCoinDcxTickers } from '../cryptoStream.js';
 import { TV_SCAN_HEADERS } from '../lib/tvHeaders.js';
 // v20.7.8 [L5]: the SHARED disk-backed USDINR store — the leftover flat
@@ -261,15 +263,38 @@ export async function fetchCoinDcxCandles(base, tf = '1h', opts = {}) {
       if (!r.ok) continue;
       const raw = await r.json();
       if (!Array.isArray(raw) || raw.length === 0) continue;
-      // CoinDCX returns newest-first: [{ o, h, l, c, v, t }] with t in seconds (or ms on some pairs).
-      const candles = raw.map(x => ({
-        time: Number(x.t) < 1e12 ? Number(x.t) * 1000 : Number(x.t),
-        open: Number(x.o), high: Number(x.h), low: Number(x.l),
-        close: Number(x.c), volume: Number(x.v) || 0,
-      })).filter(c => Number.isFinite(c.close) && c.close > 0)
-        .sort((a, b) => a.time - b.time); // oldest-first for the TA lib
-      if (candles.length >= 30) { _candleCacheSet(cacheKey, candles); return candles.slice(); }
+      // v21.23.11 [MIRROR-SHIELD]: CoinDCX candles wire-format drift-proof
+      // parse. LEGACY assumption (newest-first [{o,h,l,c,v,t}] + self-sort)
+      // me timestamp-key drift (t→time/open_time…) NaN banati thi → sort
+      // no-op → NEWEST-FIRST order hi rehti thi → POORA SERIES TIME-
+      // MIRRORED → har indicator ulta → "sab signals systematically
+      // opposite" (prices WS-overlay se live — "site working fine").
+      // Ab alias-tolerant parse + orientation-detect + canonical sort.
+      const candles = canonicalizeCandles(raw, { label: `cdc-spot:${base}:${tf}` });
+      if (candles && candles.length >= 30) { _candleCacheSet(cacheKey, candles); return candles.slice(); }
     } catch { /* next source */ }
+  }
+  // v21.23.11 [OFFICIAL-ENDPOINT LEG]: CoinDCX apne public market_data
+  // endpoints ko naye BFF (docs: api.coindcx.com/market_data/candles,
+  // `interval` param, B-pairs, response NEWEST-FIRST {open,high,low,
+  // volume,close,time}) pe migrate kar raha hai — datacenter IPs pe
+  // legacy endpoint Cloudflare-challenge ho sakta hai aur shape drift
+  // ho sakti hai. Ye leg INR-domain preserve karti hai (B-BTC_INR pehle,
+  // phir bare BTCINR), sirf {1m,15m,1h,1d} intervals pe (official set).
+  if (['1m', '15m', '1h', '1d'].includes(cfg.duration)) {
+    for (const opair of [`B-${base}_INR`, pair]) {
+      try {
+        const r = await fetch(
+          `https://api.coindcx.com/market_data/candles?pair=${encodeURIComponent(opair)}&interval=${cfg.duration}&limit=${limit}`,
+          { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) },
+        );
+        if (!r.ok) continue;
+        const raw = await r.json();
+        if (!Array.isArray(raw) || raw.length === 0) continue;
+        const candles = canonicalizeCandles(raw, { label: `cdc-official:${base}:${tf}` });
+        if (candles && candles.length >= 30) { _candleCacheSet(cacheKey, candles); return candles.slice(); }
+      } catch { /* next pair/leg */ }
+    }
   }
   // v21.19.0 FIX: CoinDCX public /market_data/candles only accepts duration in
   // {1m, 15m, 1h, 1d} (returns HTTP 422 on 5m / 4h). Resample 1m→5m (5m bucket)

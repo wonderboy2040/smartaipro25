@@ -81,10 +81,12 @@ describe('dhan.js dhanOrderBody side-vocabulary matrix (v21.23.2 inversion fix)'
     expect(() => base({ side: 'LONG', kind: 'SL', triggerPrice: null })).toThrow(/positive triggerPrice/);
   });
 
-  it('unknown side value BUY default NAHI karta (fail-honest — call-site fix maangti hai)', () => {
-    // Purana code kisi bhi unknown string ('SHORT' samet) ko BUY bana deta tha.
-    // Ab unknown side entry-side SELL hai (conservative) — silent LONG nahi.
-    const body = base({ side: 'SIDEWAYS', kind: 'ENTRY' });
-    expect(body.transactionType).toBe('SELL');
+  it('unknown side value = LOUD THROW (v21.23.12 doctrine — silent order KABHI nahi)', () => {
+    // Purana code kisi bhi unknown string ko silent BUY/SELL bana deta tha
+    // (v21.23.2 ne "conservative SELL" compromise pin kiya tha). v21.23.9 ka
+    // futuresOrderBody doctrine yahan port hua: unknown side = fail-honest
+    // throw — call-site fix maangta hai, silent order KABHI nahi.
+    expect(() => base({ side: 'SIDEWAYS', kind: 'ENTRY' })).toThrow(/unknown side/i);
+    expect(() => base({ side: 'HOLD', kind: 'ENTRY' })).toThrow(/unknown side/i);
   });
 });

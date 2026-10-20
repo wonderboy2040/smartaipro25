@@ -31,6 +31,7 @@
 // PURE module: no stores, no clocks, no network — same contract as
 // the v12.4 trust guards (never throws, never touches side/ltp).
 // ============================================================
+import { ensureAscending } from './lib/candles.js'; // v21.23.12 [L2.5]: one-way-run candle-tail guard
 
 // thresholds — ATR-normalized so they mean the same thing on a ₹2
 // smallcap and a $80k BTC. 2.5×ATR beyond the 20-mean is a stretched
@@ -86,7 +87,11 @@ export const QUALITY_HARD_SCORE_MUL = 0.85;     // chase HARD/SOFT cap multiplie
  */
 export function entryTimingRead(p) {
   try {
-    const { side, ltp, ema20, vwap, atr, rsi, candles, market } = p || {};
+    const { side, ltp, ema20, vwap, atr, rsi, candles: candlesIn, market } = p || {};
+    // v21.23.12 [L2.5 SEAT GUARD]: one-way run candle-tail se padhta hai —
+    // mirrored input run-REVERSE banata tha (chase-guard polarity flip:
+    // SHORT ko LONG-run dikhta tha). ensureAscending entry-guard.
+    const candles = ensureAscending(candlesIn);
     const s = String(side || '').toUpperCase();
     if (s !== 'LONG' && s !== 'SHORT') return null;
 

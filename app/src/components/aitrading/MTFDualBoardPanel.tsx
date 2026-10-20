@@ -552,7 +552,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
               {activeTradedRows.map((t, i) => {
-                const isLong = t.side !== 'SHORT';
+                const isLong = t.side === 'LONG'; // v21.23.12: `!== 'SHORT'` unknown/undefined side ko green LONG styling de deta tha — honest strict check
                 const ccySym = t.ccy === 'INR' ? '₹' : '$';
                 const isPaperRow = String(t.executionMode || '').toUpperCase() === 'PAPER';
                 return (

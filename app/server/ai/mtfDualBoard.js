@@ -43,6 +43,8 @@
 import { mtfWire6Payload, rawTfCandles, rawTfCandlesUsdt } from './mtf.js';
 import { superTier, SUPER_TIERS } from './superIntel.js';
 import { buildPlanFromCandles, PLAN_MODES } from './tradePlanner.js';
+// v21.23.11 MIRROR-SHIELD L2: live-tick stamp forming bar = TRUE newest.
+import { ensureAscending } from './lib/candles.js';
 import { ollamaStatus, evaluateMtfRowWithOllamaTrio, getOllamaTrioModels } from './llmSentinel.js';
 import { feeBreakevenFloor, defaultRoundTripFeePct } from '../exec/sizing.js';
 import { fetchFuturesPrices } from './futures.js';
@@ -429,6 +431,10 @@ const ROW_CACHE_MAX = 200;
 /** v21.20.0 ULTRA-FAST LIVE TICK STAMP: overlays sub-second live LTP onto the latest candle. */
 function overlayLiveTick(candles, liveLtp) {
   if (!Array.isArray(candles) || candles.length === 0 || !(Number(liveLtp) > 0)) return candles;
+  // v21.23.11 [MIRROR-SHIELD L2]: descending (time-mirrored) series me
+  // last index OLDEST bar hota tha — live print usi ko patch karta tha.
+  // Entry pe canonicalize (zero-copy jab ascending).
+  candles = ensureAscending(candles);
   const last = candles[candles.length - 1];
   if (!last || !(last.close > 0)) return candles;
   const ratio = Number(liveLtp) / last.close;

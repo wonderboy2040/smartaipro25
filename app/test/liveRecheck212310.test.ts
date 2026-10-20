@@ -293,7 +293,18 @@ describe('v21.23.10 S3 — exchange close verdict check (fabricated CLOSE cure)'
 // ---------------------------------------------------------------
 describe('v21.23.10 S4 — executeIndiaSignal wiring: getFreshIndiaSignal + pre-flight + honest source', () => {
   it('dono MTF routes call-sites ab `getFreshIndiaSignal:` pass karte hain (executeIndiaSignal ka destructure naam)', () => {
-    expect((ROUTES_SRC.match(/getFreshIndiaSignal: \(sym, o\) => getFreshSignalForExec\(sym, 'INDIA'/g) || []).length).toBe(2);
+    // v21.23.12 HONEST PIN UPDATE: v21.23.10 ka "fix" sirf PARAM KA NAAM theek
+    // karta tha — function getFreshSignalForExec(pairOrSymbol, deps, opts) me
+    // market param HAI HI NAHI tha: 'INDIA' string deps-slot me, real deps
+    // opts-slot me, market hardcoded 'CRYPTO' → India MTF live STRUCTURALLY
+    // dead hi rehta tha (yahi pin us buggy wiring ko lock kar raha tha).
+    // Ab correct pattern: getDeepSignal(sym,'INDIA',deps) — routes.js:2020 /
+    // indiaAgent.js:853 jaisa. Arity-disease string repo me kabhi nahi.
+    expect(ROUTES_SRC).not.toContain("getFreshSignalForExec(sym, 'INDIA'");
+    // TEENO wrapper blocks ab SAME correct async getDeepSignal(sym,'INDIA',…)
+    // shape me: 2 naye (mtf-board-live-ui + mtf-auto-india) + 1 pehla-se-sahi
+    // manual /india/execute path — ab sab identical wiring.
+    expect((ROUTES_SRC.match(/getFreshIndiaSignal: async \(sym\) =>/g) || []).length).toBe(3);
   });
   it('purana galat naam `getFreshSignal:` India exec calls se GONE', () => {
     expect(ROUTES_SRC).not.toContain("getFreshSignal: (sym, o) => getFreshSignalForExec(sym, 'INDIA'");

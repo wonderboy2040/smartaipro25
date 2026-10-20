@@ -1598,6 +1598,15 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
           }
         }
       }
+      // v21.23.12 [FAILED-ENTRY BACKOFF]: pichhla entry attempt is symbol
+      // ka reject hua tha → 10 min tak candidate skip (bina iske har 30s
+      // tick wahi gauntlet+deep-run burn karta tha).
+      const _fbPair = pairOfSignal(s);
+      const _failAt = _fbPair ? _failedEntryBackoff.get(_fbPair) : null;
+      if (_failAt && Date.now() - _failAt < FAILED_ENTRY_BACKOFF_MS) {
+        maybeLogSkip('entry-backoff', `${_fbPair} — entry attempt ${Math.max(1, Math.round((Date.now() - _failAt) / 60000))}m pe REJECT hua tha — ${Math.ceil((FAILED_ENTRY_BACKOFF_MS - (Date.now() - _failAt)) / 60_000)}m backoff baaki`);
+        continue;
+      }
       // v21.23.4 WRONG-SIGNAL-REMOVAL: data-degraded signals (FRESH-TAPE-
       // ABSENT — sirf lagging 1h seats, replay-proven 29% WR degenerate mode)
       // auto-trade ke liye eligible hi nahi. Ye hi "opposite jaa raha hai"
@@ -2136,6 +2145,9 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
       );
     }
   } else {
+    // v21.23.12 [FAILED-ENTRY BACKOFF]: reject stamp — is symbol ka agla
+    // attempt 10 min baad (candidate-skip upar qualification loop me hai).
+    _stampFailedEntryBackoff(pairOfSignal(best) || best?.symbol);
     log('skip', `entry rejected — ${best.symbol} ${best.side}: ${String(out?.error || '').slice(0, 120)}`);
   }
   persistState();
@@ -2143,6 +2155,23 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
 
 // small helpers ------------------------------------------------
 let _lastSkip = { key: '', at: 0 };
+
+// v21.23.12 [FAILED-ENTRY BACKOFF]: agent ke 30s loop me reject hone wale
+// candidate ko turant dobara try nahi karte (har retry = poora deep-run +
+// gauntlet burn + REJECTED journal churn). 10-min per-symbol backoff,
+// in-memory (persistence ki zaroorat nahi — persistent conditions ka
+// journal-side cure reject-dedup hai, yahan sirf wasted-compute cure hai).
+const _failedEntryBackoff = new Map();
+const FAILED_ENTRY_BACKOFF_MS = 10 * 60_000;
+function _stampFailedEntryBackoff(pair) {
+  const p = String(pair || '').toUpperCase();
+  if (!p) return;
+  if (_failedEntryBackoff.size >= 64) {
+    const cutoff = Date.now() - FAILED_ENTRY_BACKOFF_MS;
+    for (const [k, v] of _failedEntryBackoff) if (v < cutoff) _failedEntryBackoff.delete(k);
+  }
+  _failedEntryBackoff.set(p, Date.now());
+}
 
 // ---- v10.1 B2: ATR-adaptive time-exit window -----------------
 // Pure: base window (cfg.maxHoldMin) adjusted by the position's

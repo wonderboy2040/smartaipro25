@@ -575,7 +575,11 @@ app.get('/api/chart', async (req, res) => {
       for (let i = 0; i < ts.length; i++) {
         const o = q.open?.[i], h = q.high?.[i], l = q.low?.[i], c = q.close?.[i], v = q.volume?.[i];
         if (o == null || h == null || l == null || c == null) continue;
-        candles.push({ time: ts[i], open: o, high: h, low: l, close: c, volume: v || 0 });
+        // v21.23.12 [UNIT-SAFETY]: Yahoo timestamps SECONDS me aate hain —
+        // app ka har candle surface {time: ms} contract rakhta hai (canonicalizer
+        // 1e12 heuristic, freshness gates). Pehle yahan seconds leak hoti thi
+        // → koi bhi future consumer instant "stale"/1970-scale padhta.
+        candles.push({ time: ts[i] * 1000, open: o, high: h, low: l, close: c, volume: v || 0 });
       }
       if (candles.length === 0) continue;
       return res.json({ symbol: ys, currency: r?.meta?.currency || '', candles });
@@ -3380,6 +3384,19 @@ _httpServer = app.listen(PORT, async () => {
     const { logDirectionSelfTestAtBoot } = await import('./ai/directionSelfTest.js');
     logDirectionSelfTestAtBoot((lvl, line) => console.log(line));
   } catch { /* certificate never fatal at boot */ }
+
+  // v21.23.11: LIVE DIRECTION CERTIFICATE — synthetic PASS hone ke bawajood
+  // user ke live box pe "sab signals opposite" isliye reh gaya tha ki wire-
+  // format drift (CoinDCX timestamp key / newest-first order) internal tests
+  // aur synthetic selftest dono ke blind spot me tha. Ye certificate REAL
+  // network se app ke APNE candle chains ko audit karta hai — orientation
+  // (mirror), LTP-vs-ticker (scale), vote-vs-realized-trend (inversion).
+  // Koi chain FAIL ho to boot log uska NAAM lekar shout karta hai — silent
+  // mirror ab kabhi nahi. Non-blocking (boot kabhi wait nahi karta).
+  try {
+    const { logLiveDirectionCertAtBoot } = await import('./ai/directionLiveCert.js');
+    logLiveDirectionCertAtBoot((lvl, line) => console.log(line));
+  } catch { /* live certificate never fatal at boot */ }
 
   // v21.3.0 (Issue-1): a previous successful boot clears the refusal marker.
   try { const m = path.join(__dirname, 'data', 'BOOT-REFUSED.txt'); if (fs.existsSync(m)) fs.rmSync(m); } catch { /* noop */ }

@@ -496,6 +496,22 @@ export async function executeSignal(opts) {
   // can never clobber a concurrent watcher/manual-close save.
   const reject = (reason, error, extra = {}) => withJournalLock(() => {
     const j = loadJournal();
+    // v21.23.12 [REJECT-DEDUP — spot/crypto side]: indiaOrders (v21.23.10
+    // fix-20) ka dedup yahan nahi tha — persistent reject-condition (spot
+    // full-stop ON / wallet short / leverage gate) har tick nayi REJECTED
+    // row mint karta tha (~2,880/day; 500-entry window ~4h me displacement).
+    // Same scan-20 + __repeatCount + 5-min window dedup, all callers
+    // (manual clicks, telegram approvals, agent loop) covered.
+    const _entries = Array.isArray(j.entries) ? j.entries : [];
+    for (let k = _entries.length - 1, n = 0; k >= 0 && n < 20; k--, n++) {
+      const e = _entries[k];
+      if (!e || e.status !== 'REJECTED') continue;
+      if (String(e.symbol) !== String(pair) || String(e.reason) !== String(reason)) continue;
+      if (Date.now() - Number(e.ts || 0) >= 5 * 60_000) break;
+      e.__repeatCount = (Number(e.__repeatCount) || 1) + 1;
+      e.ts = Date.now();
+      return saveJournal(j);
+    }
     pushEntry(j, { ...entry, status: 'REJECTED', reason, ...extra });
     saveJournal(j);
   }).then(() => ({ ok: false, error: error || reason }));
@@ -1595,11 +1611,22 @@ export function loadProTraderConfig() {
 }
 
 /** SL ratchet — a stop may only tighten, never loosen (LONG: max, SHORT: min).
- *  v7.0 breakeven/T1 locks ride the same never-loosen rule as the ATR trail. */
+ *  v7.0 breakeven/T1 locks ride the same never-loosen rule as the ATR trail.
+ *  v21.23.12 [v21.23.9 DOCTRINE SWEEP]: `side === 'LONG'` binary me koi
+ *  bhi non-LONG/SHORT vocabulary (BUY) ULTA (SHORT) ratchet le jaata tha —
+ *  ek BUY-vocab long position ka SL WIDEN ho sakta tha. Honest alias map;
+ *  unknown → current hi rehta hai jab tak valid SL ho (fail-honest —
+ *  unknown side par SL KABHI move nahi hota), initial set (current>0
+ *  nahi) unknown par bhi refuse hota hai (galat-side SL arm nahi). */
 export function ratchetSl(side, currentSl, candidate) {
   if (!(candidate > 0)) return currentSl;
-  if (!(currentSl > 0)) return candidate;
-  return side === 'LONG' ? Math.max(currentSl, candidate) : Math.min(currentSl, candidate);
+  if (!(currentSl > 0)) {
+    const _LONG = { LONG: true, BUY: true, SHORT: false, SELL: false }[String(side || '').toUpperCase()];
+    return _LONG == null ? currentSl : candidate; // unknown vocab → no initial arm (honest)
+  }
+  const _LONG = { LONG: true, BUY: true, SHORT: false, SELL: false }[String(side || '').toUpperCase()];
+  if (_LONG == null) return currentSl;
+  return _LONG ? Math.max(currentSl, candidate) : Math.min(currentSl, candidate);
 }
 
 /** v7.0: the exit stage shown in the UI + journal stamps. */

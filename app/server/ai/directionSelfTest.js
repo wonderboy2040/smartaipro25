@@ -29,6 +29,8 @@ import { buildPlanFromCandles } from './tradePlanner.js';
 import { dhanOrderBody } from './dhan.js';
 import { futuresOrderBody } from './futures.js';
 import { sideSignOf } from './superIntel.js';
+// v21.23.11 MIRROR-SHIELD: synthetic wire-drift cases (the missing test class)
+import { canonicalizeCandles, ensureAscending, seriesOrientation } from './lib/candles.js';
 
 // ---- synthetic ground-truth candle generators (deterministic) ----
 function makeRisingCandles(count = 90, start = 100, stepPct = 0.003, intervalMs = 300_000) {
@@ -156,11 +158,70 @@ export function runDirectionSelfTest() {
     sideSignOf('FLAT') == null && sideSignOf(undefined) == null && sideSignOf('') == null,
     `FLAT=${sideSignOf('FLAT')} undefined=${sideSignOf(undefined)}`);
 
+  // ---- 4) MIRROR-SHIELD (v21.23.11 — the "sab opposite" ROOT-CAUSE class) ----
+  // CoinDCX candles NEWEST-FIRST aate hain (docs + Aug-2026 SDKs .reverse()
+  // karte hain). Legacy parse me timestamp-key drift (t→time→open_time)
+  // NaN time banati thi → sort no-op → series API-order me hi REVERSED
+  // rehti thi → har indicator ulta → SAB signals systematically opposite —
+  // jabki prices WS-overlay se live dikhti thi ("site working fine"). Ye
+  // section us wire-drift class ka SYNTHETIC regression hai.
+  {
+    // (a) docs shape, NEWEST-FIRST, ms time → canonicalize must ASC-end + reverse-detect
+    const rising = makeRisingCandles(90);
+    const newestFirst = rising.slice().reverse().map(c => ({
+      open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume, time: c.time,
+    }));
+    const canon = canonicalizeCandles(newestFirst, { label: 'selftest-mirror' });
+    add(
+      'MIRROR-SHIELD: docs-shape newest-first → canonical ASCENDING',
+      Array.isArray(canon) && canon.length >= 30 && seriesOrientation(canon) === 'asc'
+        && Math.abs(canon[canon.length - 1].close - rising[rising.length - 1].close) < 1e-9,
+      `orientation=${canon ? seriesOrientation(canon) : 'null'} lastClose=${canon ? canon[canon.length - 1].close : 'n/a'} (expected latest ${rising[rising.length - 1].close})`,
+    );
+    // (b) drift shape open_time (no `time` key) + seconds → still parses & asc
+    const driftShape = newestFirst.map(c => ({
+      open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
+      open_time: Math.round(c.time / 1000), close_time: Math.round(c.time / 1000) + 899,
+    }));
+    const canon2 = canonicalizeCandles(driftShape, { label: 'selftest-open_time' });
+    add(
+      'MIRROR-SHIELD: open_time-key drift shape → parses, ASCENDING',
+      Array.isArray(canon2) && canon2.length >= 30 && seriesOrientation(canon2) === 'asc'
+        && Math.abs(canon2[canon2.length - 1].close - rising[rising.length - 1].close) < 1e-9,
+      `bars=${canon2 ? canon2.length : 0} orientation=${canon2 ? seriesOrientation(canon2) : 'null'} lastClose=${canon2 ? canon2[canon2.length - 1].close : 'n/a'}`,
+    );
+    // (c) NaN-time rows dropped (never survive into the sort — NaN sort = no-op mirror)
+    const withNaN = rising.map((c, i) => (i % 17 === 3 ? { ...c, time: NaN } : c));
+    const canon3 = canonicalizeCandles(withNaN, { label: 'selftest-nan' });
+    add(
+      'MIRROR-SHIELD: NaN-time rows DROPPED (honest), survivors ascending',
+      Array.isArray(canon3) && canon3.length === rising.length - Math.floor(rising.length / 17) - (rising.length % 17 > 3 ? 1 : 0)
+        && canon3.every(c => Number.isFinite(c.time)) && seriesOrientation(canon3) === 'asc',
+      `in=${withNaN.length} out=${canon3 ? canon3.length : 0}`,
+    );
+    // (d) THE FULL-CHAIN KILL SHOT: descending-fed RISING series through the
+    //     REAL plan path must still read LONG (never SHORT) — ensureAscending
+    //     defenses (indicators/_tfVote/overlay) rescue it. Yahi check pehle
+    //     hota to live mirror kabhi silent nahi reh sakta tha.
+    const mirroredPlan = planSideOf(rising.slice().reverse());
+    add(
+      'MIRROR-SHIELD: time-mirrored rising series → still LONG (never SHORT)',
+      mirroredPlan?.ok ? mirroredPlan?.side === 'LONG' : true, // refuse bhi honest hai; SHORT kabhi nahi
+      `mirrored series → plan ${mirroredPlan?.ok ? 'ok' : 'REJECTED (honest)'}, side=${JSON.stringify(mirroredPlan?.side ?? null)} — SHORT = live mirror disease`,
+    );
+    // (e) ensureAscending zero-copy guarantee (hot path unchanged)
+    add(
+      'MIRROR-SHIELD: ensureAscending ascending input → SAME reference (zero-copy)',
+      ensureAscending(rising) === rising,
+      `identity preserved=${ensureAscending(rising) === rising}`,
+    );
+  }
+
   const pass = checks.every(c => c.ok);
   return {
     pass,
     ranAt: Date.now(),
-    version: 'v21.23.4',
+    version: 'v21.23.11',
     passed: checks.filter(c => c.ok).length,
     total: checks.length,
     checks,
@@ -184,6 +245,6 @@ export function logDirectionSelfTestAtBoot(log = null) {
   } catch (e) {
     const msg = `[direction-selftest] CRASH: ${e?.message || e}`;
     if (typeof log === 'function') log('error', msg); else console.error(msg);
-    return { pass: false, ranAt: Date.now(), version: 'v21.23.4', checks: [{ name: 'selftest-crash', ok: false, detail: String(e?.message || e) }] };
+    return { pass: false, ranAt: Date.now(), version: 'v21.23.11', checks: [{ name: 'selftest-crash', ok: false, detail: String(e?.message || e) }] };
   }
 }

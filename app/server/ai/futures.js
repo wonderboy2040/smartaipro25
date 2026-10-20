@@ -44,6 +44,8 @@ import { pRound } from './lib/priceRound.js';
 import { withJournalLock, pushEntry, todayIST, dailyStats, ratchetSl, exitStageOf, loadProTraderConfig } from './coindcxOrders.js';
 import { validateTick, wickJournalEntry } from './wickFilter.js';
 import { futBookSnapshot } from './cxBookState.js';
+// v21.23.11 MIRROR-SHIELD: candle wire-format drift → canonical ascending series.
+import { canonicalizeCandles } from './lib/candles.js';
 
 const r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
 const num = (v) => { const n = typeof v === 'number' ? v : parseFloat(String(v ?? '')); return Number.isFinite(n) ? n : null; };
@@ -247,6 +249,11 @@ export async function fetchMetalsYahooCandles(base, resolution = '60', limit = 3
       candles.push({ time: ts[i] * 1000, open: o, high: h, low: l, close: c, volume: num(q.volume?.[i]) || 0 });
     }
     if (candles.length < 30) throw new Error(`yahoo thin (${candles.length})`);
+    // v21.23.12 [S2-PARITY — LOCAL SORT INVARIANT]: Binance/fapi legs apne
+    // output ko KHUD sort karti hain (v21.23.4 S2); Yahoo legs wire-order
+    // par bharosa karti thi. Ascending hote hain (observed), par invariant
+    // ab LOCAL hai — wire drift pe bhi degrade-honest, mirror kabhi nahi.
+    candles.sort((a, b) => a.time - b.time);
     if (_metalsYahooCache.size >= 8) _metalsYahooCache.clear();
     _metalsYahooCache.set(cacheKey, { at: Date.now(), candles });
     return candles.slice();
@@ -801,12 +808,38 @@ export async function fetchFuturesCandles(pair, resolution = '60', limit = 300) 
   // v12.6 candle TTL cache — same rationale as data.js (the futures
   // board re-fetches the full history every cycle; 299/300 bars are
   // identical). 3 min for 15m bars, 5 min otherwise.
-  const cacheKey = `fut:${pair}:${resolution}`;
+  // v21.23.12 [DEPTH-POISON FIX]: key me `limit` MISSING tha — ek 120-bar
+  // ultrafast write 240/300-bar chahe wale reader ko 12-30s ke liye serve
+  // hoti thi (ema200/ema100 silently null, indicator depth thin). data.js
+  // (spot) ne v20.8.2 me isi class ka yahi fix lagaya tha — ab futures
+  // cache me bhi limit key ka hissa hai.
+  const cacheKey = `fut:${pair}:${resolution}:${Math.max(30, Math.min(1000, Math.floor(Number(limit) || 300)))}`;
   // v21.20.0 ULTRA-FAST TREND CAPTURE: keep 1m/5m/15m candle cache at 12s (not 3-5 minutes!)
   // so fresh breakouts/breakdowns and reversal wicks appear on the MTF Dual Board immediately.
   const ttl = (resolution === '1' || resolution === '5' || resolution === '15') ? 12_000 : 30_000;
   const hit = _futCandleCache.get(cacheKey);
   if (hit && Date.now() - hit.at <= ttl) return hit.candles.slice();
+  // v21.23.11 [TWO-LEG CHAIN]: Leg-1 legacy candlesticks (pcode=f, the
+  // true perp series) → Leg-2 official /market_data/candles (docs' CURRENT
+  // endpoint, same USDT domain). Legacy leg WAF/retire/shape-drift ho to
+  // desk is leg pe zinda rahegi — dono legs MIRROR-SHIELD canonicalize
+  // se guzarti hain (wire shape/order chahe kuch bhi ho — output hamesha
+  // canonical ascending).
+  let candles = await _fetchFuturesLegacyCandles(pair, resolution, limit).catch(() => null);
+  if (!candles || candles.length < 30) {
+    candles = await _fetchFuturesOfficialCandles(pair, resolution, limit).catch(() => null);
+  }
+  if (!candles || candles.length < 30) return null;
+  if (_futCandleCache.size >= 48) {
+    const entries = [..._futCandleCache.entries()].sort((a, b) => a[1].at - b[1].at);
+    for (let i = 0; i < 12; i++) _futCandleCache.delete(entries[i][0]);
+  }
+  _futCandleCache.set(cacheKey, { at: Date.now(), candles });
+  return candles.slice();
+}
+
+/** Leg-1: legacy public candlesticks endpoint (perp series, pcode=f). */
+async function _fetchFuturesLegacyCandles(pair, resolution, limit) {
   const to = Math.floor(Date.now() / 1000);
   const from = to - Math.max(1, Math.ceil(limit * resolutionSeconds(resolution) * 1.2 / 60)) * 60;
   // v21.19.0 FIX: CoinDCX /market_data/candlesticks?pcode=f requires UPPERCASE
@@ -819,19 +852,43 @@ export async function fetchFuturesCandles(pair, resolution = '60', limit = 300) 
   const j = await r.json().catch(() => null);
   const raw = Array.isArray(j) ? j : (Array.isArray(j?.data) ? j.data : null);
   if (!raw || raw.length === 0) return null;
-  const candles = raw.map(x => ({
-    time: Number(x.time) < 1e12 ? Number(x.time) * 1000 : Number(x.time),
-    open: num(x.open), high: num(x.high), low: num(x.low),
-    close: num(x.close), volume: num(x.volume) || 0,
-  })).filter(c => c.close > 0 && c.open > 0)
-    .sort((a, b) => a.time - b.time);
-  if (candles.length < 30) return null;
-  if (_futCandleCache.size >= 48) {
-    const entries = [..._futCandleCache.entries()].sort((a, b) => a[1].at - b[1].at);
-    for (let i = 0; i < 12; i++) _futCandleCache.delete(entries[i][0]);
-  }
-  _futCandleCache.set(cacheKey, { at: Date.now(), candles });
-  return candles.slice();
+  // v21.23.11 [MIRROR-SHIELD]: legacy parse `{…, time}` + self-sort me
+  // timestamp-key drift (time→open_time, docs-vs-BFF mismatch) NaN time
+  // banati thi → sort comparator NaN → sort NO-OP → CoinDCX NEWEST-FIRST
+  // order PRESERVED → MIRRORED SERIES → dual-board/MTF/futures ke SAB
+  // signals systematically OPPOSITE (live-probe 2026-10-20: Binance leg
+  // pe 17/20 AGREE — direction engine sahi tha; CoinDCX wire hi suspect
+  // #1). Ab canonicalizeCandles: alias-tolerant parse + NaN-row drop +
+  // orientation-detect + ascending sort. Wire chahe KOI bhi shape/order
+  // de, series hamesha canonical ascending niklegi.
+  const candles = canonicalizeCandles(raw, { label: `cdc-fut:${pair}:${resolution}` });
+  if (!candles || candles.length < 30) return null;
+  return candles;
+}
+
+// v21.23.11 [OFFICIAL-ENDPOINT LEG]: docs.coindcx.com ka CURRENT candles
+// endpoint — `interval` param + B-pairs + NEWEST-FIRST response (same
+// BFF /market_data/candles). Legacy candlesticks endpoint retirement/
+// shape-drift/WAF hone pe futures desk is leg pe USDT candles (same
+// domain as perp USDT — votes + USDT-priced plans dono safe) continue
+// karega. Sirf {1m,15m,1h,1d} official intervals map hote hain; '240' pe
+// ye leg skip (existing resample/fallback chain handles 4h).
+const OFFICIAL_RES_INTERVAL = { '1': '1m', '5': '5m', '15': '15m', '60': '1h', '1D': '1d' };
+async function _fetchFuturesOfficialCandles(pair, resolution, limit) {
+  const interval = OFFICIAL_RES_INTERVAL[String(resolution)];
+  if (!interval) return null;
+  try {
+    const r = await fetch(
+      `https://api.coindcx.com/market_data/candles?pair=${encodeURIComponent(String(pair).toUpperCase())}&interval=${interval}&limit=${Math.min(1000, Math.max(30, limit))}`,
+      { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) },
+    );
+    if (!ok(r)) return null;
+    const raw = await r.json().catch(() => null);
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+    const candles = canonicalizeCandles(raw, { label: `cdc-fut-official:${pair}:${resolution}` });
+    if (!candles || candles.length < 30) return null;
+    return candles;
+  } catch { return null; }
 }
 const _futCandleCache = new Map(); // key -> { at, candles } (v12.6 TTL cache)
 /** Test hook — hermetic suites clear the candle cache between cases. */
@@ -1570,6 +1627,21 @@ export async function executeFuturesSignal(opts) {
 
   const reject = (reason, error, extra = {}) => withJournalLock(() => {
     const j = loadJournalFresh();
+    // v21.23.12 [REJECT-DEDUP — futures side]: indiaOrders (v21.23.10 fix-20)
+    // me dedup sirf India ko mila tha; crypto/futures rejects har tick nayi
+    // row mint karte the (persistent reject-condition = 500-entry window
+    // ~4h me displacement — genuine trade/audit history destroyed). Scan-20
+    // dedup + __repeatCount + fresh ts, 5-min window.
+    const _entries = Array.isArray(j.entries) ? j.entries : [];
+    for (let k = _entries.length - 1, n = 0; k >= 0 && n < 20; k--, n++) {
+      const e = _entries[k];
+      if (!e || e.status !== 'REJECTED') continue;
+      if (String(e.symbol) !== String(pair) || String(e.reason) !== String(reason)) continue;
+      if (Date.now() - Number(e.ts || 0) >= 5 * 60_000) break;
+      e.__repeatCount = (Number(e.__repeatCount) || 1) + 1;
+      e.ts = Date.now();
+      return saveJournalFresh(j);
+    }
     pushEntry(j, { ...entry, status: 'REJECTED', reason, ...extra });
     saveJournalFresh(j);
   }).then(() => ({ ok: false, error: error || reason }));

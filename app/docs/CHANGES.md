@@ -3196,3 +3196,98 @@ The diagnostic that motivated it: Path B (STRONG grade + conf + agreement) was U
 **NAVA TEST FILE** test/liveRecheck212310.test.ts — 48 LOCKS (S1 backoff x5 incl fallback-hole + escalation math, S2 void x1, S3 close-verdict x3, S4 India wiring x6, S5 probe parity x2, S6 boardSigs x1, S7 futures hardening x7, S8 side-vocab x3, S9 age-gate x6, S10 SAPTA x2, S11 sanitize x2, S12 adoption stamps x1, S13 snapshot rotation matrix x4, S14 metals/TP/void wiring x6) + 2 honest test-pin updates (siteRecheck21239 TP-ladder pin — v21.23.9 ka "TP1→T1 ladder" pin hi live bug tha; cxWsCandles cxFut overlay occurrence 1→5 metals-chain wires) + __resetMtfAutoForTests ab snapshot map + failedLiveAttempts seed support karta hai.
 
 223 files / 4167 tests PASS (4119+48), tsc 0, lint 0, dist 21.23.10, check:routes PASS
+
+---
+
+## v21.23.11 — MIRROR-SHIELD: "sab signals systematically OPPOSITE" ka data-wire root-cause fix (LIVE-FORENSICALLY PROVEN)
+
+**USER COMPLAINT (verbatim)**: "site me Jo bhi trade signals de rahe hai sab ke sab wrong direction me hai sab opposite jaa rahe hai … signals ab bhi systematic opposite jaa rahe hain … muje loss ho raha hai".
+
+**LIVE-FORENSICS (sandbox + docs + SDK triangulation, 2026-10-20)**:
+- Direction COMPUTATION layers sahi nikle: synthetic selftest 13/13 PASS; LIVE board probe (Binance leg se) 17/20 AGREE real 24h trend se; aggregateVotes/_tfVote/plan polarity sab canonical.
+- **Root-cause class pakda**: CoinDCX candles NEWEST-FIRST (descending) aate hain — official docs live-verify: "Response Order: Newest-first (descending order according to time key)"; Aug-2026 SDK `getCandles()` internally `res.reverse()` karta hai; ek 2026-SDK CandleResponse `open_time`/`close_time` keys document karta hai (docs `time` bolte hain — wire drift PROOF). Legacy parsers (spot: `{o,h,l,c,v,t}`; futures candlesticks: `{…,time}`) me timestamp-key drift → `Number(x.time)=NaN` → **sort comparator NaN → sort NO-OP → series API ke NEWEST-FIRST order me hi rehti thi → TIME-MIRRORED series → har EMA/RSI/MACD/Supertrend/ROC vote ulta → SAB signals systematically OPPOSITE — jabki prices WS-overlay se live (user: "site working fine")**. Internal tests kabhi pakde nahi (mocks assumed shape me), sandbox kabhi reproduce nahi hua (datacenter me CoinDCX Cloudflare-blocked → Binance leg → direction sahi).
+- Synthetic REPRODUCTION (pehli baar): time-mirrored rising series → REAL plan path → **side="SHORT"** — live disease deterministic test me.
+
+**FIX — 4 DEFENSE LINES (bug class structurally impossible)**:
+1. **L1 SOURCE — CANDLE CANONICALIZER** (`server/ai/lib/candles.js` naya): `parseCandleRow` alias-tolerant (t/time/open_time/T/ts · o/open · h/high · l/low · c/close/last · v/volume/vol + Binance array rows) + seconds↔ms normalization + geometry sanity + time-plausibility floor (legacy bare-array layout misread guard) + NaN-row DROP (NaN sort = mirror seed). `canonicalizeCandles`: parse → drop → orientation-detect → reverse-if-descending → stable ascending sort → invariant. Wired: `fetchCoinDcxCandles` (spot) + `fetchFuturesCandles` (futures candlesticks — user ka LIVE trade path).
+2. **L1 NEW LEGS — OFFICIAL ENDPOINT**: CoinDCX ka CURRENT documented candles API (`api.coindcx.com/market_data/candles`, `interval` param, B-pairs) ab fallback leg hai — spot chain me `B-<base>_INR`→`BTCINR` (INR-domain preserved), futures chain me `B-<base>_USDT` (perp USDT-domain same). Legacy endpoint WAF/retire/shape-drift → desk phir bhi zinda.
+3. **L2 OVERLAY/RESAMPLE — `ensureAscending` entry-defense**: `overlayTickOnCandles` (forming bar = TRUE newest; pehle mirrored series pe OLDEST bar patch hota tha), mtfDualBoard `overlayLiveTick`, `_resample` (mirrored buckets cure).
+4. **L3 COMPUTE — last-line**: `computeIndicatorsFromCandles` + `_tfVote` + `buildPlanFromCandles` entry pe `ensureAscending` (zero-copy ascending; desc → reversed copy). Koi bhi un-audited path (store/bots/direct caller) mirrored series de to compute se PEHLE seedha ho jata hai.
+
+**L4 PROOF — certificates**:
+- `directionSelfTest` ab MIRROR-SHIELD section ke saath 18 checks (docs-shape newest-first → asc; open_time drift → asc; NaN rows dropped; **time-mirrored rising → LONG kabhi SHORT nahi**; zero-copy guarantee).
+- **NAYA `directionLiveCert.js` + `/api/ai/direction-live-certificate`**: REAL network se app ke APNE candle chains audit — per-chain: reachable / orientation(asc=MIRROR detector) / freshness / lastClose-vs-live-ticker ±3% / vote-vs-realized-20bar-trend. Boot pe non-blocking log line — CoinDCX wire dobara drift kare to certificate chain ka NAAM lekar FAIL hoga, silent mirror kabhi nahi.
+
+**NAVA TEST FILE** `test/directionCert212311.test.ts` — 38 LOCKS (parseCandleRow shapes x8, orientation/ensureAscending x4, canonicalizeCandles mirror-cases x7, fetchCoinDcxCandles wire-legs x4, fetchFuturesCandles wire-legs x3, overlay L2 x2, compute/vote/plan L3 x6, certificates L4 x4).
+
+---
+
+## v21.23.12 — FULL-SITE DEEP RECHECK #2: India MTF-live structural-dead cure + order-time dataDegraded veto + 20 fixes (fresh-eyes 4-domain audit)
+
+**User ask: "v21.23.11 ye latest full site code ko recheck karo deep level pe aur issues fix kardo"**
+
+v21.23.11 (MIRROR-SHIELD) ke turant baad fresh-eyes 4-domain parallel audit (A: candle/data pipeline · B: signal/vote/plan compute · C: order-exec/live chain · D: routes/UI/boot/config). Mirror-shield ke 4 defense lines RE-VERIFIED intact (L1 canonicalizer + official legs, L2 overlay guards, L3 compute guards, L4 certificate) — **koi live direction-flip NAHI**. Par audit ne ~20 REAL defects diye (2 HIGH live-path, 3 HIGH direction-safety, baaki medium/latent). Sab fix + regression locks.
+
+### 1) HIGH — India MTF-live STRUCTURALLY dead (v21.23.10 ka "CRITICAL FIX" sirf naam tha, function nahi) (routes.js)
+- **Root cause**: `getFreshIndiaSignal: (sym, o) => getFreshSignalForExec(sym, 'INDIA', depsForSignals(), o)` — par `getFreshSignalForExec(pairOrSymbol, deps, opts)` me **market param HAI HI NAHI**: `'INDIA'` string deps-slot me, real deps-object opts-slot me, market **hardcoded 'CRYPTO'** → India symbol crypto deep-branch me guaranteed fail → gate-4 hamesha "No fresh ensemble signal available" → manual MTF board India LIVE + mtf-auto India LIVE dono dead. v21.23.10 ne sirf param ka NAAM (`getFreshSignal`→`getFreshIndiaSignal`) theek kiya tha — underlying wiring galat hi rehi.
+- **Fix**: teeno wrappers ab `getDeepSignal(sym,'INDIA',depsForSignals())` pattern (manual /india/execute + indiaAgent.js:853 jaisa — wahi pehle se sahi tha).
+
+### 2) HIGH — order-time gauntlet me v21.23.4 contract MISSING (ensemble.js evaluateExecutionGate)
+- **Root cause**: `dataDegraded`/`freshTapeAbsent` ko sirf board/agent/SAPTA layers enforce karte the; **execution gauntlet (sab 4 desks ka last-line) check hi nahi karta tha** — manual desk click / auto path ek THIN hybrid STRONG degraded signal pe LIVE order pass kar sakta tha (exact v21.23.4 "opposite jaa raha hai" class).
+- **Fix**: gate-top veto — LIVE/PAPER-real order data-degraded signal par HARD-REFUSE (practice/paper journaling allowed — v21.23.4 design parity).
+
+### 3) HIGH — deep-path me v21.23.4 ladder KABHI nahi tha (signals.js _computeDeepSignal)
+- **Root cause**: board path `__tfDegraded` (15m MISSING → suppress) / `__tfDataThin` (1h resample <30 → dataDegraded stamp) handle karta hai; **deep path — jo execution gauntlet ka signal source hai — dono ignore karta tha**. THIN hybrid STRONG gauntlet tak UNMARKED pahunchta tha.
+- **Fix**: deep bhi same ladder — `__tfDegraded` → honest `{ok:false, INTRADAY-TF-UNAVAILABLE}`; `__tfDataThin` → `consensus.dataDegraded='INTRADAY-TF-THIN'` stamp (buildSignal executable:false + gauntlet veto chain). Board == deep ab sacha parity.
+
+### 4) HIGH — India LIVE closes ka KOI fill-verify nahi (indiaOrders.js — money-loss class)
+- **Root cause**: entry path v18.9 se 3× `dhanOrderStatus` poll karta hai (Dhan TRANSIT ack + async-reject) — par watcher close / manual close / partial close **orderId ko hi FILLED maan lete the** → journal full win book + **protective SL-M CANCEL + row CLOSED** — broker reject hone par REAL shares SL ke bina naked (agli square-off tak). Stale-day reconcile phir fake close fabricate karta.
+- **Fix**: `_dhanVerifyFill` (3× poll 300/600/600ms) teeno close paths me — sirf TRADED/FILLED/COMPLETE = closed; unverified → row OPEN + WATCH_ERROR + next-tick retry; **SL-M cancel sirf verified fill ke baad**.
+
+### 5) MEDIUM — deep-monitor re-anchor stale lifecycle (mtfAutoLink.js recordLiveMtfBoardTrade — money-class)
+- **Root cause**: existing OPEN row re-anchor sirf LEVELS update karta tha — `side`/`peakPrice`/`t1Hit`/`openedAt`/`deepMonitorStage` PURANE rehte the. (a) stale t1Hit+peak → naye LIVE entry par turant Stage-4/5 lock → **entry ke kuch second baad software market-close (fee churn)**, purana openedAt 90s LIVE close-grace firewall disarm; (b) side flip → **SHORT position LONG manage** (inverted SL logic).
+- **Fix**: re-anchor ab poori lifecycle fresh karta hai (side/peak/t1Hit/openedAt/STAGE_0/trendStatus/closeReason/pnl/syncError).
+
+### 6) MEDIUM — crypto/futures reject-thrash + agent no-cooldown (journal flooding)
+- **Root cause**: v21.23.10 ka reject-dedup sirf India ko mila; spot/futures gauntlets har tick nayi REJECTED row mint karte the (~2,880/day — 500-entry journal window ~4h me displacement) + agent failed entry ke baad bhi har 30s tick wahi candidate try karta.
+- **Fix**: scan-20 dedup (5-min window, `__repeatCount` update-in-place) teeno desks me + indiaOrders dedup last-20 scan upgrade (interleaved-entry chain-break cure) + agent `FAILED_ENTRY_BACKOFF` (10-min per-symbol in-memory).
+
+### 7) MEDIUM — globalFutures USDC price leg = LAST uncanonicalized mirror-disease reader
+- **Root cause**: equity-sim perp-LTP fallback wahi legacy candlesticks wire padhta tha jiske liye MIRROR-SHIELD bana — NaN-time rows filter pass, sort no-op, newest-first wire par `sorted[len-1]` = **~30-min-purana OLDEST bar** → stale LTP + ULTA-signed changePct (SL/TP/P&L inhi pe evaluate hote hain).
+- **Fix**: `canonicalizeCandles` — last ab TRUE newest bar.
+
+### 8) MEDIUM — direction certificate 0-verified chains par bhi "PASS" (directionLiveCert.js)
+- **Root cause**: `pass: fails===0 && synthetic.pass` — sab chains UNREACHABLE (geo-block/WAF window — bilkul wahi window jisme engine degraded data pe girti hai) ho to boot log **"PASS" print karta tha 0 live-verified chains ke saath**. L4 ka apna honesty claim overstate tha.
+- **Fix**: pass ke liye ≥1 chain REAL network se PASS required; naye fields `verifiedChains`/`unverifiedChains`; summary INCONCLUSIVE-case me wahi bolti hai + **`wireAbsorb`** — canonicalizer ke recent stats (label/raw-orientation/dropped) payload me expose, taaki CoinDCX wire dobara drift kare to absorption VISIBLE rahe (orientation post-fix hamesha 'asc' hota hai — detector ab bhi trading-output ka satya deta hai, par wire-drift ab chhupa nahi).
+
+### 9) v21.23.9 DOCTRINE SWEEP — residual silent-LONG/SELL defaults (latent money-math)
+- `computeTrailSl` (ensemble.js): `side !== 'SHORT'` → honest alias map (LONG/BUY/SHORT/SELL), unknown → NO trail move.
+- `fitPlanToRiskCap` (ensemble.js): unknown → unfitted (galat-side SL kabhi nahi).
+- `ratchetSl` (coindcxOrders.js): unknown vocab → SL move refuse (BUY ab long-ratchet; pehle ulta short-ratchet = widening!).
+- `dhanOrderBody` (dhan.js): unknown side **LOUD THROW** — comment "unknown value BUY default nahi karti" bolta tha, code silent-SELL karta tha (v21.23.2 pin ne conservative-SELL compromise lock kiya tha — ab v21.23.9 doctrine port).
+- Baaki `!== 'SHORT'` sites (superIntel/expertPicks/backtest/signalRecheck/globalFutures/futures trail-monitor) callers-canonical documented latent.
+
+### 10) L2.5 SEAT-GUARD SWEEP — vote-bearing candle consumers (defense-in-depth, mirror-class)
+Har direct-candle seat jo tail reads karta tha par L3 chokepoint se pehle raw padhta tha, ab entry pe `ensureAscending`: `tapeFromCandles` (last3Pct momentum polarity!), `sessionVwapFromIntraday`, `resampleCandles` (**India committee ka 15m→1h chain — mtf twin me guard tha, isme nahi**), `tapeMTFFromBase`, `smcVote`, `structurePro`, `maCrossFromCandles`, `srMatrix` prev-day, `scoreSwing`, `detectWhale`, `entryTimingRead` (chase-guard polarity), `probrain.structureStop`, `mtf._structureStop`, `simulateSymbol` (edge-stats), `replay._resample`, `mtfLedger` outcome-walk.
+
+### 11) seriesOrientation KEY-DRIFT blind-spot cure (lib/candles.js)
+`ensureAscending`/`seriesOrientation` sirf `.time` padhte the — `t`/`open_time`/`T`/`ts` keyed rows (jo parseCandleRow alias-layer me chalti hain) NaN delta → 'unknown' → **untouched mirror**. Yahi key-drift class original disease ko L2/L3 ke nose se nikal sakti thi. Ab alias-tolerant `_rowTimeMs` (TIME_KEYS + s↔ms normalize).
+
+### 12) Nano-fixes
+- `parseCandleRow`: present-but-NaN high/low ab ROW DROP (comment ka "DROPPED, never repaired" promise pehle synth se toota tha).
+- futures `_futCandleCache` key me `limit` (120-bar write 300-bar reader ko 12-30s poison — data.js ne v20.8.2 me yahi fix spot pe lagaya tha).
+- `updatePaperTradeStopLoss` 3rd `marketHint` param (same-name INDIA/CRYPTO paper trades symbol-collision; fastSlTrail LIVE rows paperId:null → symbol path hi chalta hai).
+- tradePlanner honest confluence: `?? 5`/`?? 60` fabricated 5/8 counts sweep (partial leg 0-contribute; directionVerified pehle-se per-leg real checks se honest tha, payload/bonus ab bhi).
+- liveClose `null`-verdict ab FAIL (routes wrapper `.catch(()=>null)` — fabricated-CLOSE trap ek refactor door tha; `undefined` permissive legacy contract intact).
+- LIVE close par failed paper-mirror **VOID** (double-booked track-record poison — voidPaperTrade cure ka missing twin).
+- `/api/chart` Yahoo seconds→ms (`time: ts[i]*1000` — har candle surface ka ms contract).
+- Watchdog bat teeno stamps v21.23.12 (REM/title me stale v21.23.10 chhupa tha — user console title purana version dikhata).
+- MTFDualBoardPanel `isLong = t.side === 'LONG'` (unknown side green-LONG styling).
+- aggregateVotes NaN-dir vote filter (`Number.isFinite`).
+- Yahoo legs local sort invariant (metals/global/intraday — Binance/fapi legs jaisa).
+- directionCert212311 vacuous test de-vacuous (chain absence ab FAIL).
+
+### NAYA TEST FILE test/siteRecheck212312.test.ts — 56 LOCKS
+S1 India wrapper arity ×3 + gauntlet dataDegraded ×4 + S3/4/5/6 side-doctrine ×9 + S7 deep-ladder ×2 + S8 resample mirror ×2 + S9 orientation key-drift ×3 + S10 NaN-drop ×3 + S11 cert pass-semantics ×4 + S12 USDC-leg ×2 + S13/17/18 dedup/backoff/cache-key ×6 + S14 India close-verify ×2 + S15 re-anchor lifecycle ×1 + S16 null-verdict/mirror-void ×2 + S19 paper marketHint ×2 + S20 honest confluence ×1 + S21 seat-guard desc-vs-asc equality ×8 + S23 unit/stamps ×5. + 3 honest pin updates (liveRecheck212310 S4 — us pin ne khud v21.23.10 ka BUGGY wiring lock kiya tha; siteRecheck21239 paper-sync marketHint signature; signalDirectionInversion dhan unknown-side doctrine port).
+
+**FULL RELEASE GATE**: tsc 0 · lint 0 · **225 files / 4261 tests ALL PASS (4205+56)** · dist 21.23.12 · check:routes PASS · check:version OK

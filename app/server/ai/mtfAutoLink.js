@@ -1504,7 +1504,15 @@ export async function mtfAutoTick(p = {}) {
         if (b.executionMode === 'LIVE' && typeof p.liveClose === 'function') {
           try {
             const lc = await p.liveClose(b);
-            if (lc && lc.ok === false) liveCloseFailed = lc.error || lc.reason || 'exchange close failed';
+            // v21.23.12 [NULL-VERDICT HONESTY]: routes ka wrapper `.catch(() => null)`
+            // hai — closeCoinDcxActivePosition kabhi throw nahi karta, par
+            // AGAR wrapper me kuch bhi throw hua to null aata tha aur null
+            // falsy hone par row CLOSED ho jaata tha jabki exchange position
+            // khuli ho sakti thi (fabricated-CLOSE trap ek refactor door tha).
+            // undefined = documented legacy permissive stub contract (S3 pin)
+            // — PERMISSIVE rehta hai; null = wrapper catch → FAIL.
+            if (lc === null) liveCloseFailed = 'liveClose wrapper threw / returned null — treated as FAILED (exchange state unknown)';
+            else if (lc && lc.ok === false) liveCloseFailed = lc.error || lc.reason || 'exchange close failed';
           } catch { /* non-fatal — legacy permissive close, sync re-adopts */ }
         }
         if (liveCloseFailed) {
@@ -1517,6 +1525,16 @@ export async function mtfAutoTick(p = {}) {
           [b.symbol]: { price: rawQuote },
           [`${b.execMarket || b.market}|${b.symbol}`]: { price: rawQuote },
         });
+        // v21.23.12 [PAPER-MIRROR VOID]: LIVE row CLOSED par mirror close FAIL
+        // (r not ok) hone par paper row OPEN reh jaati thi → wahi trade dobara
+        // paper-side SL/T2 se book hota (double-booked track-record poison —
+        // v21.23.10 voidPaperTrade cure ka yahi missing twin). Mirror ab VOID.
+        if (b.executionMode === 'LIVE' && b.paperId && r && r.ok === false && typeof paper.voidPaperTrade === 'function') {
+          try {
+            paper.voidPaperTrade(b.paperId);
+            _logEvent('paper-mirror-voided', `⚠️ LIVE close ${b.symbol} — paper-mirror close failed (${String(r.error || r.reason || '').slice(0, 80)}), mirror VOID kiya gaya (double-book cure)`);
+          } catch { /* best-effort */ }
+        }
         if (r?.ok || b.executionMode === 'LIVE') {
           const ccyPrefix = b.ccy === 'USDT' ? '$' : '₹';
           b.status = 'CLOSED';
@@ -2174,9 +2192,35 @@ export function recordLiveMtfBoardTrade(item = {}) {
   const execMode = isPaperExec ? 'PAPER' : 'LIVE';
   const existing = st.book.find(b => b.status === 'OPEN' && b.symbol === sym);
   if (existing) {
+    // v21.23.12 [RE-ANCHOR LIFECYCLE RESET]: existing OPEN row par re-anchor
+    // sirf LEVELS (entry/SL/T1/T2/qty) update karta tha — side/peakPrice/
+    // t1Hit/openedAt/deepMonitorStage/stage-label PURANE row ke rehte the.
+    // Do money-class failure: (a) stale t1Hit=true + purana peakPrice →
+    // naye LIVE entry par deep monitor turant Stage-4/5 lock → entry ke
+    // kuch second baad hi software market-close (fee-loss churn), aur purana
+    // openedAt 90s LIVE close-grace firewall ko disarm karta tha; (b) side
+    // flip (purana row LONG, naya order SHORT) → SHORT exchange position
+    // LONG ki tarah manage hoti — SL-hit logic inverted, wrong-side SL push.
+    // Ab naye order ke saath poori lifecycle fresh re-anchors hoti hai.
     existing.executionMode = execMode;
     existing.traded = true;
     existing.fullControl = true;
+    existing.side = String(item.side || existing.side || 'LONG').toUpperCase();
+    existing.peakPrice = Number(item.entry) > 0 ? Number(item.entry) : (Number(existing.entry) > 0 ? Number(existing.entry) : null);
+    existing.t1Hit = false;
+    existing.openedAt = Date.now();
+    existing.deepMonitorStage = 'STAGE_0_INITIAL_GUARD';
+    existing.deepMonitorLabel = isPaperExec ? 'Stage 0 · Paper Direction Test · SL Auto-Trail Ready' : 'Stage 0 · Initial SL Guard (Full Control)';
+    existing.trendStatus = `📡 ${existing.side === 'SHORT' ? 'BEARISH' : 'BULLISH'} LIVE WATCH (+0.00R)`;
+    existing.lastExchangeSl = existing.lastExchangeSl ?? null; // re-arm safe (re-anchored SL hi push hoga)
+    existing.closeReason = null;
+    existing.closedAt = null;
+    existing.pnl = null;
+    existing.syncError = null;
+    if (Number(item.superScore)) existing.score = Number(item.superScore);
+    if (item.tier) existing.tier = item.tier;
+    if (Number(item.holdMin) > 0) existing.holdMin = Number(item.holdMin);
+    if (item.mode) existing.mode = item.mode;
     if (isPaperExec) {
       existing.openedInLiveMode = false;
       existing.paperId = item.paperId ?? existing.paperId ?? `PAPER_${sym}_${Date.now()}`;

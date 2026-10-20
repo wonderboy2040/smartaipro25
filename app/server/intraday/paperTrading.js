@@ -710,14 +710,22 @@ export function voidPaperTrade(id) {
 
 /** v21.23.0 ULTRA-FAST REALTIME SL TRAIL SYNC:
  *  Ratchets `t.stopLoss` on an open paper trade (by id or symbol) strictly in the
- *  favorable direction (LONG: higher SL only; SHORT: lower SL only). */
-export function updatePaperTradeStopLoss(idOrSymbol, newStopLoss) {
+ *  favorable direction (LONG: higher SL only; SHORT: lower SL only).
+ *  v21.23.12 [CROSS-DESK SYMBOL COLLISION]: symbol-fallback ab marketHint
+ *  (3rd param) se constrain hota hai — warna ek INDIA ticker-name paper
+ *  trade doosre desk ke same-name crypto trade ki SL ratchet kar sakta tha
+ *  (fastSlTrail LIVE rows paperId:null rakhte hain → symbol path hi chalta hai). */
+export function updatePaperTradeStopLoss(idOrSymbol, newStopLoss, marketHint = null) {
   const sl = Number(newStopLoss);
   if (!(sl > 0)) return { ok: false, error: 'Invalid stopLoss' };
   const symUp = String(idOrSymbol || '').trim().toUpperCase();
-  const t = _state.trades.find(x =>
-    x.status !== 'CLOSED' && (x.id === idOrSymbol || String(x.id) === String(idOrSymbol) || String(x.symbol || '').toUpperCase() === symUp)
-  );
+  const wantMkt = marketHint != null ? String(marketHint).toUpperCase() : null;
+  const t = _state.trades.find(x => {
+    if (x.status === 'CLOSED') return false;
+    if (x.id === idOrSymbol || String(x.id) === String(idOrSymbol)) return true;
+    if (String(x.symbol || '').toUpperCase() !== symUp) return false;
+    return wantMkt == null || String(x.market || '').toUpperCase() === wantMkt;
+  });
   if (!t) return { ok: false, error: 'Open paper trade not found' };
   const isLong = t.direction === 'LONG';
   const curSl = Number(t.stopLoss) || 0;
