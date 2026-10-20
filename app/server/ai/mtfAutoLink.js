@@ -96,6 +96,11 @@ export const MTF_AUTO_DEFAULTS = {
   aboveTenKLeverage: 5,
   feeAwareReversalExit: true,
   deepMonitorEnabled: true,        // v21.22.0: Realtime Active-Trade Deep Monitor + Trailing SL + Reversal Profit Book
+  // v21.23.6 USER SPEC: "jab trade successful close hone LIVE Auto trade 5 min ka
+  // cooldown lagake then phir auto trade signals me ELITE top trade verify karke
+  // trade lagna chahiye" — successful close ke baad LIVE re-entry sirf
+  // 5-minute cooldown ke BAAD, elite-verified signal pe.
+  postSuccessCooldownMin: 5,
 };
 const CLAMPS = {
   minScore: [Number(SUPER_TIERS.ACTION), 95],
@@ -110,6 +115,7 @@ const CLAMPS = {
   walletDeployPct: [10, 100],
   belowTenKLeverage: [1, 20],
   aboveTenKLeverage: [1, 20],
+  postSuccessCooldownMin: [0, 120],   // v21.23.6: 0 = cooldown OFF; max 2h
 };
 const MODES = new Set(['INTRADAY', 'SWING', 'SCALP']);
 
@@ -232,10 +238,15 @@ export const computeWallet100Deployment = computeWallet95Deployment;
  *   • Stage 1 (+0.35R): Risk Halved — SL trailed to -0.45R
  *   • Stage 2 (+0.55R): Fee-Free Breakeven Lock — SL trailed above round-trip fee floor (ZERO LOSS)
  *   • Stage 3 (+0.80R): Pre-TP1 Profit Ratchet — SL trailed to +0.45R net profit
- *   • Stage 4 (>= +1.00R / TP1 Hit): TP1 60% Booked + Runner SL trailed to +0.65R targeting TP2
- *   • Stage 5 (>= +1.40R -> TP2): Runner SL trailed to TP1 (+1.0R) + structure trail until TP2 (2.0R) full exit
- *   • Reversal Guard: If trend flips (bullish->bearish on LONG or bearish->bullish on SHORT) or
- *     price gives back >=35% from a >=0.45R peak while above fee-breakeven, immediately books accrued profit!
+ *   • Stage 4 (>= +1.00R / TP1 Hit): TP1 60% Booked + Runner SL trailed to +0.65R floor
+ *     (peakR−0.45R ratchet) targeting TP2 — v21.23.6: 0.32R→0.45R giveback room
+ *   • Stage 5 (>= +1.40R -> TP2): Runner SL trailed to TP1 (+1.0R) + 0.50R chandelier until
+ *     TP2 (2.0R) full exit — v21.23.6: 0.30R→0.50R (normal pullbacks ab runner nahi maarte)
+ *   • Reversal Guard v21.23.6: book ONLY on a CONFIRMED flip (board side actually flipped +
+ *     trigger fired / superScore >= 65) or a DEEP giveback (>=45% of peak AND >=0.28R absolute).
+ *     Risk hints (reversalRisk / context.exhausted / opposingFlow) — jo strong trends me
+ *     ROUTINELY fire hote the aur +0.12R pe trade band kar dete the jabki trend jaari rehta
+ *     tha — ab SIRF SL profit-lock tighten karte hain, trade band NAHI hota.
  */
 export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const side = String(trade.side || trade.direction || 'LONG').toUpperCase();
@@ -286,11 +297,15 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   } else if (peakR >= 1.4 || (tp1Touched && peakR >= 1.25)) {
     stageCode = 'STAGE_5_RUNNER_TO_TP2';
     stageLabel = 'Stage 5 · TP1 Locked + Structure Trail → TP2';
-    const chandelierTrail = isLong ? peakPrice - 0.30 * risk : peakPrice + 0.30 * risk;
+    // v21.23.6: 0.30R → 0.50R chandelier — strong-trend pullbacks (NORMAL hai)
+    // ab trail-stop se runner ko maar nahi dete; floor TP1 (>= +1.0R) pe hai hi.
+    const chandelierTrail = isLong ? peakPrice - 0.50 * risk : peakPrice + 0.50 * risk;
     candidateSl = tightenSl(candidateSl, tightenSl(t1 > 0 ? t1 : priceAtR(1.0), chandelierTrail));
   } else if (tp1Touched || peakR >= 1.0) {
     stageCode = 'STAGE_4_TP1_LOCKED';
-    const lockR = Math.max(0.65, +(peakR - 0.32).toFixed(2));
+    // v21.23.6: giveback room 0.32R → 0.45R (floor +0.65R as-is) — TP1 ke
+    // baad ka normal pullback ab SL trigger nahi karta, runner TP2 tak zinda.
+    const lockR = Math.max(0.65, +(peakR - 0.45).toFixed(2));
     stageLabel = `Stage 4 · TP1 Hit (60% Booked) · SL Auto-Trailed +${lockR}R`;
     candidateSl = tightenSl(candidateSl, priceAtR(lockR));
   } else if (peakR >= 0.80) {
@@ -327,23 +342,48 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     boardRow && (
       (String(boardRow.side || '').toUpperCase() === oppSide && (boardRow.triggerFired || Number(boardRow.superScore) >= 65))
       || (boardRow.context?.dir != null && ((isLong && boardRow.context.dir < 0 && boardRow.triggerDir < 0) || (!isLong && boardRow.context.dir > 0 && boardRow.triggerDir > 0)))
-      || (boardRow.reversalRisk === true && feeCovered && peakR >= 0.45)
     )
   );
+  // v21.23.6: reversalRisk (trigger.reversalRisk / context.exhausted / opposingFlow) ek
+  // RISK HINT hai — CONFIRMED flip NAHI. Strong uptrends me exhaustion flags routine
+  // fire karte the; boardFlipped inhe count karke +0.12R pe profit-book kar deta tha
+  // jabki price upar hi jata rehta tha (user: "price upar jata rehta hai tab auto close
+  // ho raha hai"). Ab ye flags SIRF SL profit-lock tighten karte hain — book NAHI.
+  const reversalRiskHint = Boolean(boardRow && (
+    boardRow.reversalRisk === true
+    || boardRow.trigger?.reversalRisk === true
+    || boardRow.context?.exhausted === true
+    || boardRow.trigger?.opposingFlow === true
+  ));
   // Only evaluate peakGivebackRatio after meaningful favorable excursion (peakR >= 0.45)
   // so microscopic +0.01R entry ticks never trigger a false giveback tighten on newly opened trades.
   const peakGivebackRatio = (peakR >= 0.45 && peakMove > 0)
     ? Math.max(0, (peakMove - favorableMove) / peakMove)
     : 0;
-  const peakPullbackReversal = peakR >= 0.50 && peakGivebackRatio >= 0.38 && feeCovered;
+  const givebackR = +(peakR - currentR).toFixed(2); // absolute giveback in R units
+  // v21.23.6 PULLBACK TOLERANCE: strong trend me chhote pullbacks NORMAL hai —
+  // "ek ek baar thoda pull back bhi hota hai". Book sirf DEEP giveback pe:
+  // >=45% of peak AND >=0.28R absolute (pehle 38% tha bina absolute floor ke —
+  // har normal pullback trade band kar deta tha).
+  const peakPullbackReversal = peakR >= 0.50 && peakGivebackRatio >= 0.45 && givebackR >= 0.28 && feeCovered;
   const trailedSlHit = candidateSl > 0 && (isLong ? ltp <= candidateSl : ltp >= candidateSl);
   const slImproved = candidateSl > 0 && currentSl > 0 && Math.abs(candidateSl - currentSl) > 1e-7 && (isLong ? candidateSl > currentSl : candidateSl < currentSl);
 
   // If mild reversal signal appears before feeCovered (either explicit boardFlipped, or giveback after peakR >= 0.45),
   // defensively tighten SL to -0.35R to prevent full SL hit
-  if ((boardFlipped || peakGivebackRatio >= 0.45) && !feeCovered && currentR > -0.30) {
+  if ((boardFlipped || reversalRiskHint || peakGivebackRatio >= 0.45) && !feeCovered && currentR > -0.30) {
     candidateSl = tightenSl(candidateSl, priceAtR(-0.35));
     stageLabel = `${stageLabel} · Defensive Reversal Tighten`;
+  }
+  // v21.23.6 REVERSAL-RISK PROFIT-LOCK (tighten ONLY — trade band NAHI hota):
+  // exhaustion/opposing-flow hint ke saath profit me ho to SL ko peak−0.50R
+  // (min +0.15R) pe lock karo — giveback protection WITHOUT closing a
+  // potentially-still-strong trend. tightenSl monotonic hai — stage locks
+  // isse loose nahi hote.
+  if (reversalRiskHint && feeCovered && peakR >= 0.45) {
+    const hintLockR = Math.max(0.15, +(peakR - 0.50).toFixed(2));
+    candidateSl = tightenSl(candidateSl, priceAtR(hintLockR));
+    stageLabel = `${stageLabel} · Reversal-Risk Profit-Lock`;
   }
 
   const reversalConfirmed = Boolean(boardFlipped || peakPullbackReversal || liveCtx.reversalConfirmed);
@@ -540,6 +580,25 @@ function _openLinked() {
 }
 function _openNotionalINR() {
   return _openLinked().reduce((a, b) => a + (Number(b.notional) || 0), 0);
+}
+/**
+ * v21.23.6: last SUCCESSFUL close epoch (persisted book se — restart-safe).
+ * Successful = net pnl > 0 YA exchange ne position band ki jab wo >=0.5R
+ * profit stage me thi (native TP/trailed-SL fills jahan row pnl null rehta
+ * hai — EXCHANGE_POSITION_CLOSED). PURGED rows kabhi count nahi hote.
+ */
+function _lastProfitCloseAt() {
+  const st = _loadState();
+  let at = 0;
+  for (const b of st.book) {
+    if (b.status !== 'CLOSED' || !Number(b.closedAt)) continue;
+    const reason = String(b.closeReason || '');
+    const success = Number(b.pnl) > 0
+      || reason.includes('PROFIT')
+      || (reason === 'EXCHANGE_POSITION_CLOSED' && Number(b.peakR) >= 0.5);
+    if (success) at = Math.max(at, Number(b.closedAt));
+  }
+  return at;
 }
 function _paperOpenSymbols(paperSummary) {
   const set = new Set();
@@ -985,6 +1044,23 @@ export async function mtfAutoTick(p = {}) {
     return out;
   }
 
+  // v21.23.6 USER SPEC: successful close ke BAAD LIVE re-entry pe 5-minute
+  // PROFIT-COOLDOWN — "jab trade successful close hone LIVE Auto trade 5 min
+  // ka cooldown lagake then phir ELITE top trade verify karke trade lagana
+  // chahiye". Cooldown ke BAAD elite-gate (neeche) hi entry allow karta hai.
+  const postSuccessCooldownMs = Math.max(0, Number(cfg.postSuccessCooldownMin ?? 5)) * 60_000;
+  if (isLiveSession && postSuccessCooldownMs > 0) {
+    const lastSuccessAt = _lastProfitCloseAt();
+    if (lastSuccessAt && now - lastSuccessAt < postSuccessCooldownMs) {
+      const leftMin = +((postSuccessCooldownMs - (now - lastSuccessAt)) / 60_000).toFixed(1);
+      out.skipped.push(`post-success cooldown: ${leftMin}m left (last profitable close ${Math.round((now - lastSuccessAt) / 60_000)}m ago — re-entry ELITE-verified only after cooldown)`);
+      const stf = _loadState();
+      stf.lastTick = { at: now, opened: out.opened.length, closed: out.closed.length, skipped: out.skipped.slice(0, 4) };
+      _persistState();
+      return out;
+    }
+  }
+
   for (const market of ['INDIA', 'CRYPTO']) {
     if (out.opened.length >= 1) break;
     if (isLiveSession && _openLinked().length >= 1) break;
@@ -1029,14 +1105,16 @@ export async function mtfAutoTick(p = {}) {
       && !r.zoneWallVeto
       && !r.counterTrend
     );
-    // In Live Auto mode, prioritize STRONG / ELITE verified signals (score >= 80 or tier STRONG/ELITE) first
-    if (isLiveExecActive && eligible.length > 0) {
+    // In Live Auto mode, v21.23.6: ELITE/STRONG (or superScore >= 80) verified
+    // signals are now REQUIRED — not just prioritized. "then phir auto trade
+    // signals me elite top trade verify karke trade lagna chahiye" — weaker
+    // eligible rows ka LIVE entry path khatam (the 1051 fallback bhi tier
+    // ELITE/STRONG/>=80 enforce karta hai, so no weaker path survives).
+    if (isLiveExecActive) {
       const strongVerified = eligible.filter(r =>
         r.tier === 'ELITE' || r.tier === 'STRONG' || Number(r.superScore) >= 80
       );
-      if (strongVerified.length > 0) {
-        eligible = strongVerified;
-      }
+      eligible = strongVerified;
       eligible.sort((a, b) =>
         ((b.directionVerified === true ? 1 : 0) - (a.directionVerified === true ? 1 : 0))
         || (((b.ollamaTrio?.approvedCount ?? 3) >= 3 ? 1 : 0) - ((a.ollamaTrio?.approvedCount ?? 3) >= 3 ? 1 : 0))

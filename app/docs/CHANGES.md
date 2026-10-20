@@ -1,5 +1,29 @@
 # Changelog
 
+## v21.23.6 — AUTO-TRADE PROFIT MAXIMIZATION (strong-trend premature-close cures + 5-min post-success cooldown + LIVE elite-only re-entry) (2026-10-20)
+
+**User ask: "TP1/TP2 + SL Trail + Reversal Profit-Book smartly hona chahiye — trade TP1 or TP2 hone par SL trail TOP me (long) / SHORT me utna NEECHE ho. Ek ek baar thoda pull back hota hai — SL trail smartly adjust karna chahiye, hogye utna jyada se jyada profit book ho. Strong signal LONG pe jab price UPAR jata rehta hai trade AUTO CLOSE ho raha hai (short me bhi thode profit pe) — sab smartly superfast manage karo. Aur jab trade successful close ho, LIVE auto trade pe 5 min COOLDOWN lagake phir ELITE top trade VERIFY karke hi lagana chahiye."**
+
+### ROOT CAUSES (kyon strong trends me trades jaldi band ho rahe the — 3 concrete)
+- **R1 — reversalRisk ko CONFIRMED flip gina ja raha tha**: `evaluateActiveTradeDeepMonitor` ke `boardFlipped` me `(boardRow.reversalRisk === true && feeCovered && peakR >= 0.45)` clause tha. Board ka `reversalRisk` = `trigger.reversalRisk || context.exhausted || opposingFlow` (mtfDualBoard.js) — ye flags STRONG trends me ROUTINE fire hote hai (overbought exhaustion jaise hi strong moves ka lakhshan hai). Har strong run +0.45R pe khelte hi flip samjha → +0.12R pe profit-book → "price upar jata rehta hai tab trade auto close ho raha hai"
+- **R2 — 38% peak-giveback har normal pullback pe trade band kar deta tha** (koi absolute floor nahi): strong trend me "ek ek baar thoda pull back" NORMAL hai — 38% ratio chhote peaks pe sirf ~0.2R wiggle ke barabar tha
+- **R3 — trail bahut tight tha**: Stage 5 chandelier 0.30R + Stage 4 giveback 0.32R — normal pullback in bhi SL trigger kar deta tha
+
+### FIXED — THE PROFIT MAXIMIZATION ENGINE (concrete)
+1. **R1 FIX — risk hint ≠ confirmed flip**: `boardFlipped` me reversalRisk clause REMOVED. Ab `reversalRisk`/`exhausted`/`opposingFlow` = `reversalRiskHint` → **SIRF SL profit-lock tighten** (peak−0.50R, min +0.15R; pre-fee hone par defensive −0.35R) — trade band NAHI hota. Book ab SIRF: (a) TRUE flip (board side actually flipped + triggerFired/superScore≥65), (b) deep giveback, (c) TP2
+2. **R2 FIX — pullback tolerance**: peak-giveback book ab **BOTH** deep hona chahiye — ≥45% of peak AND ≥0.28R absolute. Chhote wiggles survive; asli reversal book hota hai. Reversal Profit-Book intact (TRUE flip +0.12R pe bhi book — flip = trend over)
+3. **R3 FIX — wider profitable trails**: Stage 5 chandelier 0.30R→**0.50R** (floor TP1/+1.0R pe hi hai — runner ab normal pullbacks me zinda rehta hai TP2 tak), Stage 4 giveback 0.32R→**0.45R** (TP1 floor +0.65R as-is). Monotonic ratchet preserve — SL kabhi loose nahi hota
+4. **TP1/TP2 SL-trail direction LOCKED (user spec)**: TP1 hit LONG → SL entry+0.65R UPAR; SHORT → entry−0.65R NEECHE (profit locked above/below entry, exchange ko liveUpdateSl se sync hota hai as before)
+
+### NEW GATES (user spec)
+5. **POST-SUCCESS 5-MIN PROFIT-COOLDOWN (LIVE sessions)**: `postSuccessCooldownMin: 5` (config, 0 = OFF, clamp 0..120). Successful close = pnl > 0 YA 'PROFIT' reason YA exchange-closed-in-≥0.5R-profit-stage (native TP/trailed-SL fills — pnl null wale EXCHANGE_POSITION_CLOSED). Cooldown me tick clear skipped reason deta hai ("post-success cooldown: X.Xm left"); loss-close/PURGED kabhi cooldown nahi lagate; PAPER session unaffected; restart-safe (persisted book se compute)
+6. **LIVE ELITE-ONLY ENTRY**: live session me eligible rows ab REQUIRE karte hai tier ELITE/STRONG ya superScore ≥ 80 ("prioritize" se "REQUIRE" kiya). Hybrid siteLiveActive mode me pehle weak rows paper-mirror open kar leti thi — ab block. Strict `executionMode:'live'` ka open-loop gate (v21.22.0) consistent hai already. PAPER mode UNCHANGED. Cooldown ke BAAD bhi entry sirf elite-verified signal pe — fallback path bhi tier enforce karta hai
+
+### TESTS
+- Naya `profitTrailUpgrade21236.test.ts` — **26 locks**: R1 (reversalRisk no-book + profit-lock tighten + TRUE-flip still books + defensive pre-fee), TP1/TP2 trail direction (long UPAR/short NEECHE exact 0.65R), TP2 full book, monotonic ratchet seq, R2 (25% giveback HOLD / 50%-but-0.25R-absolute HOLD / deep 50%+0.8R BOOK), R3 chandelier 0.50R exact, G1 cooldown (2m BLOCK / 6m OPEN / exchange-profit counts / loss-close no-block / PURGED no-block / =0 OFF / paper-session unaffected), G2 elite-only (ACTION-tier hybrid blocked / STRONG opens / paper unchanged), source pins (old clause GONE + constants + gates)
+- v2122 test 12 honest update: re-entry tick clock ≥ close+5min (naya cooldown user spec hai — pehle 20s baad re-entry hota tha)
+- **219 files / 4008 tests PASS** (3982 + 26), tsc 0, lint 0, dist 21.23.6, check:routes PASS
+
 ## v21.23.5 — COINDCX ULTRAFAST WS LIVE-CANDLE OVERLAY (Yahoo 15m → live-exchange prints) (2026-10-20)
 
 **User ask: "ye Yahoo 15m विशेष रूप से — D1 isko direct CoinDCX Ultrafast websockets se replace nhi kar sakte kya — hota hai tho kardo accurately."**

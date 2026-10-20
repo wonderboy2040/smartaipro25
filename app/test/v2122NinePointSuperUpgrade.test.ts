@@ -911,13 +911,16 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
     expect(mtfAutoStatus().openCount).toBe(0);
 
     // 5. Now that the 1st trade has finished, the next tick opens the next Verified Strong trade (ETH)!
+    //    v21.23.6: successful close ke BAAD 5-min post-success PROFIT-COOLDOWN laga hai
+    //    (user spec) — isliye tick ka clock >= close(+180s)+5min advance kiya.
+    //    Pehle (+200s, sirf 20s baad) hota to cooldown block kar deta.
     const tick3 = await mtfAutoTick({
       boards: { CRYPTO: { ...twoStrongBoard, rows: [twoStrongBoard.rows[1]] } },
       walletEquityINR: 3000,
       siteLiveActive: true,
       fx: 102,
       usdtQuotes: { ETH: 2500 },
-      now: Date.now() + 200_000,
+      now: Date.now() + 520_000,
       paper: {
         getPaperSummary: () => ({ open: openPaperList }),
         openPaperTrade: (input: { symbol: string; market: string }) => {
