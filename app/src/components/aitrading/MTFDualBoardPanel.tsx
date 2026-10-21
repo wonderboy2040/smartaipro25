@@ -749,7 +749,9 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             const scorePct = Math.max(2, Math.min(100, Number(r.superScore) || 0));
             const key = `${r.symbol}-${r.mode}`;
             const open = !!expanded[key];
-            const canPaper = r.ok && (r.side === 'LONG' || r.side === 'SHORT') && p?.entry && p?.stopLoss && p?.t1 && !r.counterHtf;
+            const canPaper = r.ok && (r.side === 'LONG' || r.side === 'SHORT') && p?.entry && p?.stopLoss && p?.t1
+              && !r.counterHtf && r.ensembleSignalAvailable !== false
+              && r.directionVerified === true && r.triggerFired === true && r.autoEligible !== false;
             const isRowUsd = r.quoteCcy === 'USDT' || r.quoteCcy === 'USD';
             const rowCcyPrefix = isRowUsd ? '$' : '₹';
             const assetTag = r.assetClass === 'METALS' || r.symbol === 'XAU' || r.symbol === 'XAG'
@@ -797,6 +799,13 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                           className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-red-500/30 text-red-100 border border-red-400/70"
                           title={`Cross-Engine Direction Conflict: Board Ensemble says ${oppBoardSide} (${r.signals?.board?.aiScore ?? '—'}) while MTF Dual Board says ${r.side} — capped ≤64 & blocked from auto-entry`}>
                           ⚠ BOARD: {oppBoardSide}{r.signals?.board?.aiScore != null ? ` ${r.signals.board.aiScore}` : ''} vs MTF: {r.side}
+                        </span>
+                      )}
+                      {r.ensembleSignalAvailable === false && (
+                        <span data-testid={`mtf-ensemble-warming-${r.symbol}`}
+                          className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-amber-500/20 text-amber-200 border border-amber-400/60"
+                          title="Main AI-BOARD ensemble is missing, non-actionable, or too weak for this scan — PAPER/LIVE entries are blocked until cross-engine confirmation is ready">
+                          AI ENSEMBLE NOT READY
                         </span>
                       )}
                       {!isPakka && r.pakkaDirectionLabel?.startsWith('CONFLICT-') && (

@@ -14,7 +14,7 @@
 //     (fake score nahi banta)
 // ============================================================
 import { describe, it, expect } from 'vitest';
-import { fuseDualTf, dualAutoCandidates, buildEarlyRadar, DUAL_FUSE_WEIGHTS, __clearDualBoardCaches } from '../server/ai/mtfDualBoard.js';
+import { fuseDualTf, dualAutoCandidates, mtfProEntryGate, buildEarlyRadar, DUAL_FUSE_WEIGHTS, __clearDualBoardCaches } from '../server/ai/mtfDualBoard.js';
 
 /** A clean, fully-confirmed LONG plan fixture (planner-shaped). */
 function planFixture(over = {}) {
@@ -79,6 +79,21 @@ describe('fuseDualTf — superintelligence fuse', () => {
     const f = fuseDualTf({ symbol: 'TESTCO', market: 'INDIA', boardSig, plan: planFixture(), snap, modeId: 'INTRADAY' });
     expect(f.counterHtf).toBe(false);
     expect(f.autoEligible).toBe(true);
+  });
+
+  it('board ensemble opposite side hard-vetoes direction verification and auto', () => {
+    const bearSnap = { ...snap, consensus: 'BEARISH', htfBias: 'BEARISH', ltfTrigger: 'BEARISH' };
+    const p = planFixture({
+      side: 'SHORT', dir: -1, bias: 'SHORT',
+      context: { ...planFixture().context, dir: -1, trend: 'DOWN', structure: 'LH-LL' },
+      trigger: { ...planFixture().trigger, macdHist: -0.4 },
+      plan: { entry: 100, stopLoss: 100.8, t1: 99.2, t2: 98.4, netRR: { t1: 0.8, t2: 1.7 } },
+    });
+    const f = fuseDualTf({ symbol: 'ETH', market: 'CRYPTO', boardSig, plan: p, snap: bearSnap, modeId: 'INTRADAY' });
+    expect(f.boardSideConflict).toBe(true);
+    expect(f.directionVerified).toBe(false);
+    expect(f.autoEligible).toBe(false);
+    expect(f.autoBlockers.some(b => b.includes('board ensemble side LONG'))).toBe(true);
   });
 
   it('TF-fit MISMATCH caps at 70 and blocks the row', () => {
@@ -241,6 +256,70 @@ describe('dualAutoCandidates — the pick sift', () => {
 
   it('__clearDualBoardCaches is safe', () => {
     expect(() => __clearDualBoardCaches()).not.toThrow();
+  });
+});
+
+describe('mtfProEntryGate - manual PAPER/LIVE parity with auto quality gates', () => {
+  const proRow = (over = {}) => ({
+    ok: true, side: 'LONG', superScore: 82, tier: 'STRONG',
+    directionVerified: true, triggerFired: true, counterHtf: false, counterTrend: false,
+    autoEligible: true, autoBlockers: [], ensembleSignalAvailable: true,
+    plan: { entry: 100, stopLoss: 99, t1: 101, t2: 102 },
+    ...over,
+  });
+  const mainLong = (over = {}) => ({
+    side: 'LONG', grade: 'STRONG', confidence: 84,
+    mtf: { htfBias: 'BULLISH' }, signalAge: { ageMs: 60 * 60_000 },
+    verify: { veto: false, action: 'BUY' },
+    ...over,
+  });
+
+  it('allows a verified, triggered, ensemble-confirmed row', () => {
+    const g = mtfProEntryGate(proRow(), { mainSignal: mainLong() });
+    expect(g.ok).toBe(true);
+    expect(g.blockers).toEqual([]);
+  });
+
+  it('blocks the id-84 class: technical SHORT vs stable main LONG', () => {
+    const shortRow = proRow({ side: 'SHORT', plan: { entry: 100, stopLoss: 101, t1: 99, t2: 98 } });
+    const g = mtfProEntryGate(shortRow, { mainSignal: mainLong() });
+    expect(g.ok).toBe(false);
+    expect(g.blockers.some(b => b.includes('cross-engine veto'))).toBe(true);
+  });
+
+  it('blocks unverified / trigger-pending rows even when the plan looks complete', () => {
+    const pending = proRow({
+      directionVerified: false, triggerFired: false, autoEligible: false,
+      autoBlockers: ['direction not PAKKA verified', 'trigger fire pending'],
+    });
+    const g = mtfProEntryGate(pending, { mainSignal: mainLong() });
+    expect(g.ok).toBe(false);
+    expect(g.blockers).toEqual(expect.arrayContaining(['direction not PAKKA verified', 'trigger fire pending']));
+  });
+
+  it('fails closed when the main ensemble signal is unavailable', () => {
+    const g = mtfProEntryGate(proRow({ ensembleSignalAvailable: false }), { mainSignal: null });
+    expect(g.ok).toBe(false);
+    expect(g.blockers.some(b => b.includes('ensemble signal unavailable'))).toBe(true);
+    expect(g.blockers.some(b => b.includes('ensemble signal missing'))).toBe(true);
+  });
+
+  it('blocks a fresh main signal before its stability window', () => {
+    const g = mtfProEntryGate(proRow(), { mainSignal: mainLong({ signalAge: { ageMs: 30_000 } }) });
+    expect(g.ok).toBe(false);
+    expect(g.blockers.some(b => b.includes('stability confirm pending'))).toBe(true);
+  });
+
+  it('blocks a same-side but non-actionable NEUTRAL main signal', () => {
+    const g = mtfProEntryGate(proRow(), { mainSignal: mainLong({ grade: 'NEUTRAL', confidence: 5 }) });
+    expect(g.ok).toBe(false);
+    expect(g.blockers.some(b => b.includes('grade NEUTRAL'))).toBe(true);
+    expect(g.blockers.some(b => b.includes('confidence 5 < 60'))).toBe(true);
+  });
+
+  it('auto candidates also reject rows without ensemble context', () => {
+    const out = dualAutoCandidates([proRow({ ensembleSignalAvailable: false })], { minScore: 75 }, { openSymbols: new Set(), lastEntryAt: {} });
+    expect(out[0].autoPickBlockers.some(b => b.includes('ensemble signal unavailable'))).toBe(true);
   });
 });
 describe('v21.16.0 — cost/noise-stop gates (live-test regression)', () => {

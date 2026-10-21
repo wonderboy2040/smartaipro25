@@ -212,7 +212,7 @@ import {
 import { dhanConnect, dhanDisconnect, dhanConnected, dhanProfile, scripMasterStatus } from './dhan.js';
 import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 // v21.16.0 + v21.20.0 MTF SIGNALS BOARD (Dual-Timeframe) + AUTO-LINK engine
-import { getDualMtfBoard, buildDualRow, dualAutoCandidates, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
+import { getDualMtfBoard, buildDualRow, dualAutoCandidates, mtfProEntryGate, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
 import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isGenuinelyTradedEntry, isLiveAttemptBackoffActive } from './mtfAutoLink.js';
 // v21.23.1: cross-engine direction-lock release-on-close sweeper (directionLock.js)
 import { reconcileDirectionLocks } from './directionLock.js';
@@ -351,6 +351,26 @@ export function registerAITradingRoutes(app, deps) {
     OPENAI_COMPAT,
     getTradingConfig: () => { try { return loadConfig(); } catch { return {}; } },
   });
+
+  const mainSignalForEntry = async (market, symbol) => {
+    const scanMarket = market === 'CRYPTO' ? 'FUTURES' : market;
+    const deps = depsForSignals();
+    let base = await getSignals(scanMarket, deps, { warmOnly: true }).catch(() => null);
+    if (!base?.signals?.length) {
+      base = await Promise.race([
+        getSignals(scanMarket, deps).catch(() => null),
+        new Promise(resolve => { const t = setTimeout(() => resolve(null), 5_000); t.unref?.(); }),
+      ]);
+    }
+    const canon = (v) => normalizeLinkSymbol(String(v || '').toUpperCase().trim().replace(/^B-/, ''), market);
+    const wantRaw = String(symbol || '').toUpperCase().trim();
+    const want = canon(wantRaw);
+    const list = Array.isArray(base?.signals) ? base.signals : [];
+    return list.find(s => {
+      const raw = String(s?.symbol || '').toUpperCase().trim();
+      return raw === wantRaw || canon(raw) === want;
+    }) || null;
+  };
 
   // v6.5: telegram — secrets WIN over env; one resolver, one sender.
   // v20.7.8 [L7]: escape client-derived fields in parse_mode:'HTML'
@@ -883,10 +903,19 @@ export function registerAITradingRoutes(app, deps) {
       const holdMin = body.hold != null ? Number(body.hold) : cfg.holdMin;
       if (!symbol) return jsonError(res, 400, 'symbol required');
       const fxLive = await mtfLiveFx();
-      const row = await buildDualRow({ symbol, market, modeId: mode, holdMin, fx: fxLive }).catch(() => null);
+      const mainSignal = await mainSignalForEntry(market, symbol);
+      const row = await buildDualRow({ symbol, market, modeId: mode, holdMin, fx: fxLive, boardSig: mainSignal }).catch(() => null);
       if (!row || !row.ok) return jsonError(res, 404, `dual-board row not found for ${symbol} (abhi scan me nahi hai)`);
       if (!(row.side === 'LONG' || row.side === 'SHORT') || !row.plan?.entry || !row.plan?.stopLoss || !row.plan?.t1) {
         return jsonError(res, 400, `${symbol}: tradeable side/levels nahi hain (bias ${row.bias || 'WAIT'})`);
+      }
+      const gate = mtfProEntryGate(row, {
+        mainSignal,
+        minScore: Math.max(65, Number(cfg.minScore) || 75),
+      });
+      if (!gate.ok) {
+        const gateMsg = `${symbol}: PAPER ${row.side} blocked - ${gate.blockers.join(' | ')}`;
+        return res.status(409).json({ ok: false, blocked: true, error: gateMsg, reason: gateMsg, blockers: gate.blockers, gate });
       }
       if (row.counterHtf) {
         const htfMsg = `${symbol}: PAPER ${row.side} blocked — 1d+4h HTF bias ${row.htfBias || 'opposite'} is against this side (counter-HTF, capped WATCH)`;
@@ -919,7 +948,13 @@ export function registerAITradingRoutes(app, deps) {
         symbol: baseSym, direction: row.side, entry, qty, stopLoss: sl, target1: t1, target2: t2,
         market: execMarket,
         source: 'mtf-board-ui',
-        sourceMeta: { score: row.superScore, tier: row.tier, mode: row.mode, holdMin: row.holdMin, superSymbol: row.symbol },
+        sourceMeta: {
+          score: row.superScore, tier: row.tier, mode: row.mode, holdMin: row.holdMin, superSymbol: row.symbol,
+          directionVerified: row.directionVerified === true, triggerFired: row.triggerFired === true,
+          htfBias: row.htfBias ?? null, mainSignalSide: mainSignal?.side ?? null,
+          mainSignalGrade: mainSignal?.grade ?? null, mainSignalConfidence: mainSignal?.confidence ?? null,
+          entryGate: 'PRO_V1',
+        },
         label: `MTF BOARD · ${row.tier} ${row.superScore} · ${row.label} ${row.holdMin}m · ${isUsd ? 'USDT' : '₹'}`,
       });
       if (r0?.error) return jsonError(res, 400, r0.error);
@@ -968,7 +1003,8 @@ export function registerAITradingRoutes(app, deps) {
       if (!symbol) return jsonError(res, 400, 'symbol required');
 
       const fxLive = await mtfLiveFx();
-      const row = await buildDualRow({ symbol, market, modeId: mode, holdMin, fx: fxLive }).catch(() => null);
+      const mainSignal = await mainSignalForEntry(market, symbol);
+      const row = await buildDualRow({ symbol, market, modeId: mode, holdMin, fx: fxLive, boardSig: mainSignal }).catch(() => null);
       if (!row || !row.ok) {
         return jsonError(res, 404, `MTF Dual Board row not found for ${symbol}`);
       }
@@ -981,6 +1017,14 @@ export function registerAITradingRoutes(app, deps) {
       const side = freshRowSide || requestedSide || '';
       if (side !== 'LONG' && side !== 'SHORT') {
         return jsonError(res, 400, `${symbol}: directional signal (LONG/SHORT) required`);
+      }
+      const proGate = mtfProEntryGate(row, {
+        mainSignal,
+        minScore: Math.max(65, Number(cfg.minScore) || 75),
+      });
+      if (!proGate.ok) {
+        const gateMsg = `${symbol}: LIVE order blocked - ${proGate.blockers.join(' | ')}`;
+        return res.status(409).json({ ok: false, blocked: true, error: gateMsg, reason: gateMsg, blockers: proGate.blockers, gate: proGate });
       }
       const dirGateHits = [];
       if (row.counterHtf) dirGateHits.push(`1d+4h HTF bias ${row.htfBias || 'opposite'} against ${side}`);

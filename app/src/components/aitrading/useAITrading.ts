@@ -990,6 +990,7 @@ export interface MtfDualRow {
   drivers?: string[]; gates?: string[];
   components?: Array<{ k: string; w: number; v: number; contrib: number | null }>;
   autoEligible: boolean; autoBlockers: string[]; autoPickBlockers?: string[];
+  ensembleSignalAvailable?: boolean;
   plan?: { entry?: number | null; entryZoneLow?: number | null; entryZoneHigh?: number | null; pullbackEntry?: number | null; breakoutEntry?: number | null; triggerLevel?: number | null; stopLoss?: number | null; stopPct?: number | null; t1?: number | null; t2?: number | null; netRR?: { t1?: number | null; t2?: number | null }; qty?: number | null; wideStopNote?: string | null; chandelierStop?: number | null } | null;
   context?: { struct?: string; rsi?: number | null; adx?: number | null; atrPct?: number | null; supertrend?: string | null; note?: string } | null;
   trigger?: { volRatio?: number | null; bodyPct?: number | null; rsi?: number | null; patterns?: string[]; opposingFlow?: boolean; reversalRisk?: boolean; postPeakTrap?: boolean; rangePct?: number | null; pullbackReclaim?: boolean } | null;

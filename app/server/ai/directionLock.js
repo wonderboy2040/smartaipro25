@@ -206,6 +206,7 @@ export function resolveDirection({
   if (boardOpposes) conflicts.push(`board ensemble side ${boardSideRaw} ≠ MTF side ${side} (direction conflict)`);
   if (svaOpposes) conflicts.push('SVA verifier says FLIP / opposite side');
   if (councilHardNo) conflicts.push(`AI council ${councilV} (hard disagree)`);
+  if (mtf6Opposes) conflicts.push(`MTF-6 bias ${mtf6Bias} against ${side} (${mtf6?.agreementPct}% agreement)`);
   if (lockConflict && lockCheck.reason) conflicts.push(lockCheck.reason);
 
   const alignedOk = dualAligned != null ? Boolean(dualAligned) : Boolean(plan?.alignedWithContext !== false);
@@ -221,8 +222,8 @@ export function resolveDirection({
     && !zoneWallVeto
     && indCount >= 6
   );
-  const verified = Boolean(baseVerified && !boardOpposes && !svaOpposes && !councilHardNo && !lockConflict);
-  const hasConflict = Boolean(boardOpposes || svaOpposes || councilHardNo || lockConflict);
+  const verified = Boolean(baseVerified && !boardOpposes && !svaOpposes && !councilHardNo && !mtf6Opposes && !lockConflict);
+  const hasConflict = Boolean(boardOpposes || svaOpposes || councilHardNo || mtf6Opposes || lockConflict);
   const label = verified
     ? `PAKKA ${side}`
     : side

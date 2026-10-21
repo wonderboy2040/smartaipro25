@@ -1734,6 +1734,7 @@ export async function mtfAutoTick(p = {}) {
     let eligible = picks.filter(r =>
       r.autoPickBlockers.length === 0
       && (r.side === 'LONG' || r.side === 'SHORT')
+      && r.ensembleSignalAvailable !== false
       && r.directionVerified !== false
       && !r.reversalRisk
       && !r.trigger?.reversalRisk
@@ -1768,6 +1769,7 @@ export async function mtfAutoTick(p = {}) {
     if (eligible.length === 0 && isLiveExecActive && _openLinked().length === 0) {
       eligible = picks.filter(r =>
         (r.side === 'LONG' || r.side === 'SHORT')
+        && r.ensembleSignalAvailable !== false
         && r.directionVerified === true
         && r.triggerFired === true
         // v21.23.10 [THRASH-CURE HOLE #2]: ye fallback autoPickBlockers BYPASS

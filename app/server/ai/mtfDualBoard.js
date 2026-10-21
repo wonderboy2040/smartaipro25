@@ -249,7 +249,12 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
   if (lockOpposes) {
     score -= 12;
     cap = cap == null ? 64 : Math.min(cap, 64);
-    gates.push(`${lockCheck.reason} — capped 64`);
+    gates.push(`${lockCheck.reason} �?" capped 64`);
+  }
+  if (dirResolution.mtf6Opposes) {
+    score -= 12;
+    cap = cap == null ? 64 : Math.min(cap, 64);
+    gates.push(`MTF-6 bias ${snap?.htfBias || snap?.consensus || 'opposite'} against ${side} - conflict, capped 64`);
   }
 
   if (trapVeto) {
@@ -296,7 +301,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
   const pWinCalibrated = (wp && wp.calibrated && Number.isFinite(Number(wp.pWin))) ? Number(wp.pWin) : null;
   const winRatePct = (() => {
     if (pWinCalibrated != null) return Math.round(Math.min(90, Math.max(40, pWinCalibrated)));
-    if (trapVeto || zoneWallVeto || boardOpposes || svaOpposes || councilHardNo || lockOpposes || counterHtf) {
+    if (trapVeto || zoneWallVeto || boardOpposes || svaOpposes || councilHardNo || lockOpposes || counterHtf || dirResolution.mtf6Opposes) {
       return Math.min(62, Math.max(48, Math.round(45 + score * 0.25)));
     }
     if (dualAligned && !reversalRisk && score >= 80 && heuristicConfluencePct != null && heuristicConfluencePct >= 75) return Math.min(85, Math.round(55 + score * 0.30));
@@ -339,6 +344,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
   if (fit !== 'GOOD' && fit !== 'OK') blockers.push(`TF-fit ${fit || 'unknown'} (GOOD/OK chahiye)`);
   if (plan?.counterTrend) blockers.push('counter-trend');
   if (counterHtf) blockers.push(`1d+4h HTF bias ${snap?.htfBias} against ${side} (counter-HTF)`);
+  if (dirResolution.mtf6Opposes) blockers.push(`MTF-6 bias ${snap?.htfBias || snap?.consensus} against ${side} (${snap?.agreementPct}% agreement)`);
   if (boardOpposes) blockers.push(`board ensemble side ${boardSideRaw} ≠ MTF side ${side} (direction conflict)`);
   if (svaOpposes) blockers.push('SVA verifier says FLIP / opposite side');
   if (councilHardNo) blockers.push(`AI council ${rawCouncilV} (hard disagree)`);
@@ -372,7 +378,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
     { id: 'priceAction', label: '8. Price Action (HH-HL / Candles)', aligned: !reversalRisk && dualAligned },
   ];
 
-  const finalDirectionVerified = Boolean(directionVerified && !boardOpposes && !svaOpposes && !councilHardNo && !lockOpposes);
+  const finalDirectionVerified = Boolean(directionVerified && !boardOpposes && !svaOpposes && !councilHardNo && !lockOpposes && !dirResolution.mtf6Opposes);
 
   return {
     symbol, market, mode: modeId,
@@ -389,7 +395,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
     directionResolution: dirResolution,
     pakkaDirectionLabel: finalDirectionVerified && (side === 'LONG' || side === 'SHORT')
       ? `PAKKA ${side}`
-      : (side ? (boardOpposes || svaOpposes || councilHardNo || lockOpposes ? `CONFLICT-${side}` : `WAIT-${side}`) : 'NEUTRAL'),
+      : (side ? (boardOpposes || svaOpposes || councilHardNo || lockOpposes || dirResolution.mtf6Opposes ? `CONFLICT-${side}` : `WAIT-${side}`) : 'NEUTRAL'),
     trapVeto,
     zoneWallVeto,
     worldIndicatorsMeasured: Boolean(worldInd),
@@ -625,6 +631,12 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
       zeroLossRule: 'T1/T2 auto profit book + dynamic SL trail + confirmed reversal exit above round-trip fees',
     } : null,
     leverageRule: { below10k: 10, above10k: 5, thresholdINR: 10000, walletDeployPct: 95 },
+    ensembleSignalAvailable: Boolean(
+      boardSig
+      && (boardSig.side === 'LONG' || boardSig.side === 'SHORT')
+      && ['ACTION', 'STRONG', 'ELITE'].includes(String(boardSig.grade || '').toUpperCase())
+      && Number(boardSig.confidence) >= 60
+    ),
     signals: {
       board: boardSig ? {
         side: boardSig.side ?? null,
@@ -987,6 +999,88 @@ export function peekDualMtfBoards(maxAgeMs = 90_000) {
 // ------------------------------------------------------------
 // 4) AUTO-LINK SIFT — pure; execution mtfAutoLink.js karta hai
 // ------------------------------------------------------------
+export function mtfProEntryGate(row, {
+  mainSignal = null,
+  minScore = Number(SUPER_TIERS.ACTION) || 65,
+  requireMainSignal = true,
+  minMainSignalAgeMs = 5 * 60_000,
+} = {}) {
+  const blockers = [];
+  const push = (msg) => { if (msg && !blockers.includes(msg)) blockers.push(msg); };
+  const side = row?.side === 'LONG' || row?.side === 'SHORT' ? row.side : null;
+  const score = Number(row?.superScore);
+  const mainSide = mainSignal?.side === 'LONG' || mainSignal?.side === 'SHORT' ? mainSignal.side : null;
+
+  if (!row || typeof row !== 'object') {
+    return { ok: false, side: null, blockers: ['row unavailable'] };
+  }
+  if (!row.ok) push(row.error || 'plan unavailable');
+  if (!side) push('no clean LONG/SHORT side');
+  if (row.ensembleSignalAvailable === false) push('main AI-BOARD ensemble signal unavailable — fresh scan ka wait karo');
+  if (!row.directionVerified) push('direction not PAKKA verified');
+  if (row.triggerFired !== true) push('trigger fire pending');
+  if (row.counterHtf) push(`1d+4h HTF bias ${row.htfBias || 'opposite'} against ${side || 'side'}`);
+  if (row.counterTrend) push('counter-trend setup');
+  if (row.boardSideConflict) push(`main AI-BOARD ensemble ${row.boardSide || 'opposite'} vs MTF ${side || 'side'}`);
+  if (row.svaConflict) push('SVA verifier FLIP/opposite call');
+  if (row.councilConflict) push('AI council hard-no');
+  if (row.trapVeto) push('liquidity sweep / trap veto active');
+  if (row.zoneWallVeto) push('fresh supply/demand zone wall veto');
+  if (row.reversalRisk) push('action-TF reversal / exhaustion risk');
+  if (row.trigger?.opposingFlow) push('action-TF opposing flow');
+  if (row.trigger?.reversalRisk) push('action-TF rejection wick risk');
+  if (row.trigger?.postPeakTrap) push('post-peak late-entry trap');
+  if (row.trigger?.overextended) push('entry overextended / chase risk');
+  if (Number.isFinite(score) && score < minScore) push(`score ${score} < pro floor ${minScore}`);
+  if (row.autoEligible !== true) {
+    if (Array.isArray(row.autoBlockers) && row.autoBlockers.length) {
+      for (const b of row.autoBlockers) push(b);
+    } else {
+      push('auto-ready quality gates not cleared');
+    }
+  }
+  if (!(Number(row.plan?.entry) > 0) || !(Number(row.plan?.stopLoss) > 0) || !(Number(row.plan?.t1) > 0)) {
+    push('incomplete entry/SL/T1 ticket');
+  }
+
+  if (mainSignal) {
+    const mainGrade = String(mainSignal?.grade || '').toUpperCase();
+    if (!['ACTION', 'STRONG', 'ELITE'].includes(mainGrade)) {
+      push(`main AI-BOARD grade ${mainGrade || 'UNKNOWN'} actionable nahi (ACTION+ chahiye)`);
+    }
+    const mainConf = Number(mainSignal?.confidence);
+    if (Number.isFinite(mainConf) && mainConf < 60) {
+      push(`main AI-BOARD confidence ${mainConf} < 60`);
+    }
+    if (mainSide && side && mainSide !== side) {
+      push(`cross-engine veto: main AI-BOARD ${mainSide} vs MTF ${side}`);
+    }
+    const htf = String(mainSignal?.mtf?.htfBias || mainSignal?.htfBias || '').toUpperCase();
+    if ((side === 'LONG' && htf === 'BEARISH') || (side === 'SHORT' && htf === 'BULLISH')) {
+      push(`cross-engine veto: main AI-BOARD HTF ${htf} against ${side}`);
+    }
+    const mainVeto = mainSignal?.verify?.veto === true
+      || ['AVOID', 'FLIP', 'REJECT', 'STAND_ASIDE'].includes(String(mainSignal?.verify?.action || '').toUpperCase());
+    if (mainVeto) push('main AI-BOARD verifier veto');
+    const ageMs = Number(mainSignal?.signalAge?.ageMs);
+    if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs < minMainSignalAgeMs) {
+      push(`main AI-BOARD signal sirf ${Math.max(0, Math.round(ageMs / 60_000))}m old — stability confirm pending`);
+    }
+  } else if (requireMainSignal) {
+    push('main AI-BOARD ensemble signal missing — entry blocked');
+  }
+
+  return {
+    ok: blockers.length === 0,
+    side,
+    score: Number.isFinite(score) ? score : null,
+    mainSignalSide: mainSide,
+    mainSignalGrade: mainSignal?.grade ?? null,
+    mainSignalConfidence: Number.isFinite(Number(mainSignal?.confidence)) ? Number(mainSignal.confidence) : null,
+    blockers,
+  };
+}
+
 /**
  * @param {Array} rows      getDualMtfBoard rows
  * @param {object} cfg      { minScore, allowedMarkets, requireTriggerFired, ... }
@@ -1002,7 +1096,8 @@ export function dualAutoCandidates(rows, cfg = {}, ctx = {}) {
   for (const row of rows || []) {
     const reasons = [];
     if (!row?.ok) reasons.push('plan unavailable');
-    if (!(row?.superScore >= minScore)) reasons.push(`score ${row?.superScore ?? '—'} < ${minScore}`);
+    if (!(row?.superScore >= minScore)) reasons.push(`score ${row?.superScore ?? '�?"'} < ${minScore}`);
+    if (row?.ensembleSignalAvailable === false) reasons.push('main AI-BOARD ensemble signal unavailable');
     if (row?.autoBlockers?.length) reasons.push(...row.autoBlockers);
     if (openSymbols.has(String(row?.symbol || '').toUpperCase())) reasons.push('already open');
     const last = lastEntryAt[String(row?.symbol || '').toUpperCase()] || 0;
