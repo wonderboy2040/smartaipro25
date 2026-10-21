@@ -14,20 +14,25 @@
 // ============================================================
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../../utils/api';
-import { syncMirrorWithServer } from '../../utils/paperMirror';
+import { syncMirrorWithServer, ensureMirrorSyncLoop, PAPER_MIRROR_RESTORED_EVENT } from '../../utils/paperMirror';
 import type { PaperHistory, PaperSummary, PaperTrade, LiveQuote, IntradaySignal, PaperDayStats } from './types';
 
-async function fetchSummary(): Promise<PaperSummary | null> {
+// v21.23.13 [DESK-SCOPED PAPER PANEL]: `desk` prop panel ko us desk ke
+// rows tak scope karta hai — ?market= query server-side filter chalati hai
+// (detail paperTrading.js `_deskMatches` pe). undefined desk = legacy
+// unscoped behavior (sab desks — back-compat).
+async function fetchSummary(desk?: 'INDIA' | 'CRYPTO'): Promise<PaperSummary | null> {
   try {
-    const res = await apiFetch(`/api/intraday-paper`, { signal: AbortSignal.timeout(8000) });
+    const q = desk ? `?market=${encodeURIComponent(desk)}` : '';
+    const res = await apiFetch(`/api/intraday-paper${q}`, { signal: AbortSignal.timeout(8000) });
     if (res.ok) return await res.json();
   } catch { /* offline */ }
   return null;
 }
 
-async function fetchHistory(): Promise<PaperHistory | null> {
+async function fetchHistory(desk?: 'INDIA' | 'CRYPTO'): Promise<PaperHistory | null> {
   try {
-    const res = await apiFetch(`/api/intraday-paper/history?days=90`, { signal: AbortSignal.timeout(8000) });
+    const res = await apiFetch(`/api/intraday-paper/history?days=90${desk ? `&market=${encodeURIComponent(desk)}` : ''}`, { signal: AbortSignal.timeout(8000) });
     if (res.ok) return await res.json();
   } catch { /* offline */ }
   return null;
@@ -312,7 +317,11 @@ function HistorySection({ history }: { history: PaperHistory }) {
   );
 }
 
-export function PaperTradePanel({ livePrices, refreshKey, onOpenSymbolsChange }: {
+export function PaperTradePanel({ desk = null, livePrices, refreshKey, onOpenSymbolsChange }: {
+  /** v21.23.13: 'INDIA' → sirf NSE paper rows (Intraday tab); 'CRYPTO' →
+   *  crypto family rows — CoinDCX tab ka Paper Desk (MTF board PAPER
+   *  clicks ab wahin dikhenge, Intraday tab me nahi). null = all desks. */
+  desk?: 'INDIA' | 'CRYPTO' | null;
   livePrices: Record<string, LiveQuote>; refreshKey: number;
   /** v9.1: lift the open-trade symbol set to the parent tab so the Signal
    *  Board cards can badge "PAPER OPEN" (the old IntradayTab kept this
@@ -341,11 +350,22 @@ export function PaperTradePanel({ livePrices, refreshKey, onOpenSymbolsChange }:
   }, [onOpenSymbolsChange]);
 
   const load = useCallback(async () => {
-    const s = await fetchSummary();
+    const s = await fetchSummary(desk ?? undefined);
     if (s) { setSummary(s); reportSymbols(s); }
-  }, [reportSymbols]);
+  }, [reportSymbols, desk]);
 
   const loadHistory = useCallback(async () => {
+    // v21.23.13 [MIRROR DUTY SPLIT]: desk-scoped panel ka compare/restore
+    // UNSCOPED singleton loop (paperMirror.ensureMirrorSyncLoop) karta hai
+    // — scoped rows se wipe-detection galat RESTORE trigger karta. Scoped
+    // mode me yahan sirf display fetch hota hai.
+    if (desk) {
+      const [s, h] = await Promise.all([fetchSummary(desk), fetchHistory(desk)]);
+      if (s) { setSummary(s); reportSymbols(s); }
+      if (h) setHistory(h);
+      ensureMirrorSyncLoop();
+      return;
+    }
     // History fetch + device-mirror sync (guard: no overlapping runs —
     // a restore inside triggers a refresh, which re-enters here).
     if (syncingRef.current) return;
@@ -378,11 +398,25 @@ export function PaperTradePanel({ livePrices, refreshKey, onOpenSymbolsChange }:
     // reportSymbols apne aap useCallback hai ([onOpenSymbolsChange]) — identity
     // sirf parent callback badalne pe change hoti hai, to yahan koi infinite
     // re-render loop nahi banega (sirf fresh closure re-subscribe hota hai).
-  }, [reportSymbols]);
+    // v21.23.13: desk dep — scoped fetches desk badalne pe re-run karein.
+  }, [reportSymbols, desk]);
 
   useEffect(() => { loadHistory(); }, [loadHistory, refreshKey]);
   // v21.1.1 [audit D7]: unmount pe pending restored-note timer clear
   useEffect(() => () => { if (restoredNoteTimerRef.current) clearTimeout(restoredNoteTimerRef.current); }, []);
+  // v21.23.13 [SCOPED-RESTORE NOTE]: desk-scoped mode me singleton mirror
+  // loop restore karta hai — yahan note dikhane ke liye event sunte hain.
+  useEffect(() => {
+    const onRestored = () => {
+      setRestoredNote('history device-backup se recover hui');
+      if (restoredNoteTimerRef.current) clearTimeout(restoredNoteTimerRef.current);
+      restoredNoteTimerRef.current = setTimeout(() => setRestoredNote(null), 8000);
+      void load();
+      void loadHistory();
+    };
+    window.addEventListener(PAPER_MIRROR_RESTORED_EVENT, onRestored);
+    return () => window.removeEventListener(PAPER_MIRROR_RESTORED_EVENT, onRestored);
+  }, [load, loadHistory]);
 
   // Periodic refresh (open trades' server-side auto-management).
   useEffect(() => {
@@ -431,9 +465,9 @@ export function PaperTradePanel({ livePrices, refreshKey, onOpenSymbolsChange }:
         className="w-full flex items-center justify-between gap-2 px-4 py-3 hover:bg-white/[0.02]"
       >
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs font-bold text-slate-200">📈 Paper Trading Simulator</span>
+          <span className="text-xs font-bold text-slate-200">📈 Paper Trading Simulator{desk === 'CRYPTO' ? ' — CRYPTO DESK (CoinDCX USDT/USDC perps + spot)' : desk === 'INDIA' ? ' — INDIA DESK (NSE)' : ''}</span>
           <span className="px-2 py-0.5 rounded-md text-[9px] font-mono font-black bg-purple-500/15 text-purple-300 border border-purple-500/30">
-            VIRTUAL
+            {desk === 'CRYPTO' ? 'CRYPTO PAPER' : desk === 'INDIA' ? 'INDIA PAPER' : 'VIRTUAL'}
           </span>
           <span className="text-[10px] font-mono text-slate-400">
             Open {stats.openCount} • Day P&L <b className={pnlColor((stats.dayNetPnl ?? stats.dayRealizedPnl) + stats.dayUnrealizedPnl)}>

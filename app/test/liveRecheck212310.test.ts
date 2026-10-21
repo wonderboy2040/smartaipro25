@@ -343,8 +343,8 @@ describe('v21.23.10 S5 — fastEntryProbeLoop parity (backoff + metals/equitySim
 // S6 — deep-tick boardSigs parity (P0 direction guards fastest path par)
 // ---------------------------------------------------------------
 describe('v21.23.10 S6 — 15s deep-tick board ab boardSigs ke saath banta hai', () => {
-  it('deep tick getDualMtfBoard call me boardSigs pass hota hai (60s loop jaisa)', () => {
-    expect(ROUTES_SRC).toContain("const base = await getSignals(market, depsForSignals(), { warmOnly: true }).catch(() => null);\n          boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: base?.signals || [], fx: fxLive }).catch(() => null);");
+  it('deep tick getDualMtfBoard call me boardSigs pass hota hai (60s loop jaisa; v21.23.13: CRYPTO→FUTURES parity mapping)', () => {
+    expect(ROUTES_SRC).toContain("const base = await getSignals(market === 'CRYPTO' ? 'FUTURES' : market, depsForSignals(), { warmOnly: true }).catch(() => null);\n          boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: base?.signals || [], fx: fxLive }).catch(() => null);");
   });
 });
 

@@ -255,9 +255,10 @@ describe('v21.23.12 S22 — canonicalizer recent-telemetry ring (wire-drift visi
 import { runLiveDirectionCertificate } from '../server/ai/directionLiveCert.js';
 
 describe('v21.23.12 S11 — cert pass-semantics honesty (all-UNREACHABLE ≠ PASS)', () => {
-  it('payload shape: verifiedChains/unverifiedChains/wireAbsorb fields + v21.23.12 stamp', async () => {
+  it('payload shape: verifiedChains/unverifiedChains/wireAbsorb fields + current stamp', async () => {
     const r = await runLiveDirectionCertificate();
-    expect(r.version).toBe('v21.23.12');
+    // v21.23.13 honest pin bump: cert ab v21.23.13 (cdc-official chain add).
+    expect(r.version).toBe('v21.23.13');
     expect(typeof r.verifiedChains).toBe('number');
     expect(typeof r.unverifiedChains).toBe('number');
     expect(Array.isArray(r.wireAbsorb)).toBe(true);
@@ -519,9 +520,11 @@ describe('v21.23.12 S23 — /api/chart ms-unit + watchdog stamps + NaN-vote filt
     const src = read('server/index.js');
     expect(src).toContain('time: ts[i] * 1000');
   });
-  it('watchdog bat teeno stamps v21.23.12 (REM + title + banner)', () => {
+  it('watchdog bat teeno stamps current version (REM + title + banner)', () => {
     const bat = read('Start-SmartAI-Watchdog.bat');
-    expect(bat).toContain('v21.23.12');
+    // v21.23.13 honest pin bump: bat ab v21.23.13 stamped hai.
+    expect(bat).toContain('v21.23.13');
+    expect(bat).not.toContain('v21.23.12');
     expect(bat).not.toContain('v21.23.11');
     expect(bat).not.toContain('v21.23.10');
   });

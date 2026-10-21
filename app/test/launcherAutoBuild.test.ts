@@ -415,14 +415,15 @@ describe('v20.8.3 frontend stale-build visibility', () => {
     const m = VERSION_TS.match(/APP_VERSION = '([^']+)'/);
     expect(m).toBeTruthy();
     expect(m![1]).toBe(PKG.version);
-    expect(PKG.version).toBe('21.23.12'); // v21.23.12 bump (FULL-SITE DEEP RECHECK — India MTF-live wrapper arity bug cure, gauntlet-side dataDegraded veto, deep-path v21.23.4 ladder parity, India LIVE-close fill-verify, deep-monitor re-anchor lifecycle reset, crypto/futures reject-dedup + agent backoff, USDC-leg canonicalize, cert pass-semantics honesty, L2.5 seat guards sweep, orientation alias-tolerant time-read, honest confluence sweep)
+    expect(PKG.version).toBe('21.23.13'); // v21.23.13 bump (AUTO-TRADE LIVE cure — neutral-tape freshTapeAbsent hole, engine boardSigs parity, paper-quota poisoning, honest arm/creds pre-flight/idle-reason transparency; CRYPTO PAPER DESK routing — desk-scoped journal+summary+history, CoinDcxTab Paper Desk panel, SL-trail hint domain; DIRECTION HARDENING — side-strict spot/margin/browser/restore, openPaperTrade side-honest, Yahoo local sorts, cdc-official cert chain)
   });
 
-  it('Watchdog bat: v21.23.12 stamps + auto-build line + NO stale version stamps', () => {
+  it('Watchdog bat: v21.23.13 stamps + auto-build line + NO stale version stamps', () => {
     const bat = readFileSync(path.join(APP_ROOT, 'Start-SmartAI-Watchdog.bat'), 'utf8');
-    expect(bat).toContain('v21.23.12');
+    expect(bat).toContain('v21.23.13');
     // v21.23.12 [D3]: title/REM lines me STALE stamps chhupe the (banner hi
     // bumped hota tha) — console window title purana version dikhata tha.
+    expect(bat).not.toContain('v21.23.12');
     expect(bat).not.toContain('v21.23.11');
     expect(bat).not.toContain('v21.23.10');
     expect(bat).toContain('AUTO npm install');

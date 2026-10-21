@@ -60,7 +60,7 @@ function renderAiText(text: string) {
 
 // 2026 perf audit (M4): memoized — only re-renders when refreshKey changes,
 // not on every IntradayTab SSE quote tick.
-export const JournalPanel = memo(function JournalPanel({ refreshKey }: { refreshKey: number }) {
+export const JournalPanel = memo(function JournalPanel({ refreshKey, desk = null }: { refreshKey: number; desk?: 'INDIA' | 'CRYPTO' | null }) {
   const [data, setData] = useState<JournalData | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState<'eod' | 'weekly' | null>(null);
@@ -68,10 +68,13 @@ export const JournalPanel = memo(function JournalPanel({ refreshKey }: { refresh
 
   const load = useCallback(async () => {
     try {
-      const res = await apiFetch('/api/intraday-journal?days=14', { signal: AbortSignal.timeout(8000) });
+      // v21.23.13 [DESK-SCOPED]: desk set ho to ?market= filter — Intraday
+      // tab (desk="INDIA") ka NSE journal crypto paper closes se clean.
+      const q = desk ? `?days=14&market=${encodeURIComponent(desk)}` : '?days=14';
+      const res = await apiFetch(`/api/intraday-journal${q}`, { signal: AbortSignal.timeout(8000) });
       if (res.ok) setData(await res.json());
     } catch { /* offline */ }
-  }, []);
+  }, [desk]);
 
   useEffect(() => { load(); }, [load, refreshKey]);
 

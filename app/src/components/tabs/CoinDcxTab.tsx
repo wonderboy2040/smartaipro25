@@ -60,6 +60,9 @@ import { useDeepAutoRecheck, DeepFreshnessChip, DeepTransitionLog, DeepIndicator
 // v20.7.5 THE 15s SIGNAL RECHECK PANEL — every STRONG/ACTION signal's
 // live re-validation state (loop ki hi cadence par poll hota hai).
 import { SignalRecheckPanel } from '../aitrading/SignalRecheckPanel';
+// v21.23.13 CRYPTO PAPER DESK — MTF board ke 🧪 PAPER clicks ab CRYPTO tab
+// me dikhenge (pehle shared journal Intraday tab me land karta tha).
+import { PaperTradePanel } from '../intraday/PaperTradePanel';
 import { EngineHealthStrip } from '../aitrading/EngineHealthStrip';
 import { OpsHealthStrip } from '../aitrading/OpsHealthStrip';
 import { StrategyHealthPanel } from '../aitrading/StrategyHealthPanel';
@@ -270,6 +273,22 @@ export default memo(function CoinDcxTab() {
   const futWatch = useMemo(() => [...new Set([...futSyms, ...metalsSyms])], [futSyms, metalsSyms]);
   const cxLive = useCxLivePrices(true, NO_SPOT_SYMS, futWatch, globSyms);
   const liveFor = cxLive.forSignal;
+  // v21.23.13 [CRYPTO PAPER DESK]: desk-scoped paper panel (desk="CRYPTO") —
+  // MTF board PAPER trades yahan render honge. Live per-symbol map WS ticks
+  // se (FUT_BTC → BTC; TradeRow ka USDT-domain guard src 'inr' hone par row
+  // ke live-tick ko conservatively drop karta hai). paperDeskTick — MTF
+  // panel onPaperOpened par bump → panel turant re-fetch karta hai.
+  const [paperDeskTick, setPaperDeskTick] = useState(0);
+  const paperLivePrices = useMemo(() => {
+    const m: Record<string, { price: number; src?: string; ts?: number }> = {};
+    for (const [k, t] of Object.entries(cxLive.ticks || {})) {
+      if (!t || !(Number(t.price) > 0)) continue;
+      const sym = k.includes('_') ? k.slice(k.indexOf('_') + 1) : k;
+      if (!sym) continue;
+      m[sym] = { price: Number(t.price), src: t.src, ts: t.time };
+    }
+    return m;
+  }, [cxLive.ticks]);
   // honesty chip: how fresh is the newest live tick (s) + feed state
   const liveAgeS = cxLive.lastAt ? Math.max(0, Math.round((Date.now() - cxLive.lastAt) / 1000)) : null;
   // v10.14 (deep-recheck S2 #3): WS accelerator honesty — when the socket
@@ -604,7 +623,7 @@ export default memo(function CoinDcxTab() {
             market={desk === 'METALS' ? 'METALS' : desk === 'GLOBAL' ? 'GLOBALFUTURES' : 'CRYPTO'}
             canLive={desk === 'GLOBAL' ? false : canLive}
             walletINR={(state as unknown as { wallet?: { equityINR?: number } })?.wallet?.equityINR ?? state?.config?.maxOrderINR ?? null}
-            onPaperOpened={() => { void refreshPositions(); }}
+            onPaperOpened={() => { void refreshPositions(); setPaperDeskTick(x => x + 1); }}
             onExecuteLive={(row, lev) => {
               setToast({ ok: true, text: `⚡ Live CoinDCX order placed: ${row.symbol} ${row.side} (${lev}x · 100% Wallet · Full Position Control)` });
               void refreshPositions();
@@ -612,6 +631,14 @@ export default memo(function CoinDcxTab() {
             }}
             onDeep={(sym) => onDeep({ symbol: sym, market: desk === 'METALS' ? 'METALS' : 'FUTURES' } as AISignal)}
           />
+        </div>
+      </div>
+
+      {/* ============ 01p · PAPER DESK — CRYPTO (v21.23.13) ============ */}
+      <div id="cx-paper-desk" className="mt-4">
+        <SectionLabel num="01p" title="Paper Desk — CRYPTO" sub="MTF board ke 🧪 PAPER clicks ab YAHAN dikhenge (USDT/USDC perps + spot INR) · server-managed T1 50% book · trail · SL · 15:10 sqoff sirf INDIA rows pe · Intraday tab me ye rows ab nahi dikhti" />
+        <div className="mt-2.5">
+          <PaperTradePanel desk="CRYPTO" livePrices={paperLivePrices} refreshKey={paperDeskTick} />
         </div>
       </div>
 

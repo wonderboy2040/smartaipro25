@@ -2190,6 +2190,17 @@ export function recordLiveMtfBoardTrade(item = {}) {
   if (!sym) return null;
   const isPaperExec = String(item.executionMode || 'LIVE').toUpperCase() === 'PAPER';
   const execMode = isPaperExec ? 'PAPER' : 'LIVE';
+  // v21.23.13 [SIDE HONESTY — "pakka LONG/SHORT" doctrine]: deep-monitor rows
+  // pe silent `|| 'LONG'` default = wrong-side book-keeping ka vector (ek
+  // missing side poora SHORT trade LONG ki tarah manage hota — SL polarity
+  // inverted). Dual-vocab normalize + unknown pe LOUD THROW. Board rows LONG/
+  // SHORT hi speak karte hain (SIDEABLE gate) aur teeno callers fresh row.side
+  // pass karte hain — throw sirf genuine contract break pe lagega.
+  const SIDE_ALIAS_BOARD = { BUY: 'LONG', SELL: 'SHORT', LONG: 'LONG', SHORT: 'SHORT' };
+  const sideNorm = SIDE_ALIAS_BOARD[String(item.side || '').toUpperCase()] || null;
+  if (!sideNorm) {
+    throw new Error(`recordLiveMtfBoardTrade: invalid side "${item.side}" for ${sym} — LONG/SHORT (ya BUY/SELL) required; silent default v21.23.13 se mana hai (direction-honesty)`);
+  }
   const existing = st.book.find(b => b.status === 'OPEN' && b.symbol === sym);
   if (existing) {
     // v21.23.12 [RE-ANCHOR LIFECYCLE RESET]: existing OPEN row par re-anchor
@@ -2205,13 +2216,13 @@ export function recordLiveMtfBoardTrade(item = {}) {
     existing.executionMode = execMode;
     existing.traded = true;
     existing.fullControl = true;
-    existing.side = String(item.side || existing.side || 'LONG').toUpperCase();
+    existing.side = sideNorm;
     existing.peakPrice = Number(item.entry) > 0 ? Number(item.entry) : (Number(existing.entry) > 0 ? Number(existing.entry) : null);
     existing.t1Hit = false;
     existing.openedAt = Date.now();
     existing.deepMonitorStage = 'STAGE_0_INITIAL_GUARD';
     existing.deepMonitorLabel = isPaperExec ? 'Stage 0 · Paper Direction Test · SL Auto-Trail Ready' : 'Stage 0 · Initial SL Guard (Full Control)';
-    existing.trendStatus = `📡 ${existing.side === 'SHORT' ? 'BEARISH' : 'BULLISH'} LIVE WATCH (+0.00R)`;
+    existing.trendStatus = `📡 ${sideNorm === 'SHORT' ? 'BEARISH' : 'BULLISH'} LIVE WATCH (+0.00R)`;
     existing.lastExchangeSl = existing.lastExchangeSl ?? null; // re-arm safe (re-anchored SL hi push hoga)
     existing.closeReason = null;
     existing.closedAt = null;
@@ -2261,7 +2272,7 @@ export function recordLiveMtfBoardTrade(item = {}) {
     cfg,
   });
   const execMarket = isUsd ? 'FUTURES' : 'INDIA';
-  const feeBePrice = feeBreakevenFloor({ entry, side: item.side || 'LONG', market: execMarket });
+  const feeBePrice = feeBreakevenFloor({ entry, side: sideNorm, market: execMarket });
   const riskPerUnit = Math.abs(entry - sl);
   const now = Date.now();
   const rec = {
@@ -2277,7 +2288,7 @@ export function recordLiveMtfBoardTrade(item = {}) {
     execMarket,
     ccy: isUsd ? 'USDT' : 'INR',
     fxUsed: isUsd ? fxRate : null,
-    side: item.side || 'LONG',
+    side: sideNorm,
     score: item.superScore ?? 85,
     tier: item.tier || 'ELITE',
     mode: item.mode || cfg.mode || 'INTRADAY',
@@ -2300,7 +2311,7 @@ export function recordLiveMtfBoardTrade(item = {}) {
     feeBreakevenPrice: feeBePrice,
     deepMonitorStage: 'STAGE_0_INITIAL_GUARD',
     deepMonitorLabel: isPaperExec ? 'Stage 0 · Paper Direction Test · SL Auto-Trail Ready' : 'Stage 0 · Initial SL Guard (Full Control)',
-    trendStatus: `📡 ${item.side === 'SHORT' ? 'BEARISH' : 'BULLISH'} LIVE WATCH (+0.00R)`,
+    trendStatus: `📡 ${sideNorm === 'SHORT' ? 'BEARISH' : 'BULLISH'} LIVE WATCH (+0.00R)`,
     marginINR: +(qty * entry * (isUsd ? fxRate : 1) / leverage).toFixed(2),
     marginUsdt: isUsd ? +(qty * entry / leverage).toFixed(4) : null,
     riskINR: +(qty * riskPerUnit * (isUsd ? fxRate : 1)).toFixed(2),
@@ -2316,7 +2327,15 @@ export function recordLiveMtfBoardTrade(item = {}) {
     drivers: [isPaperExec ? 'Paper Direction Follow-Through Test + Ultra-Fast SL Trail' : 'Direct Live Order (100% Wallet + Full Position Control)'],
   };
   st.book.push(rec);
-  st.dayCount += 1;
+  // v21.23.13 [PAPER-QUOTA POISONING CURE]: manual PAPER board clicks auto
+  // engine ka daily trade-quota (dayCount) consume karte the — 5 paper test
+  // clicks = paper-mode quota (5) khatam = AUTO engine baaki din structurally
+  // dead, jabki ek bhi AUTO trade nahi hua tha ('auto trade lag hi nahi raha'
+  // complaint ka ek seedha vector). Ab quota sirf REAL executions khate hain:
+  // manual LIVE click (real-money budget) + mtfAutoTick ki apni entry path
+  // (wahan apna stx.dayCount += 1 hai). Manual PAPER click = practice,
+  // budget nahi.
+  if (!isPaperExec) st.dayCount += 1;
   st.perSymbolLast[sym] = now;
   _persistState();
   _logEvent(

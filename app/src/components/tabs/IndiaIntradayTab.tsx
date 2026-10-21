@@ -638,11 +638,14 @@ export default memo(function IndiaIntradayTab() {
           </button>
         </div>
         <div className="mt-2.5 space-y-3">
-          <PaperTradePanel livePrices={stream.livePrices} refreshKey={paperRefresh} onOpenSymbolsChange={handlePaperSymbols} />
+          {/* v21.23.13 [DESK-SCOPED]: desk="INDIA" — crypto tab ke MTF board
+              PAPER clicks (market FUTURES/CRYPTO rows) ab Intraday tab me
+              DIKHITE NAHI, sirf CoinDcxTab ke Paper Desk me dikhenge. */}
+          <PaperTradePanel desk="INDIA" livePrices={stream.livePrices} refreshKey={paperRefresh} onOpenSymbolsChange={handlePaperSymbols} />
           {!simple && (
             <>
               <TrackRecordPanel refreshKey={paperRefresh + trackTick} />
-              <JournalPanel refreshKey={paperRefresh + trackTick} />
+              <JournalPanel desk="INDIA" refreshKey={paperRefresh + trackTick} />
               <CommitteePanel />
             </>
           )}

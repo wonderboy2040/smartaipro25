@@ -251,9 +251,20 @@ export function registerIntradayRoutes(app, deps) {
   });
 
   // ---------------- Paper trading ----------------
-  app.get('/api/intraday-paper', (_req, res) => {
+  // v21.23.13 [DESK-SCOPED PAPER]: ?market=INDIA → sirf INDIA rows (Intraday
+  // tab ka PaperTradePanel); ?market=CRYPTO → crypto family rows (CoinDCX
+  // tab ka naya Paper Desk — MTF board PAPER clicks ab WAHIN dikhenge,
+  // Intraday tab me nahi). No param → poora shared journal (engine callers,
+  // device-mirror restore, tests — unchanged).
+  const paperMarketFilter = (q) => {
+    const m = String(q || '').trim().toUpperCase();
+    if (!m) return null;
+    if (m === 'INDIA' || m === 'CRYPTO' || m === 'FUTURES' || m === 'GLOBALFUTURES') return m;
+    return null;
+  };
+  app.get('/api/intraday-paper', (req, res) => {
     res.set('Cache-Control', 'no-store');
-    res.json(getPaperSummary());
+    res.json(getPaperSummary(paperMarketFilter(req.query.market)));
   });
 
   app.post('/api/intraday-paper', (req, res) => {
@@ -287,7 +298,7 @@ export function registerIntradayRoutes(app, deps) {
   app.get('/api/intraday-paper/history', (req, res) => {
     const days = Math.max(1, Math.min(365, parseInt(req.query.days, 10) || 90));
     res.set('Cache-Control', 'no-store');
-    res.json(getPaperHistory(days));
+    res.json(getPaperHistory(days, paperMarketFilter(req.query.market)));
   });
 
   // Device-mirror restore: the browser keeps a full copy of the trade
@@ -954,8 +965,12 @@ export function registerIntradayRoutes(app, deps) {
   // ----------------------------------------------------------
   app.get('/api/intraday-journal', (req, res) => {
     const days = Math.max(1, Math.min(90, parseInt(req.query.days, 10) || 14));
+    // v21.23.13 [DESK-SCOPED JOURNAL]: ?market=INDIA → Intraday tab ka NSE
+    // journal view crypto closes se clean; ?market=CRYPTO → crypto family.
+    const jm = String(req.query.market || '').trim().toUpperCase();
+    const jFilter = jm === 'INDIA' || jm === 'CRYPTO' || jm === 'FUTURES' || jm === 'GLOBALFUTURES' ? jm : null;
     res.set('Cache-Control', 'no-store');
-    res.json(getJournal(days));
+    res.json(getJournal(days, jFilter));
   });
 
   app.post('/api/intraday-journal/eod', async (_req, res) => {

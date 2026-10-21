@@ -324,7 +324,18 @@ export function openPaperTrade(input) {
     ? String(market).toUpperCase()
     : (isCryptoSymbolBase(sym) ? 'CRYPTO' : 'INDIA');
   if (isOption && mkt !== 'INDIA') return { error: 'Option paper trades are INDIA-market only.' };
-  const dir = direction === 'SHORT' ? 'SHORT' : 'LONG';
+  // v21.23.13 [SIDE HONESTY — "pakka LONG/SHORT" doctrine]: pehle missing/
+  // garbage direction SILENTLY 'LONG' ban jaata tha — ek SHORT-intended call
+  // bina side ke paper me LONG position ban jaati (direction-inversion ka
+  // paper-side vector). Ab dual-vocab normalize (BUY→LONG, SELL→SHORT) aur
+  // kuch bhi aur ho to HONEST ERROR — koi silent default nahi. Saare
+  // production callers (UI paper, MTF board paper, mtf-auto mirror, options
+  // premium-LONG, uc-flip) explicit direction pass karte hain.
+  const _dirIn = String(direction || '').toUpperCase();
+  const dir = _dirIn === 'LONG' || _dirIn === 'BUY' ? 'LONG'
+    : _dirIn === 'SHORT' || _dirIn === 'SELL' ? 'SHORT'
+    : null;
+  if (!dir) return { error: `Valid direction required (LONG/SHORT — ya BUY/SELL); mila: "${direction}" (v21.23.13: silent LONG default removed).` };
   const n = (v) => (typeof v === 'number' && isFinite(v) && v > 0) ? v : null;
   const e = n(entry), sl = n(stopLoss);
   const t1 = n(target1), t2 = n(target2);
@@ -783,16 +794,36 @@ export function paperSymbolsByMarket() {
   };
 }
 
-export function getPaperSummary() {
+// v21.23.13 [DESK-SCOPED PAPER DESK]: ek hi shared paper journal (`paper-
+// trades.json`) SAARE desks ko serve karta tha — Intraday tab ka PaperTradePanel
+// bina kisi market-filter ke POORE journal ko render karta tha, isliye
+// crypto tab ke MTF board PAPER click wala trade INTRADAY tab me land karta
+// tha aur crypto tab me kabhi dikhta hi nahi tha (user-reported). Ab
+// summary/history optional `marketFilter` accept karte hain:
+//   null/undefined → sab desks (internal engine callers + mirror-restore
+//                    + legacy tests — behavior unchanged)
+//   'INDIA'        → sirf INDIA rows
+//   'CRYPTO'       → crypto family (CRYPTO spot + FUTURES USDT-perp +
+//                    GLOBALFUTURES USDC-perp) = `market !== 'INDIA'`
+// Route layer (`?market=` query) UI tabs ko scope karta hai.
+const _deskMatches = (t, marketFilter) => {
+  if (marketFilter == null || String(marketFilter).trim() === '') return true;
+  const want = String(marketFilter).toUpperCase();
+  const m = _marketOfTrade(t);
+  if (want === 'INDIA') return m === 'INDIA';
+  return m !== 'INDIA'; // CRYPTO / FUTURES / GLOBALFUTURES — crypto family
+};
+
+export function getPaperSummary(marketFilter = null) {
   // v11.4 recheck: compare each trade against ITS OWN market day — INDIA
   // rows bucket on the IST day, CRYPTO rows on the UTC day. The old
   // single IST-day filter dropped every crypto trade opened (and closed)
   // in the 00:00–05:30 IST window from closedToday/dayRealizedPnl/dayNetPnl.
-  const open = _state.trades.filter(t => t.status === 'OPEN' || t.status === 'PARTIAL');
+  const open = _state.trades.filter(t => (t.status === 'OPEN' || t.status === 'PARTIAL') && _deskMatches(t, marketFilter));
   const closedToday = _state.trades.filter(
-    t => t.dayKey === dayKeyFor(_marketOfTrade(t)) && t.status === 'CLOSED'
+    t => t.dayKey === dayKeyFor(_marketOfTrade(t)) && t.status === 'CLOSED' && _deskMatches(t, marketFilter)
   );
-  const allClosed = _state.trades.filter(t => t.status === 'CLOSED');
+  const allClosed = _state.trades.filter(t => t.status === 'CLOSED' && _deskMatches(t, marketFilter));
   const sum = (arr, f) => arr.reduce((s, t) => s + (f(t) || 0), 0);
   // v11.1 GAP 3: costs are derived per trade (pure, deterministic) — the
   // same numbers _publicTrade serves, so summary and rows always agree.
@@ -888,6 +919,9 @@ function _publicTrade(t) {
     mfeR: t.mfeR ?? null, maeR: t.maeR ?? null,
     mfePrice: t.mfePrice ?? null, maePrice: t.maePrice ?? null,
     source: t.source || 'ui', sourceMeta: t.sourceMeta || null,
+    // v21.23.13: restore-side honesty — assumed direction UI me bhi dikhe
+    // (badge/chip ke liye), warna assumption invisible rehta hai.
+    ...(t.directionAssumed ? { directionAssumed: true } : {}),
     ccy: _isUsdDesk(_marketOfTrade(t)) ? (t.market === 'GLOBALFUTURES' ? 'USDC' : 'USDT') : 'INR',
     ...(costs && costs.total != null ? {
       grossPnl: +(+t.realizedPnl).toFixed(2),
@@ -961,12 +995,12 @@ async function _bootRestore() {
 // Day-grouped closed trades + win-rate stats, so the user can see
 // whether the paper-trading signal testing was actually accurate.
 // ------------------------------------------------------------
-export function getPaperHistory(days = 90) {
+export function getPaperHistory(days = 90, marketFilter = null) {
   const windowDays = Math.max(1, Math.min(365, Math.floor(days) || 90));
   const cutoff = Date.now() - windowDays * 24 * 60 * 60 * 1000;
 
   const closed = _state.trades
-    .filter(t => t.status === 'CLOSED' && (t.closedAt || t.openedAt) >= cutoff)
+    .filter(t => t.status === 'CLOSED' && (t.closedAt || t.openedAt) >= cutoff && _deskMatches(t, marketFilter))
     .sort((a, b) => (b.closedAt || b.openedAt) - (a.closedAt || a.openedAt));
 
   // Day buckets (newest first).
@@ -1057,11 +1091,33 @@ function _sanitizeRestoredTrade(raw) {
   // v21.0.6 [audit]: 15 → 20 — openPaperTrade _validateSym ke saath align
   // (BANKNIFTY51000CE 16-char contract restore pe silently drop ho raha tha).
   if (!/^[A-Z0-9&-]{2,20}$/.test(symbol)) return null;
-  const direction = raw.direction === 'SHORT' ? 'SHORT' : 'LONG';
+  // v21.23.13: direction neeche honest-resolve hota hai (entry ke BAAD —
+  // levels se inference ke liye) — purana silent 'LONG' default hata hai.
   const market = (['INDIA', 'CRYPTO', 'FUTURES', 'GLOBALFUTURES'].includes(String(raw.market || '').toUpperCase())
     ? String(raw.market).toUpperCase()
     : (isCryptoSymbolBase(symbol) ? 'CRYPTO' : 'INDIA'));
   const entry = _num(raw.entry); if (!(entry > 0)) return null;
+  // v21.23.13 [RESTORE SIDE HONESTY]: legacy mirror rows bina direction ke
+  // SILENTLY 'LONG' re-hydrate hote the — ek SHORT trade LONG ban ke ulti
+  // SL/pnl polarity ke saath aa jaata tha. Ab: (a) dual-vocab (BUY/SELL)
+  // bhi accept; (b) direction missing → row ke APNE levels se infer
+  // (openPaperTrade ka level-ordering invariant: SL entry ke UPAR = SHORT
+  // structure, NEECHE = LONG structure); (c) levels bhi ambiguous → hi
+  // legacy LONG assume, par `directionAssumed:true` stamp ke saath —
+  // drop karna user-history loss hota (worse); stamp se downstream isse
+  // honestly treat kare.
+  const _dirRaw = String(raw.direction || '').toUpperCase();
+  const _slForSide = _num(raw.stopLoss);
+  let dirResolved = _dirRaw === 'SHORT' || _dirRaw === 'SELL' ? 'SHORT'
+    : _dirRaw === 'LONG' || _dirRaw === 'BUY' ? 'LONG'
+    : null;
+  let directionAssumed = false;
+  if (!dirResolved) {
+    directionAssumed = true;
+    dirResolved = (_slForSide != null && _slForSide > 0 && _slForSide !== entry)
+      ? (_slForSide > entry ? 'SHORT' : 'LONG')
+      : 'LONG';
+  }
   const qty = _normQty(_num(raw.qty), market); if (!(qty >= (_isUsdDesk(market) ? 0.0001 : 1)) || qty > 100000) return null;
   const status = ['OPEN', 'PARTIAL', 'CLOSED'].includes(raw.status) ? raw.status : 'CLOSED';
   const openedAt = _num(raw.openedAt, Date.now());
@@ -1078,13 +1134,14 @@ function _sanitizeRestoredTrade(raw) {
     : Math.min(qty, _normQty(_num(raw.remainingQty, qty), market));
   const realizedPnl = +_num(raw.realizedPnl).toFixed(2);
   const t = {
-    id, symbol, market, direction,
+    id, symbol, market, direction: dirResolved,
+    ...(directionAssumed ? { directionAssumed: true } : {}),
     ...(() => {
       const rSl = _num(raw.stopLoss, entry);
       const rT1 = _num(raw.target1) > 0 ? _num(raw.target1) : null;
       const rT2 = _num(raw.target2) > 0 ? _num(raw.target2) : null;
       const tList = [rT1, rT2].filter(x => x != null && x > 0);
-      const lad = pRoundLadder({ side: direction, entry, stopLoss: rSl, targets: tList });
+      const lad = pRoundLadder({ side: dirResolved, entry, stopLoss: rSl, targets: tList });
       return {
         entry: lad.entry,
         stopLoss: lad.stopLoss,

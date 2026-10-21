@@ -525,6 +525,16 @@ function cxSelectPairScript(pair) {
 //   (h) qty ROUND-DOWN (floor) — nearest-round se margin overshoot
 //       kabhi nahi ("insufficient margin" reject se bachta hai).
 function cxPlaceOrderScript({ side, price, totalINR, leverage, useMargin, qty, livePrice }) {
+  // v21.23.13 [SIDE-STRICT — build-time]: page-script me `=== 'SHORT' ?
+  // 'SHORT' : 'LONG'` normalize tha — garbage/undefined side SILENTLY 'LONG'
+  // (buy-click) ban jaata tha. Ab DUAL-VOCAB normalize + unknown pe LOUD
+  // THROW — wrong-side browser click ka chance hi zero (caller
+  // proTraderAuto :890 AMBIGUOUS-FAILED journal + cooldown karta hai).
+  const _cxSideAlias = { LONG: 'LONG', BUY: 'LONG', SHORT: 'SHORT', SELL: 'SHORT' };
+  const cxSide = _cxSideAlias[String(side || '').toUpperCase()] || null;
+  if (!cxSide) {
+    throw new Error(`cxPlaceOrderScript: invalid side "${side}" — LONG/SHORT (ya BUY/SELL) required (direction-honesty v21.23.13)`);
+  }
   return `
     ${DOM_HELPERS}
     const steps = [];
@@ -534,7 +544,7 @@ function cxPlaceOrderScript({ side, price, totalINR, leverage, useMargin, qty, l
         if (m) { clickEl(m); steps.push('margin-tab'); await sleep(800); }
         else steps.push('margin-tab:skip');
       }
-      const SIDE = ${JSON.stringify(String(side).toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG')};
+      const SIDE = ${JSON.stringify(cxSide)};
       const PRICE_OK = Number(${Number(price)}) > 0;
       const PRICE = String(${Number(price)});
       const TOTAL = Number(${Number(totalINR)});
@@ -822,6 +832,14 @@ function dhanSelectScripScript(symbol) {
 }
 
 function dhanPlaceOrderScript({ side, price, quantity, product }) {
+  // v21.23.13 [SIDE-STRICT — build-time]: `side === 'LONG' ? 'buy' : 'sell'
+  // — undefined/garbage SELL click kara deta tha (Dhan LIVE browser order
+  // ka wrong-side vector). Dual-vocab normalize + unknown pe LOUD THROW.
+  const _dhanSideAlias = { LONG: 'LONG', BUY: 'LONG', SHORT: 'SHORT', SELL: 'SHORT' };
+  const dhanSide = _dhanSideAlias[String(side || '').toUpperCase()] || null;
+  if (!dhanSide) {
+    throw new Error(`dhanPlaceOrderScript: invalid side "${side}" — LONG/SHORT (ya BUY/SELL) required (direction-honesty v21.23.13)`);
+  }
   return `
     ${DOM_HELPERS}
     try {
@@ -841,7 +859,7 @@ function dhanPlaceOrderScript({ side, price, quantity, product }) {
         const want = byText('li, [role="option"], span, div', new RegExp(${JSON.stringify(String(product))}, 'i'));
         if (want) { clickEl(want); steps.push('product=' + ${JSON.stringify(String(product))}); await sleep(400); }
       } else steps.push('product:skip');
-      const want = ${JSON.stringify(side === 'LONG' ? 'buy' : 'sell')};
+      const want = ${JSON.stringify(dhanSide === 'LONG' ? 'buy' : 'sell')};
       const btn = await waitFor(() => $$('button, div[role="button"]').filter((el) => vis(el) && new RegExp('^' + want, 'i').test((el.textContent || '').trim()))[0] || null, { timeout: 5000, label: want + ' button' });
       clickEl(btn); steps.push('clicked:' + want);
       await sleep(800);

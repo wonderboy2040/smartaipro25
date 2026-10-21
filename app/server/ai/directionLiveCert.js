@@ -32,7 +32,7 @@ import { fetchCoinDcxCandles, fetchBinanceKlines, isNseOpen } from './data.js';
 import { fetchCoinDcxTickers } from '../cryptoStream.js';
 import { fetchFuturesCandles, fetchMetalsFapiCandles, fetchMetalsPrices, fetchFuturesPrices } from './futures.js';
 import { __tfVote } from './mtf.js';
-import { seriesOrientation, candleCanonicalStats } from './lib/candles.js';
+import { seriesOrientation, candleCanonicalStats, canonicalizeCandles } from './lib/candles.js';
 import { runDirectionSelfTest } from './directionSelfTest.js';
 
 const TF_MS = { '15m': 900_000, '1h': 3_600_000 };
@@ -116,7 +116,7 @@ async function _auditChain({ label, tf, fetchCandles, tickerPrice }) {
 export async function runLiveDirectionCertificate(opts = {}) {
   const ranAt = Date.now();
   if (opts?.skipNetwork) {
-    return { pass: true, ranAt, version: 'v21.23.12', chains: [], synthetic: null, note: 'network skipped' };
+    return { pass: true, ranAt, version: 'v21.23.13', chains: [], synthetic: null, note: 'network skipped' };
   }
   const chains = [];
   try {
@@ -141,6 +141,40 @@ export async function runLiveDirectionCertificate(opts = {}) {
       },
     }));
   } catch (e) { chains.push({ chain: 'coindcx-fut-usdt (B-BTC_USDT 15m)', status: 'UNREACHABLE', note: String(e?.message || e) }); }
+  // v21.23.13 [CHAIN #6 — cdc-official]: CoinDCX ka CURRENT DOCUMENTED
+  // candles endpoint (api.coindcx.com/market_data/candles) ab apni OWN cert
+  // chain se audit hota hai. Ye endpoint sabse likely FUTURE wire-drift
+  // target hai (docs ke drift history ki wajah se hi MIRROR-SHIELD bana),
+  // aur iski leg fetchCoinDcxCandles ke ANDAR embedded fallback hai — pehle
+  // legacy leg PASS ho jata to official leg ki orientation/freshness ka
+  // koi alag proof nahi tha. Same URL, same canonicalizer, same
+  // `cdc-official:` label — wireAbsorb telemetry bhi unified rehti hai.
+  try {
+    chains.push(await _auditChain({
+      label: 'cdc-official (api.coindcx.com BTCINR 15m)', tf: '15m',
+      fetchCandles: async () => {
+        for (const opair of ['B-BTC_INR', 'BTCINR']) {
+          try {
+            const r = await fetch(
+              `https://api.coindcx.com/market_data/candles?pair=${encodeURIComponent(opair)}&interval=15m&limit=240`,
+              { headers: { 'User-Agent': 'Mozilla/5.0 (WealthAI direction-live-cert)' }, signal: AbortSignal.timeout(8000) },
+            );
+            if (!r.ok) continue;
+            const raw = await r.json();
+            if (!Array.isArray(raw) || raw.length === 0) continue;
+            const candles = canonicalizeCandles(raw, { label: 'cdc-official:BTC:15m' });
+            if (candles && candles.length >= 30) return candles;
+          } catch { /* next pair leg */ }
+        }
+        return null;
+      },
+      tickerPrice: async () => {
+        const rows = await fetchCoinDcxTickers();
+        const t = (Array.isArray(rows) ? rows : []).find(x => x?.market === 'BTCINR');
+        return Number(t?.last_price) || null;
+      },
+    }));
+  } catch (e) { chains.push({ chain: 'cdc-official (api.coindcx.com BTCINR 15m)', status: 'UNREACHABLE', note: String(e?.message || e) }); }
   try {
     chains.push(await _auditChain({
       label: 'metals-fapi (XAUUSDT 15m)', tf: '15m',
@@ -199,7 +233,7 @@ export async function runLiveDirectionCertificate(opts = {}) {
     verifiedChains: passCount,
     unverifiedChains: unreachable,
     ranAt,
-    version: 'v21.23.12',
+    version: 'v21.23.13',
     chains,
     wireAbsorb,
     synthetic: { pass: synthetic.pass, passed: synthetic.passed, total: synthetic.total },

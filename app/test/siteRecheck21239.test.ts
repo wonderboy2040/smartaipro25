@@ -153,7 +153,7 @@ describe('v21.23.9 S2 — fastSlTrailLoop LIVE exchange SL sync (dead `newStopLo
     // v21.23.12 HONEST PIN UPDATE: positional signature ab 3rd marketHint
     // param carry karta hai — same-name INDIA/CRYPTO paper trades me symbol
     // fallback galat desk ki SL ratchet kar sakta tha.
-    expect(ROUTES_SRC).toContain('updatePaperTradeStopLoss(tr.paperId ?? tr.symbol, tr.trailedStopLoss, tr.market || tr.execMarket || null)');
+    expect(ROUTES_SRC).toContain('updatePaperTradeStopLoss(tr.paperId ?? tr.symbol, tr.trailedStopLoss, tr.execMarket || tr.market || null)');
   });
 });
 

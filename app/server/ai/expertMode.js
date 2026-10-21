@@ -149,6 +149,12 @@ async function fetchYahooChartCandles(yfSymbol, tf = '1h') {
       if (cur) agg.push(cur.bar);
       candles = agg;
     }
+    // v21.23.13 [S2-PARITY — LOCAL SORT]: wire-order trust removal — Yahoo
+    // aaj ascending deta hai, par defense-in-depth ke liye HAR reader apni
+    // orientation khud establish kare (CoinDCX mirror-disease lesson). Ye
+    // candles Ask-AI/expert analysis ko feed karte hain — mirrored series
+    // ulta analysis mint karta.
+    candles.sort((a, b) => a.time - b.time);
     if (candles.length >= 30) { cacheSet(_candleCache, key, candles); return candles; }
     return null;
   } catch { return null; }

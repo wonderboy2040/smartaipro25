@@ -60,6 +60,14 @@ export function recordTradeClose(trade) {
     tradeId: trade.id,
     dayKey: trade.dayKey || istDayKey(),
     symbol: trade.symbol,
+    // v21.23.13 [DESK-STAMP]: journal rows ab market carry karti hain —
+    // crypto desk ke paper closes NSE journal view me mix ho rahe the
+    // (₹ vs USDT P&L ek saath — EOD/weekly stats polluted). Legacy rows
+    // honestly `market: null` rehti hain (filter unhe 'INDIA' bucket me
+    // Nahi ginta — unknown desk, dono view se visible rehta hai back-compat
+    // ke liye). Naya stamp = paperTrading ka stored market (INDIA/CRYPTO/
+    // FUTURES/GLOBALFUTURES).
+    market: String(trade.market || '').toUpperCase() || null,
     direction: trade.direction,
     entry: trade.entry,
     qty: trade.qty,
@@ -267,11 +275,24 @@ async function _runWeeklyReport(deps, weekKey) {
 // ------------------------------------------------------------
 // 4. API read — frontend journal panel.
 // ------------------------------------------------------------
-export function getJournal(days = 14) {
+export function getJournal(days = 14, marketFilter = null) {
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
     .toLocaleDateString('sv-SE', { timeZone: 'Asia/Kolkata' });
-  const entries = _state.entries.filter(e => e.dayKey >= cutoff).slice(-120).reverse();
-  const allRecent = _state.entries.filter(e => e.dayKey >= cutoff);
+  // v21.23.13 [DESK-SCOPED JOURNAL]: marketFilter 'INDIA' → NSE journal view
+  // (Intraday tab) me sirf INDIA closes; 'CRYPTO' → crypto family. null →
+  // sab (legacy callers). Legacy rows (market undefined/null) dono desk
+  // views me visible rehti hain — unhe forcefully kisi desk me nahi daala
+  // ja sakta (unknown desk, honest).
+  const deskMatch = (e) => {
+    if (marketFilter == null) return true;
+    const want = String(marketFilter).toUpperCase();
+    const m = String(e?.market || '').toUpperCase();
+    if (!m) return true; // legacy row — desk unknown, keep visible
+    if (want === 'INDIA') return m === 'INDIA';
+    return m !== 'INDIA'; // CRYPTO / FUTURES / GLOBALFUTURES family
+  };
+  const entries = _state.entries.filter(e => e.dayKey >= cutoff && deskMatch(e)).slice(-120).reverse();
+  const allRecent = _state.entries.filter(e => e.dayKey >= cutoff && deskMatch(e));
   return {
     entries,
     stats: _dayStats(allRecent),

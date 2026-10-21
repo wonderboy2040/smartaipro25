@@ -191,7 +191,13 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   const walletDeployPct = auto?.walletDeployPct ?? 100;
   const deployed95WalletINR = Math.round(effectiveWalletINR * (walletDeployPct / 100));
   const buyingPower95INR = Math.round(deployed95WalletINR * activeLeverage);
-  const isLiveAuto = Boolean(armed && (auto?.executionMode === 'live' || Boolean(canLive && auto?.autoSyncSiteLive !== false)));
+  // v21.23.13 [HONEST LIVE BADGE]: pehle primary branch (executionMode ===
+  // 'live') canLive ko BYPASS karta tha — CoinDCX creds missing hone par bhi
+  // button 🟢 LIVE ON dikhta tha, engine har live attempt reject +
+  // escalating backoff (5m→4h) khata rehta, user ko kabhi reason nahi
+  // dikhta tha. Ab DONO branches canLive demand karti hain — button green
+  // = LIVE truly armed AND executable (creds + site live dono confirm).
+  const isLiveAuto = Boolean(armed && canLive && (auto?.executionMode === 'live' || auto?.autoSyncSiteLive !== false));
   const activeTradedRows = useMemo(
     () => (auto?.deepMonitor?.trades || []).filter(t => t.traded !== false),
     [auto?.deepMonitor?.trades],
@@ -299,9 +305,30 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       };
       if (effectiveWalletINR > 0) cfgPatch.walletAmountINR = effectiveWalletINR;
       const stCfg = await updateMtfAutoConfigApi(cfgPatch);
-      if (stCfg) setAuto(stCfg);
+      // v21.23.13 [HONEST ARM — LIVE]: /config ya /toggle fail par bhi code
+      // aage badh ke engine PURANE mode (paper) me arm ho sakta tha — user
+      // LIVE samajh baithta tha. Ab har step fail par HONEST abort + reason.
+      if (!stCfg) {
+        notify(false, '⛔ AUTO-LIVE config save NAHI hua (server error) — LIVE mode arm nahi hua. Retry karo.');
+        setBusy(false); return;
+      }
+      setAuto(stCfg);
       const stArm = await setMtfAutoEnabledApi(true);
-      if (stArm) setAuto(stArm);
+      if (!stArm) {
+        notify(false, '⛔ AUTO-LINK arm fail (server error) — LIVE ON nahi hua. Retry karo.');
+        setBusy(false); return;
+      }
+      setAuto(stArm);
+      // v21.23.13 [CREDS PRE-FLIGHT]: creds missing = engine har live attempt
+      // instantly reject + per-symbol escalating backoff (5m→4h) khayega —
+      // din bhar ka silent no-op ('button ON par trade nahi lagta' ka seedha
+      // vector). Button green dikhana jhootha hota — honest abort + clear
+      // next-step (keys Execution Console / Settings me connect karo).
+      if (stArm?.coindcxConnected === false) {
+        notify(false, '⛔ CoinDCX API keys CONNECTED NAHI hain — LIVE auto-trade order execute nahi hoga. Pehle CoinDCX API keys connect karo, phir ⚡ LIVE dabao. (Engine armed hai par live entry creds ke bina reject hogi.)');
+        await loadAuto();
+        setBusy(false); return;
+      }
 
       // Strictly 1 trade per session: if an active position is already open, do NOT place a 2nd trade!
       const preActiveCount = (stArm?.deepMonitor?.trades || activeTradedRows || []).filter(t => t.traded !== false).length;
@@ -384,7 +411,15 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
 
   const statusLine = useMemo(() => {
     if (!auto) return 'status loading…';
-    return `${isLiveAuto ? '🟢 LIVE AUTO-TRADE INTELLIGENCE ON' : '⏸ AUTO-TRADE STANDBY'} · 100% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} / ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')} @ ${activeLeverage}x (Buying Power ₹${buyingPower95INR.toLocaleString('en-IN')}) · Active Traded: ${activeTradedRows.length} · day ${auto.day ?? '—'} · trades ${auto.dayCount}/${auto.maxTradesPerDay}`;
+    // v21.23.13 [IDLE-REASON TRANSPARENCY]: 'auto trade lag nahi raha'
+    // complaint ka aadha root-cause tha INVISIBILITY — engine ticks ke skip
+    // reasons (1-session lock / quota / backoff / no eligible row) sirf
+    // AUTO EVENTS drawer me the. Ab last tick ke top skip reasons status
+    // line me hi dikhte hain — user ko turant dikhe engine KYA idle hai.
+    const skipWhy = Array.isArray(auto.lastTick?.skipped) && auto.lastTick.skipped.length > 0
+      ? ` · ⏳ last-tick skip: ${auto.lastTick.skipped.slice(0, 2).join(' | ')}`
+      : '';
+    return `${isLiveAuto ? '🟢 LIVE AUTO-TRADE INTELLIGENCE ON' : '⏸ AUTO-TRADE STANDBY'} · 100% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} / ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')} @ ${activeLeverage}x (Buying Power ₹${buyingPower95INR.toLocaleString('en-IN')}) · Active Traded: ${activeTradedRows.length} · day ${auto.day ?? '—'} · trades ${auto.dayCount}/${auto.maxTradesPerDay}${isLiveAuto && auto.coindcxConnected === false ? ' · ⚠ CoinDCX keys NOT connected — live order reject hoga' : ''}${skipWhy}`;
   }, [auto, isLiveAuto, activeLeverage, effectiveWalletINR, deployed95WalletINR, buyingPower95INR, activeTradedRows.length]);
 
   return (

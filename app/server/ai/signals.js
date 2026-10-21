@@ -324,6 +324,15 @@ async function fetchYahooCandles(key, range = '3mo', interval = '1d') {
         close: q.close[i], volume: q.volume?.[i] || 0,
       });
     }
+    // v21.23.13 [S2-PARITY — LOCAL SORT]: repo ka AKHIRI candle fetcher jo
+    // wire-order par blind trust karta tha (bhaiyon ko pehle hi local sort
+    // mil chuka tha — signals.js intraday Yahoo / globalFutures Yahoo /
+    // Dhan). Yahoo ascending-sorted aata hai AAJ, par wire-contract trust
+    // hi wahi disease thi jisne CoinDCX newest-first rows ko mirror bana
+    // diya tha — defense-in-depth ke liye HAR reader apni orientation
+    // ka khud zamin kare. Indicators (dailyTrend regime EMA, index
+    // changePct tail reads) ulta padne se rokta hai.
+    out.sort((a, b) => a.time - b.time);
     return out.length >= 30 ? out : null;
   } catch { return null; }
 }
@@ -2172,7 +2181,17 @@ async function _computeBoard(mkt, deps, opts = {}) {
             ? { market: mkt, tape: enr.tape, tapeMTF: enr.tapeMTF }
             : { market: mkt, tape: enr.tape })
           : null;
-        if (tapeV && tapeV.dir !== 0 && (tapeV.conf || 0) > 0) {
+        // v21.23.13 [NEUTRAL-TAPE HOLE CURE]: pass-1 abstain `tapeDataAbsent:true`
+        // carry karta tha — injection sirf `dir!==0 && conf>0` pe hoti thi, to
+        // FETCHED-but-NEUTRAL tape (dir 0, data present) ke case me stale
+        // abstain votes me reh jaata tha → aggregateVotes WHOLE consensus ko
+        // freshTapeAbsent flag karta tha → executable:false + agent skip +
+        // gauntlet veto — ranging market me all-day block, jabki data theek
+        // tha. Design (ensemble.js header): "neutral tape (vote 0 with data)
+        // flag NAHI deta". Ab data-present neutral vote (tapeDataAbsent !==
+        // true) BHI abstain ko replace karta hai — honest "seat participated,
+        // no edge". Directional behavior unchanged (dir!==0 needs conf>0).
+        if (tapeV && (tapeV.dir !== 0 ? (tapeV.conf || 0) > 0 : tapeV.tapeDataAbsent !== true)) {
           const seatId = _mtfOn ? 'tape-mtf' : 'tape';
           const tIdx = votes.findIndex(v => v.id === 'tape' || v.id === 'tape-mtf');
           if (tIdx >= 0) votes.splice(tIdx, 1); // drop the pass-1 abstain
@@ -2243,7 +2262,10 @@ async function _computeBoard(mkt, deps, opts = {}) {
       if (tEnr?.tape) {
         const tapeReg = MODELS.find(m => m.id === 'tape' || m.id === 'tape-mtf');
         const tapeV = tapeReg?.fn ? tapeReg.fn({ market: mkt, tape: tEnr.tape }) : null;
-        if (tapeV && tapeV.dir !== 0 && (tapeV.conf || 0) > 0) {
+        // v21.23.13 [NEUTRAL-TAPE HOLE CURE]: fetched-but-neutral tape bhi
+        // abstain replace karta hai (freshTapeAbsent = sirf data-TRULY-absent;
+        // detail India board site pe). Directional path unchanged.
+        if (tapeV && (tapeV.dir !== 0 ? (tapeV.conf || 0) > 0 : tapeV.tapeDataAbsent !== true)) {
           const tIdx = votes.findIndex(v => v.id === 'tape' || v.id === 'tape-mtf');
           if (tIdx >= 0) votes.splice(tIdx, 1); // drop the pass-1 abstain
           votes.push({ id: tapeReg.id, name: tapeReg.name, role: tapeReg.role, weight: tapeReg.weight * (_ad?.tape?.mul ?? 1), ...tapeV, revived: true });
@@ -3257,7 +3279,10 @@ async function _computeDeepSignal(sym, mkt, deps, opts, cacheKey) {
         const tapeV = tapeReg?.fn
           ? tapeReg.fn(_mtfOn ? { market: mkt, tape, tapeMTF } : { market: mkt, tape })
           : null;
-        if (tapeV && tapeV.dir !== 0 && (tapeV.conf || 0) > 0) {
+        // v21.23.13 [NEUTRAL-TAPE HOLE CURE]: fetched-but-neutral tape bhi
+        // abstain replace karta hai (freshTapeAbsent = sirf data-TRULY-absent;
+        // detail India board site pe). Directional path unchanged.
+        if (tapeV && (tapeV.dir !== 0 ? (tapeV.conf || 0) > 0 : tapeV.tapeDataAbsent !== true)) {
           const seatId = _mtfOn ? 'tape-mtf' : 'tape';
           const tIdx = votes.findIndex(v => v.id === 'tape' || v.id === 'tape-mtf');
           if (tIdx >= 0) votes.splice(tIdx, 1);
@@ -3277,7 +3302,10 @@ async function _computeDeepSignal(sym, mkt, deps, opts, cacheKey) {
       if (tEnr?.tape) {
         const tapeReg = MODELS.find(m => m.id === 'tape' || m.id === 'tape-mtf');
         const tapeV = tapeReg?.fn ? tapeReg.fn({ market: mkt, tape: tEnr.tape }) : null;
-        if (tapeV && tapeV.dir !== 0 && (tapeV.conf || 0) > 0) {
+        // v21.23.13 [NEUTRAL-TAPE HOLE CURE]: fetched-but-neutral tape bhi
+        // abstain replace karta hai (freshTapeAbsent = sirf data-TRULY-absent;
+        // detail India board site pe). Directional path unchanged.
+        if (tapeV && (tapeV.dir !== 0 ? (tapeV.conf || 0) > 0 : tapeV.tapeDataAbsent !== true)) {
           const tIdx = votes.findIndex(v => v.id === 'tape' || v.id === 'tape-mtf');
           if (tIdx >= 0) votes.splice(tIdx, 1);
           const _adT = adaptiveMultipliers(_ledgerModelStats());

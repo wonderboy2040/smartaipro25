@@ -440,7 +440,14 @@ function marginOrderBody({ marginPair, side, qty, leverage, marginINR }) {
 
 function marginExitBody({ marginPair, side }) {
   // exit_positions keys off the POSITION's side (the side it was opened with)
-  return { positions: [{ pair: marginPair, side: String(side).toLowerCase() === 'short' ? 'sell' : 'buy' }] };
+  // v21.23.13 [SIDE-STRICT]: non-short pe SILENT 'buy' — ek garbage journal
+  // side galat position ko exit-target karta. Unknown side pe LOUD THROW
+  // (caller journal reason me honest fail dekhega, galat order nahi).
+  const _s = String(side || '').toUpperCase();
+  if (_s !== 'LONG' && _s !== 'SHORT' && _s !== 'BUY' && _s !== 'SELL') {
+    throw new Error(`marginExitBody: invalid side "${side}" — LONG/SHORT required (direction-honesty v21.23.13)`);
+  }
+  return { positions: [{ pair: marginPair, side: _s === 'SHORT' || _s === 'SELL' ? 'sell' : 'buy' }] };
 }
 
 // ---------------- THE EXECUTION GAUNTLET ----------------
@@ -900,8 +907,19 @@ export async function executeSignal(opts) {
         // (BTCINR) — `pair` is the MARGIN/futures vocabulary, spot ignores
         // it — and the spot order_type vocabulary is `market_order`/
         // `limit_order` (same as the margin API), not bare `market`.
+        // v21.23.13 [SIDE-STRICT — "pakka LONG/SHORT" doctrine]: ye repo ka
+        // LAST strict-ternary live order-body tha (unknown/garbage side
+        // SILENTLY 'buy' ban jaata tha). marginOrderBody/futuresOrderBody/
+        // dhanOrderBody sab pehle se dual-vocab LOUD-THROW hain — spot
+        // create-body bhi ab wahi doctrine. (Spot desk default-ON FULL-STOP
+        // ke peechhe hai, par honest body phir bhi honest.)
+        const _spotSideAlias = { LONG: 'buy', BUY: 'buy', SHORT: 'sell', SELL: 'sell' };
+        const _spotSide = _spotSideAlias[String(effectiveSignal.side || '').toUpperCase()] || null;
+        if (!_spotSide) {
+          throw new Error(`invalid signal side "${effectiveSignal.side}" — LONG/SHORT (ya BUY/SELL) required; silent 'buy' default v21.23.13 se mana hai (direction-honesty)`);
+        }
         const body = {
-          side: effectiveSignal.side === 'SHORT' ? 'sell' : 'buy',
+          side: _spotSide,
           market: pair,
           order_type: 'market_order',
           total_quantity: String(qty),

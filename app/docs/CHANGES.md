@@ -3291,3 +3291,48 @@ Har direct-candle seat jo tail reads karta tha par L3 chokepoint se pehle raw pa
 S1 India wrapper arity ×3 + gauntlet dataDegraded ×4 + S3/4/5/6 side-doctrine ×9 + S7 deep-ladder ×2 + S8 resample mirror ×2 + S9 orientation key-drift ×3 + S10 NaN-drop ×3 + S11 cert pass-semantics ×4 + S12 USDC-leg ×2 + S13/17/18 dedup/backoff/cache-key ×6 + S14 India close-verify ×2 + S15 re-anchor lifecycle ×1 + S16 null-verdict/mirror-void ×2 + S19 paper marketHint ×2 + S20 honest confluence ×1 + S21 seat-guard desc-vs-asc equality ×8 + S23 unit/stamps ×5. + 3 honest pin updates (liveRecheck212310 S4 — us pin ne khud v21.23.10 ka BUGGY wiring lock kiya tha; siteRecheck21239 paper-sync marketHint signature; signalDirectionInversion dhan unknown-side doctrine port).
 
 **FULL RELEASE GATE**: tsc 0 · lint 0 · **225 files / 4261 tests ALL PASS (4205+56)** · dist 21.23.12 · check:routes PASS · check:version OK
+
+## v21.23.13 — AUTO-TRADE LIVE CURE + CRYPTO PAPER-DESK ROUTING + DIRECTION HARDENING (user: "AUTO Trade Live button on karne par bhi Auto Trade nahi lag raha hai; Crypto tab me MTF board se Paper pe click karne par Intraday tab me show ho raha hai; long signal hai pakka long jana hai")
+
+### ISSUE-1 — AUTO-TRADE LIVE: button ON, par trade kabhi nahi lagta (5 root-causes cure)
+
+**1) CRITICAL — neutral-tape hole: FRESH-TAPE-ABSENT stuck flag (signals.js ×4 sites)**
+- **Root cause**: tape seat ka pass-1 abstain `tapeDataAbsent:true` flag carry karta hai. Injection sirf `tapeV.dir !== 0 && conf > 0` pe hoti thi — tape FETCH ho ke bhi NEUTRAL (dir 0, data present, ranging/coil market) nikle to stale abstain votes me reh jaata tha → `aggregateVotes` POORE consensus ko `freshTapeAbsent` flag karta tha → `executable:false` + agent candidate-skip + v21.23.12 order-time gauntlet veto. Ranging market me ye all-day block tha — jabki design (ensemble.js header) khud bolta hai "neutral tape (vote 0 with data) flag NAHI deta". Injection condition hi design violate kar rahi thi.
+- **Fix**: charo injection sites (India board / crypto board / India deep / crypto deep) — data-present neutral vote (`tapeDataAbsent !== true`) bhi abstain ko replace karta hai; directional path unchanged (dir!==0 needs conf>0). Ab `freshTapeAbsent` ka matlab SIRF "data truly absent" hai.
+
+**2) CRITICAL — engine-vs-UI board divergence (routes.js ×3 sites)**
+- **Root cause**: UI board route CRYPTO desk ke liye `getSignals('FUTURES', …)` boardSigs use karta hai (USDT-perp universe — dual board ke base-symbol mapping se exact match), par ENGINE loops (60s sweep + 15s deep tick + /run) raw `getSignals('CRYPTO', …)` (spot INR-pair universe) use karte the → engine apna board ALAG boardBase/SVA/council inputs pe banata tha. User ko "AUTO-READY 85+" row dikhta tha, engine apne board me wahi row capped-74/alag-scored dekhta tha — "dikh raha hai par auto trade lagta nahi" ka seedha vector.
+- **Fix**: teeno engine sites ab UI-route wala `market === 'CRYPTO' ? 'FUTURES' : market` mapping use karte hain — engine wahi board score karta hai jo user dekhta hai.
+
+**3) HIGH — manual PAPER clicks auto-engine ka daily quota kha rahe the (mtfAutoLink.js)**
+- **Root cause**: `recordLiveMtfBoardTrade` (manual board click handler) unconditional `st.dayCount += 1` karta tha — 5 paper test clicks = paper-mode quota (5) khatam = AUTO engine baaki din structurally dead, jabki ek bhi AUTO trade nahi hua tha.
+- **Fix**: quota sirf REAL executions khate hain — manual LIVE click (real-money budget, counted rehta hai) + mtfAutoTick ki apni entry path. Manual PAPER click = practice, budget nahi.
+
+**4) HIGH — jhoote-green button + silent arm failures (MTFDualBoardPanel.tsx)**
+- **Root cause (a)**: `isLiveAuto` ka primary branch (`executionMode === 'live'`) canLive (creds connected + site live) bypass karta tha — creds missing par bhi button 🟢 LIVE ON dikhta tha jabki engine har attempt reject + escalating backoff (5m→4h) kha raha tha; **(b)** `onAutoLiveExecute` /config fail hone par bhi aage badh ke engine PURANE mode (paper) me arm kar deta tha; **(c)** skip reasons sirf AUTO EVENTS drawer me the.
+- **Fix**: (a) dono branches canLive demand karti hain; (b) /config ya /toggle fail par HONEST abort + reason toast; creds missing (`coindcxConnected === false`) par pre-flight abort + "keys connect karo" next-step; (c) status line me last-tick skip reasons + not-connected warning live dikhta hai.
+
+### ISSUE-2 — MTF board PAPER trade Intraday tab me land karta tha, Crypto tab me nahi dikhta
+
+**5) Root cause — ek hi shared paper journal, zero desk filtering**: paper rows correctly `market:'FUTURES'` stamp hoti thi, par `/api/intraday-paper` (getPaperSummary/getPaperHistory) KAHI market filter nahi tha aur Intraday tab ka PaperTradePanel POORA journal render karta tha; CoinDcxTab ke paas is journal ka KOI consumer hi nahi tha.
+- **Fix (server)**: `getPaperSummary(marketFilter)` + `getPaperHistory(days, marketFilter)` — 'INDIA' → sirf INDIA; 'CRYPTO' → crypto family (CRYPTO/FUTURES/GLOBALFUTURES = `!== 'INDIA'`); null → sab (engine callers + device-mirror + tests unchanged). Route `?market=` accept karta hai (paper + history + journal).
+- **Fix (UI)**: PaperTradePanel `desk` prop — Intraday tab `desk="INDIA"` (uska P&L/stats ab sirf NSE rows), CoinDcxTab me NAYA section "01p · Paper Desk — CRYPTO" (`desk="CRYPTO"`, WS-ticks live map) — MTF board PAPER clicks ab WAHIN dikhenge. Journal bhi desk-scoped: journal rows me `market` stamp + `?market=` filter + JournalPanel `desk="INDIA"` — crypto paper closes NSE EOD/weekly stats ko pollute nahi karte.
+- **Fix (mirror hazard)**: desk-scoped fetch se wipe-detection GALAT restore trigger karta — mirror duty ab UNSCOPED singleton loop (`ensureMirrorSyncLoop`) me, restore par window event.
+
+**6) SL-trail hint-domain mismatch (routes.js 3s fast loop)** — deep-monitor row `market:'CRYPTO'` vs paper row `market:'FUTURES'`: `tr.market || tr.execMarket` hint 'CRYPTO' bhejta tha → symbol-fallback SL-update kabhi match nahi karta → 3s fast paper SL-trail is path pe SILENT DEAD tha. Ab `execMarket` pehle.
+
+### ISSUE-3 — "pakka LONG/SHORT" direction-guarantee sweep (live money paths pehle se dual-vocab loud-throw; residual vectors close kiye)
+
+**7)** coindcxOrders spot-create body — repo ka LAST strict-ternary live order-body (`=== 'SHORT' ? 'sell' : 'buy'`): dual-vocab LOUD THROW (spot desk default-ON FULL-STOP ke peeche bhi honest body).
+**8)** marginExitBody — non-short SILENT 'buy' → unknown side LOUD THROW (galat position exit-target hone se bacha).
+**9)** browserAgent cxPlaceOrderScript/dhanPlaceOrderScript — build-time dual-vocab normalize + LOUD THROW (garbage side pe Dhan pe SELL-click / CX pe buy-click ka chance zero; caller AMBIGUOUS-FAILED journal karta hai).
+**10)** recordLiveMtfBoardTrade deep-monitor rows — silent `|| 'LONG'` default ×3 → dual-vocab normalize + LOUD THROW (missing side ka SHORT trade LONG-manage hota tha).
+**11)** openPaperTrade — missing/garbage direction SILENTLY 'LONG' banata tha → ab dual-vocab normalize + honest error (saare production callers explicit direction dete hain).
+**12)** restore sanitize — legacy mirror rows bina direction ke silently LONG re-hydrate hote the → ab row ke APNE levels se infer (SL entry ke upar = SHORT structure, neeche = LONG), ambiguous ho to `directionAssumed:true` stamp.
+**13)** fetchYahooCandles (signals.js) + expertMode fetchYahooChartCandles — repo ke AKHIRI wire-order-trust candle fetchers: local ascending sort (S2-PARITY — CoinDCX mirror-disease lesson: HAR reader apni orientation khud establish kare).
+**14)** directionLiveCert CHAIN #6 — cdc-official (api.coindcx.com/market_data/candles, the DOCUMENTED current endpoint = likeliest future wire-drift target) ab apni OWN cert chain se audit hota hai (same URL/canonicalizer/label — wireAbsorb telemetry unified). Cert version stamps v21.23.13.
+
+### NAYA TEST FILE test/siteRecheck212313.test.ts — LOCKS
+Neutral-tape injection semantics ×4 + aggregateVotes freshTapeAbsent neutrality + engine boardSigs parity ×3 + paper-quota (paper click no-count / live click count / auto path count) + summary/history desk-filter semantics + SL-trail hint order + journal market stamp/filter + spot body side-strict + marginExitBody strict + browser builders throw-on-invalid + openPaperTrade side-honest + restore side-inference + recordLiveMtfBoardTrade throw + Yahoo local sorts ×2 + cert cdc-official chain + version/stamps. + honest pins: launcherAutoBuild 21.23.13, bat stale-stamp list.
+
+**FULL RELEASE GATE**: tsc 0 · lint 0 · tests ALL PASS · dist 21.23.13 · check:routes PASS · check:version OK

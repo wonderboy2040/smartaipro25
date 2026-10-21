@@ -1356,7 +1356,11 @@ export function registerAITradingRoutes(app, deps) {
         const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
         if (!on) continue;
         if (market === 'INDIA' && !isNseOpen() && !hasOpenIndia) continue;
-        const base = await getSignals(market, deps, { warmOnly: true }).catch(() => null);
+        // v21.23.13 [BOARDSIGS PARITY #3]: /run (manual tick — LIVE button ke
+        // immediate-run wala call) bhi UI-route wala FUTURES-sigs mapping
+        // use karta hai (detail 60s sweep site pe) — manual run aur background
+        // engine ek hi board pe agree karenge.
+        const base = await getSignals(market === 'CRYPTO' ? 'FUTURES' : market, deps, { warmOnly: true }).catch(() => null);
         boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: base?.signals || [], fx: fxLive });
       }
       const liveCtx = await mtfAutoLiveCtx(cfg);
@@ -3164,7 +3168,18 @@ export function registerAITradingRoutes(app, deps) {
         const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
         if (!on) continue;
         if (market === 'INDIA' && !isNseOpen() && !hasOpenIndia) continue;
-        const base = await getSignals(market, deps, { warmOnly: true }).catch(() => null);
+        // v21.23.13 [BOARDSIGS PARITY — 60s sweep]: UI board route (mtf-dual/
+        // board) CRYPTO desk ke liye `getSignals('FUTURES', …)` boardSigs use
+        // karta hai (USDT-perp universe — B-BTC_USDT rows jo dual board ke
+        // normSymKey base-symbol mapping se EXACT match karte hain). Ye loop
+        // raw `getSignals('CRYPTO', …)` (spot INR-pair universe) use karta
+        // tha → engine ka board UI se DIFFERENT boardBase/SVA/council inputs
+        // pe banta tha → user ko 'AUTO-READY 85+' row dikhta tha, engine apne
+        // board me wahi row capped/alag-scored dekhta tha — 'dikh raha hai
+        // par auto trade lagta nahi' wala divergence. Ab teeno engine sites
+        // (ye sweep + 15s deep tick + /run) UI route ke same mapping use
+        // karte hain — engine wahi board score karta hai jo user dekhta hai.
+        const base = await getSignals(market === 'CRYPTO' ? 'FUTURES' : market, deps, { warmOnly: true }).catch(() => null);
         boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: base?.signals || [], fx: fxLive });
       }
       await mtfAutoTick({
@@ -3214,7 +3229,14 @@ export function registerAITradingRoutes(app, deps) {
       const deepMon = getActiveAutoTradesDeepMonitor(combinedQuotes);
       for (const tr of (deepMon?.trades || [])) {
         if (tr.trailedStopLoss > 0 && (tr.executionMode === 'PAPER' || tr.paperId != null)) {
-          try { updatePaperTradeStopLoss(tr.paperId ?? tr.symbol, tr.trailedStopLoss, tr.market || tr.execMarket || null); } catch { /* non-fatal */ }
+          // v21.23.13 [HINT-DOMAIN FIX]: deep-monitor rows `market:'CRYPTO'`
+          // carry karte hain jabki unka paper-mirror row `market:'FUTURES'`
+          // (USDT-perp domain, routes.js:892 wala execMarket) me store hota
+          // hai — pehle `tr.market || tr.execMarket` hint 'CRYPTO' bhejta tha
+          // → symbol-fallback SL-update paper row (market 'FUTURES') se
+          // kabhi match nahi karta → 3s fast trail is path pe SILENT DEAD.
+          // Ab execMarket (paper journal ka actual domain) pehle.
+          try { updatePaperTradeStopLoss(tr.paperId ?? tr.symbol, tr.trailedStopLoss, tr.execMarket || tr.market || null); } catch { /* non-fatal */ }
         }
         if (!tr.slTrailed || !(tr.trailedStopLoss > 0)) continue;
         if (tr.executionMode === 'LIVE' && loadCredsForOrder()) {
@@ -3335,7 +3357,10 @@ export function registerAITradingRoutes(app, deps) {
           // path par kabhi fire nahi hote the + superScore ka boardBase
           // weight redistribute → 15s vs 60s views diverge. Ab 60s loop
           // (3134) jaisa hi warm signals pass.
-          const base = await getSignals(market, depsForSignals(), { warmOnly: true }).catch(() => null);
+          // v21.23.13 [BOARDSIGS PARITY #2]: CRYPTO desk ke liye UI-route
+          // wala FUTURES-sigs mapping (detail 60s sweep site pe) — engine
+          // wahi board dekhta hai jo user ko dikhta hai.
+          const base = await getSignals(market === 'CRYPTO' ? 'FUTURES' : market, depsForSignals(), { warmOnly: true }).catch(() => null);
           boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: base?.signals || [], fx: fxLive }).catch(() => null);
         }
         await mtfAutoTick({

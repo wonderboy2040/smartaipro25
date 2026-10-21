@@ -28,6 +28,50 @@ export interface PaperMirror {
 
 let _lastRestoreAttempt = 0;
 
+// ============================================================
+// v21.23.13 [DESK-SCOPED PANELS + UNSCOPED MIRROR DUTY]
+// ------------------------------------------------------------
+// PaperTradePanel ab desk-scoped fetch karta hai (?market=INDIA/CRYPTO)
+// taaki crypto tab ke MTF-board PAPER trades INTRADAY tab me na dikhein.
+// Par mirror ka wipe-detection UNSCOPED counts pe compare hota hai — ek
+// scoped panel (sirf apne desk ke rows dekh kar) hamesha "server wiped"
+// ka galat verdict de deta aur har 60s pe spurious RESTORE POST karta.
+// Isliye mirror duty ab is singleton loop me hai: POORA (unfiltered)
+// journal fetch karke compare/restore karta hai, kisi bhi PaperTradePanel
+// instance dwara start hota hai, module-flag se per-page ek hi baar.
+// Restore hone par 'paper-mirror-restored' window event dispatch hota
+// hai — panels note dikhane ke liye sun sakte hain.
+// ============================================================
+let _mirrorLoopStarted = false;
+export const PAPER_MIRROR_RESTORED_EVENT = 'paper-mirror-restored';
+
+export function ensureMirrorSyncLoop(): void {
+  if (_mirrorLoopStarted || typeof window === 'undefined') return;
+  _mirrorLoopStarted = true;
+  const run = async () => {
+    if (document.visibilityState !== 'visible') return;
+    try {
+      const { apiFetch } = await import('./api');
+      const res = await apiFetch('/api/intraday-paper/history?days=365', { signal: AbortSignal.timeout(12000) });
+      if (!res.ok) return;
+      const h = await res.json().catch(() => null);
+      const trades: PaperTrade[] = Array.isArray(h?.trades) ? h.trades : [];
+      let open: PaperTrade[] = [];
+      const res2 = await apiFetch('/api/intraday-paper', { signal: AbortSignal.timeout(12000) });
+      if (res2.ok) {
+        const s = await res2.json().catch(() => null);
+        open = Array.isArray(s?.open) ? s.open : [];
+      }
+      const restored = await syncMirrorWithServer(open, trades);
+      if (restored) {
+        try { window.dispatchEvent(new CustomEvent(PAPER_MIRROR_RESTORED_EVENT)); } catch { /* non-fatal */ }
+      }
+    } catch { /* offline — next tick retry */ }
+  };
+  void run();
+  window.setInterval(() => { void run(); }, 60_000);
+}
+
 async function saveMirror(open: PaperTrade[], closed: PaperTrade[]): Promise<void> {
   try {
     const mirror: PaperMirror = {
