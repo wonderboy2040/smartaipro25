@@ -888,6 +888,10 @@ export function registerAITradingRoutes(app, deps) {
       if (!(row.side === 'LONG' || row.side === 'SHORT') || !row.plan?.entry || !row.plan?.stopLoss || !row.plan?.t1) {
         return jsonError(res, 400, `${symbol}: tradeable side/levels nahi hain (bias ${row.bias || 'WAIT'})`);
       }
+      if (row.counterHtf) {
+        const htfMsg = `${symbol}: PAPER ${row.side} blocked — 1d+4h HTF bias ${row.htfBias || 'opposite'} is against this side (counter-HTF, capped WATCH)`;
+        return res.status(409).json({ ok: false, blocked: true, error: htfMsg, reason: htfMsg });
+      }
       const isUsd = market === 'CRYPTO' || market === 'FUTURES' || market === 'METALS' || market === 'GLOBALFUTURES';
       const execMarket = market === 'GLOBALFUTURES' ? 'GLOBALFUTURES' : isUsd ? 'FUTURES' : 'INDIA';
       const baseSym = normalizeLinkSymbol(row.symbol, market) || symbol;
@@ -977,6 +981,19 @@ export function registerAITradingRoutes(app, deps) {
       const side = freshRowSide || requestedSide || '';
       if (side !== 'LONG' && side !== 'SHORT') {
         return jsonError(res, 400, `${symbol}: directional signal (LONG/SHORT) required`);
+      }
+      const dirGateHits = [];
+      if (row.counterHtf) dirGateHits.push(`1d+4h HTF bias ${row.htfBias || 'opposite'} against ${side}`);
+      if (row.counterTrend) dirGateHits.push('counter-trend setup');
+      if (row.boardSideConflict) dirGateHits.push(`board ensemble ${row.boardSide || 'opposite'} vs ${side}`);
+      if (row.svaConflict) dirGateHits.push('SVA verifier FLIP');
+      if (row.councilConflict) dirGateHits.push('AI council hard-no');
+      if (row.reversalRisk || row.trigger?.opposingFlow) dirGateHits.push('active reversal / opposing flow');
+      if (!row.directionVerified) dirGateHits.push('direction not pakka verified');
+      if (Number(row.superScore) < 65) dirGateHits.push(`score ${row.superScore} < ACTION floor 65`);
+      if (dirGateHits.length) {
+        const gateMsg = `${symbol}: LIVE order blocked — ${dirGateHits.join(' · ')}`;
+        return res.status(409).json({ ok: false, blocked: true, error: gateMsg, reason: gateMsg });
       }
       if (row.trapVeto || row.zoneWallVeto || row.reversalRisk || row.trigger?.opposingFlow) {
         const vetoMsg = `${symbol}: ${row.trapVeto ? 'Liquidity Sweep Trap Veto' : row.zoneWallVeto ? 'Fresh Supply/Demand Zone Wall Veto' : 'Active Bar Reversal / Exhaustion Risk'} detected — entry blocked`;

@@ -63,6 +63,24 @@ describe('fuseDualTf — superintelligence fuse', () => {
     expect(f.gates.some(g => g.includes('counter-trend'))).toBe(true);
   });
 
+  it('counter-HTF (1d+4h bias against side) hard-vetoes auto + direction verification', () => {
+    const bearSnap = { ...snap, consensus: 'BEARISH', htfBias: 'BEARISH' };
+    const f = fuseDualTf({ symbol: 'TESTCO', market: 'INDIA', boardSig, plan: planFixture(), snap: bearSnap, modeId: 'INTRADAY' });
+    expect(f.counterHtf).toBe(true);
+    expect(f.htfBias).toBe('BEARISH');
+    expect(f.superScore).toBeLessThanOrEqual(58);
+    expect(f.directionVerified).toBe(false);
+    expect(f.autoEligible).toBe(false);
+    expect(f.autoBlockers.some(b => b.includes('counter-HTF'))).toBe(true);
+    expect(f.gates.some(g => g.includes('counter-HTF'))).toBe(true);
+  });
+
+  it('aligned HTF bias does NOT trip the counter-HTF gate', () => {
+    const f = fuseDualTf({ symbol: 'TESTCO', market: 'INDIA', boardSig, plan: planFixture(), snap, modeId: 'INTRADAY' });
+    expect(f.counterHtf).toBe(false);
+    expect(f.autoEligible).toBe(true);
+  });
+
   it('TF-fit MISMATCH caps at 70 and blocks the row', () => {
     const p = planFixture({ tfFit: { verdict: 'MISMATCH', ratioT1: 0.3, note: 'mismatch' } });
     const f = fuseDualTf({ symbol: 'X', market: 'INDIA', boardSig, plan: p, snap, modeId: 'INTRADAY' });

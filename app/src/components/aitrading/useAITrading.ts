@@ -980,6 +980,8 @@ export interface MtfDualRow {
   side: 'LONG' | 'SHORT' | null; dir?: number | null;
   grade?: 'A' | 'B' | 'C' | null; bias?: string | null;
   trendDir?: number | null; triggerDir?: number | null; extendedDir?: number | null;
+  htfBias?: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | string | null;
+  counterHtf?: boolean;
   dualAligned?: boolean; tripleAligned?: boolean; triggerFired?: boolean;
   tfFit?: string | null; tfFitNote?: string | null; tfFitRatio?: number | null;
   suggestedHoldMin?: number | null; expectedTravelPct?: number | null;

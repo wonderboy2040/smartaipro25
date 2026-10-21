@@ -682,8 +682,8 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       {!boardBusy && !displayedRows.length && (
         <div className="quantum-panel rounded-2xl p-6 text-center mt-2">
           <div className="text-2xl mb-1">😌</div>
-          <div className="text-[11px] font-bold text-amber-400">Board par abhi koi directional signal nahi</div>
-          <div className="text-[10px] text-slate-500 mt-1">Ye panel sirf LONG/SHORT rows par kaam karta hai — data source down ho to honest khaali rehta hai.</div>
+          <div className="text-[11px] font-bold text-amber-400">Board par abhi koi high-confidence directional setup nahi</div>
+          <div className="text-[10px] text-slate-500 mt-1">Sirf WATCH+ LONG/SHORT rows dikhte hain — NEUTRAL, counter-HTF aur data-down rows honest khaali rehte hain (fake signal nahi).</div>
         </div>
       )}
       {displayedRows.length > 0 && (
@@ -698,7 +698,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             const scorePct = Math.max(2, Math.min(100, Number(r.superScore) || 0));
             const key = `${r.symbol}-${r.mode}`;
             const open = !!expanded[key];
-            const canPaper = r.ok && (r.side === 'LONG' || r.side === 'SHORT') && p?.entry && p?.stopLoss && p?.t1;
+            const canPaper = r.ok && (r.side === 'LONG' || r.side === 'SHORT') && p?.entry && p?.stopLoss && p?.t1 && !r.counterHtf;
             const isRowUsd = r.quoteCcy === 'USDT' || r.quoteCcy === 'USD';
             const rowCcyPrefix = isRowUsd ? '$' : '₹';
             const assetTag = r.assetClass === 'METALS' || r.symbol === 'XAU' || r.symbol === 'XAG'
@@ -721,6 +721,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             const isPakka = Boolean(r.directionVerified ?? r.worldIndicators?.directionVerified);
             const oppBoardSide = r.boardSide || r.signals?.board?.side || null;
             const hasBoardConflict = Boolean(r.boardSideConflict || (oppBoardSide && r.side && oppBoardSide !== r.side));
+            const rowLiveReady = canPaper && !!r.directionVerified && !r.counterTrend && !r.counterHtf && !hasBoardConflict && !r.svaConflict && !r.councilConflict && Number(r.superScore ?? 0) >= 65;
             return (
               <div key={key} data-testid={`mtf-card-${r.symbol}`} className="quantum-panel rounded-2xl p-3 border border-violet-500/15">
                 {/* card header */}
@@ -773,6 +774,13 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                       </span>
                       {r.earlyIgnition && <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-amber-500/20 text-amber-200 border border-amber-500/50" title="Ultra-Fast Early Trend Ignition — fresh EMA5/9/20 + MACD velocity">⚡ EARLY IGNITION</span>}
                       {r.counterTrend && <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-red-500/15 text-red-300 border border-red-500/40">⚠ COUNTER</span>}
+                      {r.counterHtf && (
+                        <span data-testid={`mtf-htf-conflict-chip-${r.symbol}`}
+                          className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-red-500/30 text-red-100 border border-red-400/70"
+                          title={`1d+4h HTF bias ${r.htfBias || 'opposite'} is against this ${r.side} — counter-HTF rows are capped at WATCH, not direction-verified, and can never be auto-traded or live-ordered`}>
+                          ⚠ HTF {r.htfBias || 'AGAINST'} vs {r.side}
+                        </span>
+                      )}
                       {r.dualAligned && <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-cyan-500/15 text-cyan-300 border border-cyan-500/40" title="context + trigger + side teeno aligned">DUAL ✓</span>}
                       {r.tripleAligned && <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/40" title="1d+4h extended bias bhi aligned">TRIPLE ✓</span>}
                     </div>
@@ -905,11 +913,11 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                         {paperOrdering === r.symbol ? '…' : `🧪 PAPER ${r.side}`}
                       </button>
                     )}
-                    {canPaper && (
+                    {canLive && rowLiveReady && (
                       <button
                         onClick={() => void onLiveOrder(r)}
                         disabled={liveOrdering === r.symbol || busy}
-                        title={`Place real CoinDCX Futures ${r.side} order (${activeLeverage}x leverage — Wallet ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')}) using .env API keys`}
+                        title={`Place real CoinDCX Futures ${r.side} order (${activeLeverage}x leverage — Wallet ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')}) — sirf direction-verified, non-counter-HTF setups`}
                         className="px-1.5 py-0.5 rounded text-[9px] font-black border border-amber-500/60 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25 disabled:opacity-40">
                         {liveOrdering === r.symbol ? '…' : `⚡ LIVE ${activeLeverage}x`}
                       </button>

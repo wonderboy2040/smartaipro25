@@ -40,7 +40,7 @@
 // ============================================================
 // v21.23.1: unused `buildMTFSnapshot` import hata (lint) — 6-TF snapshot
 // fuse me optional `snap` param se aata hai (routes caller build karta hai).
-import { mtfWire6Payload, rawTfCandles, rawTfCandlesUsdt } from './mtf.js';
+import { buildHtfBiasSnapshot, mtfWire6Payload, rawTfCandles, rawTfCandlesUsdt } from './mtf.js';
 import { superTier, SUPER_TIERS } from './superIntel.js';
 import { buildPlanFromCandles, PLAN_MODES } from './tradePlanner.js';
 // v21.23.11 MIRROR-SHIELD L2: live-tick stamp forming bar = TRUE newest.
@@ -97,6 +97,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
   const trigScore = plan?.trigger?.score ?? null;       // 0-100
   const planConf = plan?.confidence ?? null;
   const ext = snap?.ok ? dirOfBias(snap.htfBias) : null; // 1d+4h bias
+  const counterHtf = Boolean(dir !== 0 && ext != null && ext === -dir);
 
   // Component contributions (weights re-normalize when a source is missing)
   // v21.19.0 FIX: extendedBias must be direction-aligned (`ext * dir > 0` → 78,
@@ -133,6 +134,11 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
   if (plan?.counterTrend) {
     cap = cap == null ? 74 : Math.min(cap, 74);
     gates.push('counter-trend — capped 74 (auto bar clear nahi kar sakta)');
+  }
+  if (counterHtf) {
+    score -= 10;
+    cap = cap == null ? 58 : Math.min(cap, 58);
+    gates.push(`1d+4h HTF bias ${snap?.htfBias} side ${side} ke against — counter-HTF veto, capped 58 (auto + live bar)`);
   }
   if (plan?.trigger?.opposingFlow) {
     cap = cap == null ? 58 : Math.min(cap, 58);
@@ -220,6 +226,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
     !reversalRisk &&
     !trapVeto &&
     !zoneWallVeto &&
+    !counterHtf &&
     worldAligned8Count >= 6
   );
 
@@ -289,7 +296,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
   const pWinCalibrated = (wp && wp.calibrated && Number.isFinite(Number(wp.pWin))) ? Number(wp.pWin) : null;
   const winRatePct = (() => {
     if (pWinCalibrated != null) return Math.round(Math.min(90, Math.max(40, pWinCalibrated)));
-    if (trapVeto || zoneWallVeto || boardOpposes || svaOpposes || councilHardNo || lockOpposes) {
+    if (trapVeto || zoneWallVeto || boardOpposes || svaOpposes || councilHardNo || lockOpposes || counterHtf) {
       return Math.min(62, Math.max(48, Math.round(45 + score * 0.25)));
     }
     if (dualAligned && !reversalRisk && score >= 80 && heuristicConfluencePct != null && heuristicConfluencePct >= 75) return Math.min(85, Math.round(55 + score * 0.30));
@@ -331,6 +338,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
   if (!plan?.triggerFired) blockers.push('trigger fire pending');
   if (fit !== 'GOOD' && fit !== 'OK') blockers.push(`TF-fit ${fit || 'unknown'} (GOOD/OK chahiye)`);
   if (plan?.counterTrend) blockers.push('counter-trend');
+  if (counterHtf) blockers.push(`1d+4h HTF bias ${snap?.htfBias} against ${side} (counter-HTF)`);
   if (boardOpposes) blockers.push(`board ensemble side ${boardSideRaw} ≠ MTF side ${side} (direction conflict)`);
   if (svaOpposes) blockers.push('SVA verifier says FLIP / opposite side');
   if (councilHardNo) blockers.push(`AI council ${rawCouncilV} (hard disagree)`);
@@ -405,6 +413,8 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
     grade: plan?.grade ?? null,
     bias: plan?.bias ?? null,
     trendDir, triggerDir: trigDir, extendedDir: ext,
+    htfBias: snap?.ok ? (snap.htfBias ?? null) : null,
+    counterHtf,
     dualAligned, tripleAligned,
     earlyIgnition, reversalRisk,
     triggerFired: !!plan?.triggerFired,
@@ -525,9 +535,13 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
     ctxCandles, trigCandles,
   });
   // P1-3 Honest Extended Bias: only use `snap` when real 6-TF / 4h+1d snapshot is supplied;
-  // when absent, `fuseDualTf` redistributes the 0.15 weight across real measured inputs (`wSum < 1`)
-  // instead of fabricating 1d+4h bias from the 15m/1h context candle.
-  const snapAligned = snap?.ok ? snap : null;
+  // when absent, auto-build the lightweight 4h+1d HTF bias so the board can never fire a
+  // counter-HTF signal blind. Custom candle fixtures (tests) stay network-free.
+  let snapAligned = snap?.ok ? snap : null;
+  if (!snapAligned && snap == null && typeof candlesFor !== 'function') {
+    const htfSnap = await buildHtfBiasSnapshot(sym, mkt).catch(() => null);
+    if (htfSnap?.ok) snapAligned = htfSnap;
+  }
   const fuse = fuseDualTf({ symbol: sym, market: mkt, boardSig, plan, snap: snapAligned, modeId: mode.id });
 
   // INR cross-view (display only): USDT/USD price → ₹ equivalent (fx se)
@@ -622,7 +636,8 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
           calibrated: !!boardSig.superIntel.winProb.calibrated,
         } : null,
       } : null,
-      mtf6: snapAligned?.ok ? { consensus: snapAligned.consensus, agreementPct: snapAligned.agreementPct, phase: snapAligned.phase, htfBias: snapAligned.htfBias, ltfTrigger: snapAligned.ltfTrigger, timing: snapAligned.timing?.quality ?? null, tfs: mtfWire6Payload(snapAligned)?.tfs ?? null } : null,
+      mtf6: snapAligned?.ok && !snapAligned.lightweight ? { consensus: snapAligned.consensus, agreementPct: snapAligned.agreementPct, phase: snapAligned.phase, htfBias: snapAligned.htfBias, ltfTrigger: snapAligned.ltfTrigger, timing: snapAligned.timing?.quality ?? null, tfs: mtfWire6Payload(snapAligned)?.tfs ?? null } : null,
+      htf2: snapAligned?.lightweight ? { engine: 'htf2', bias: snapAligned.htfBias, agreementPct: snapAligned.agreementPct, phase: snapAligned.phase, tfs: snapAligned.timeframes || [] } : null,
     },
     barCounts: { ctx: ctxCandles?.length ?? 0, trig: trigCandles?.length ?? 0 },
     asOf: Date.now(),
@@ -654,8 +669,11 @@ export const DEFAULT_DUAL_SYMBOLS = {
 };
 
 function rankDualRows(rows, minBar = 75) {
+  // DIRECTION HONESTY: NEUTRAL/sub-WATCH rows (score < 50) must never render as
+  // LONG/SHORT calls — the board shows only WATCH+ directional setups.
+  const watchFloor = Number(SUPER_TIERS.WATCH) || 50;
   const directionalRows = rows.filter(r => r && r.ok && SIDEABLE.has(r.side));
-  const candidateRows = directionalRows.length > 0 ? [...directionalRows] : [...rows];
+  const candidateRows = directionalRows.filter(r => (Number(r.superScore) || 0) >= watchFloor || r.directionVerified);
   candidateRows.sort((a, b) => {
     const aAutoHigh = Number(!!a.autoEligible && !!a.directionVerified && (a.superScore ?? 0) >= minBar);
     const bAutoHigh = Number(!!b.autoEligible && !!b.directionVerified && (b.superScore ?? 0) >= minBar);
@@ -940,5 +958,5 @@ export function __clearDualBoardCaches() { ROW_CACHE.clear(); _boardCache.clear(
 export const DUAL_FUSE_WEIGHTS = {
   contextTrend: 0.30, triggerAction: 0.25, planConfidence: 0.20, extendedBias: 0.15, boardBase: 0.10,
   dualAlignedBonus: 4, tripleAlignedBonus: 2,
-  caps: { mismatch: 70, counterTrend: 74 },
+  caps: { mismatch: 70, counterTrend: 74, counterHtf: 58 },
 };

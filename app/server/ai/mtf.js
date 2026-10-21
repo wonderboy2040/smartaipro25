@@ -391,6 +391,61 @@ function _structureStop(candles15mIn, side, ltp) {
 }
 
 // ------------------------------------------------------------
+// Lightweight 1d+4h HTF bias snapshot (2 fetches, board anti-lag gate)
+// ------------------------------------------------------------
+const HTF_SNAP_TTL_MS = 90_000;
+const _htfSnapCache = new Map();
+
+export async function buildHtfBiasSnapshot(symbol, market) {
+  const sym = String(symbol || '').trim().toUpperCase();
+  const mkt = String(market || 'INDIA').toUpperCase();
+  if (!sym) return null;
+  const key = `htf2:${mkt}:${sym}`;
+  const hit = _htfSnapCache.get(key);
+  if (hit && Date.now() - hit.at < HTF_SNAP_TTL_MS) return hit.payload;
+
+  const [c4, c1] = await Promise.all([
+    _candlesFor(sym, mkt, '4h').catch(() => null),
+    _candlesFor(sym, mkt, '1d').catch(() => null),
+  ]);
+  const votes = [
+    c4 && c4.length ? _tfVote(c4, '4h') : null,
+    c1 && c1.length ? _tfVote(c1, '1d') : null,
+  ].filter(v => v && (v.dir === 1 || v.dir === -1));
+
+  let payload;
+  if (!votes.length) {
+    payload = {
+      ok: false, symbol: sym, market: mkt, ts: Date.now(),
+      engine: 'htf2', lightweight: true, alignment: null, ltfTrigger: null,
+      htfBias: null, consensus: 'NEUTRAL', agreementPct: null,
+      phase: 'UNAVAILABLE', timeframes: [],
+    };
+  } else {
+    const totalW = votes.reduce((a, v) => a + (TF_WEIGHT[v.tf] || 1), 0);
+    const net = votes.reduce((a, v) => a + v.dir * (TF_WEIGHT[v.tf] || 1), 0) / totalW;
+    const upW = votes.filter(v => v.dir === 1).reduce((a, v) => a + (TF_WEIGHT[v.tf] || 1), 0);
+    const agree = clamp(Math.max(upW, totalW - upW) / totalW, 0.5, 1);
+    payload = {
+      ok: true, symbol: sym, market: mkt, ts: Date.now(),
+      engine: 'htf2', lightweight: true, alignment: null, ltfTrigger: null,
+      htfBias: net >= 0.2 ? 'BULLISH' : net <= -0.2 ? 'BEARISH' : 'NEUTRAL',
+      consensus: net >= 0.2 ? 'BULLISH' : net <= -0.2 ? 'BEARISH' : 'NEUTRAL',
+      agreementPct: Math.round(agree * 100),
+      phase: agree >= 0.72 ? 'TREND-ALIGNED' : agree >= 0.55 ? 'MIXED' : 'SPLIT',
+      timeframes: votes.map(v => ({ tf: v.tf, dir: v.dir, strength: v.strength, conf: v.conf })),
+    };
+  }
+  _htfSnapCache.set(key, { at: Date.now(), payload });
+  while (_htfSnapCache.size > SNAP_CACHE_MAX) {
+    const k = _htfSnapCache.keys().next().value;
+    if (k === undefined) break;
+    _htfSnapCache.delete(k);
+  }
+  return payload;
+}
+
+// ------------------------------------------------------------
 // Snapshot
 // ------------------------------------------------------------
 export async function buildMTFSnapshot(symbol, market, opts = {}) {
@@ -564,7 +619,7 @@ export function mtfWire6Payload(snap) {
 }
 
 /** Test hook — clear caches between hermetic suite cases. */
-export function __clearMtfCaches() { _snapCache.clear(); _yfCache.clear(); _mtfFailBySym.clear(); _mtfSkipBySym.clear(); _mtfSkipUntil = 0; }
+export function __clearMtfCaches() { _snapCache.clear(); _htfSnapCache.clear(); _yfCache.clear(); _mtfFailBySym.clear(); _mtfSkipBySym.clear(); _mtfSkipUntil = 0; }
 /** Test hook — run the per-TF vote on a candle set directly. */
 export function __tfVote(candles, tf) { return _tfVote(candles, tf); }
 
