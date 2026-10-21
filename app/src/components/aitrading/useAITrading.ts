@@ -1040,17 +1040,31 @@ export interface MtfDirectionScorecardView extends MtfDirectionScorecardBucket {
   conflictBucket?: MtfDirectionScorecardBucket;
 }
 
+export interface MtfEarlyRadarRow {
+  symbol: string; market?: string; side: 'LONG' | 'SHORT';
+  superScore?: number | null; tier?: string | null;
+  quoteCcy?: 'USDT' | 'USD' | 'INR' | null;
+  ltp?: number | null; entry?: number | null; triggerLevel?: number | null;
+  stopLoss?: number | null; t1?: number | null; t2?: number | null;
+  earlyIgnition?: boolean; triggerFired?: boolean;
+  tfFit?: string | null;
+  reason?: string | null;
+  blockers?: string[];
+  asOf?: number | null;
+}
+
 export interface MtfDualBoardView {
   ok: boolean; error?: string;
   market?: string; mode?: TradePlanModeId; modeLabel?: string;
   contextTf?: string; triggerTf?: string; holdMin?: number; minScore?: number;
   topDeepTrendLimit?: number; scannedCount?: number;
   directionScorecard?: MtfDirectionScorecardView | null;
+  earlyRadar?: MtfEarlyRadarRow[];
   liveFeed24x7?: { active: boolean; cadenceMs: number; directTickOverlay: number; asOf: number };
   // v21.23.1: `avgWinRatePct` ab nullable — missing rows pe fabricated 88 nahi milta.
   worldIndicatorsInfo?: { count: number; names: string[]; targetWinRatePct: number | null; avgWinRatePct: number | null };
   ollamaTrio?: { reachable: boolean; base?: string; fastModel: string; deepModel: string; sentinelModel: string; models: string[]; count: number; keepAlive?: string };
-  counts?: { rows: number; overBar: number; eligible: number; strong: number; fired: number; unavailable: number; metalsEligible?: number; equitySimEligible?: number };
+  counts?: { rows: number; overBar: number; eligible: number; strong: number; fired: number; earlyRadar?: number; unavailable: number; metalsEligible?: number; equitySimEligible?: number };
   quoteCcy?: 'USDT' | 'USD' | 'INR' | null; fx?: number | null;
   rows?: MtfDualRow[];
   metalsRows?: MtfDualRow[];

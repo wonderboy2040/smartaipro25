@@ -14,7 +14,7 @@
 //     (fake score nahi banta)
 // ============================================================
 import { describe, it, expect } from 'vitest';
-import { fuseDualTf, dualAutoCandidates, DUAL_FUSE_WEIGHTS, __clearDualBoardCaches } from '../server/ai/mtfDualBoard.js';
+import { fuseDualTf, dualAutoCandidates, buildEarlyRadar, DUAL_FUSE_WEIGHTS, __clearDualBoardCaches } from '../server/ai/mtfDualBoard.js';
 
 /** A clean, fully-confirmed LONG plan fixture (planner-shaped). */
 function planFixture(over = {}) {
@@ -134,6 +134,63 @@ describe('fuseDualTf — superintelligence fuse', () => {
     expect(f.autoEligible).toBe(false);
     expect(f.autoBlockers.length).toBeGreaterThan(0);
     expect(Number.isFinite(f.superScore)).toBe(true);
+  });
+});
+
+describe('buildEarlyRadar — leading setups before PAKKA verification', () => {
+  const row = (over = {}) => ({
+    ok: true, symbol: 'EARLY', market: 'INDIA', side: 'LONG', quoteCcy: 'INR',
+    superScore: 66, tier: 'ACTION', directionVerified: false,
+    counterHtf: false, counterTrend: false, reversalRisk: false,
+    trapVeto: false, zoneWallVeto: false,
+    earlyIgnition: false, triggerFired: true,
+    ltp: 100, triggerLevel: 100.5, tfFit: 'OK',
+    plan: { entry: 100, stopLoss: 99, t1: 101, t2: 102 },
+    autoBlockers: ['direction not verified'], asOf: 1,
+    ...over,
+  });
+
+  it('surfaces trigger-fired + early-ignition rows and explains WHY they are early', () => {
+    const radar = buildEarlyRadar([
+      row({ symbol: 'A', earlyIgnition: false, triggerFired: true }),
+      row({ symbol: 'B', earlyIgnition: true, superScore: 62 }),
+    ]);
+    expect(radar.map(r => r.symbol)).toEqual(['B', 'A']);
+    expect(radar[0].reason).toContain('EARLY IGNITION');
+    expect(radar[1].reason).toContain('TRIGGER FIRED');
+    expect(radar.every(r => r.blockers.length > 0)).toBe(true);
+  });
+
+  it('never surfaces verified, counter-HTF, counter-trend, reversal-risk or vetoed rows', () => {
+    const radar = buildEarlyRadar([
+      row({ symbol: 'VERIFIED', directionVerified: true }),
+      row({ symbol: 'HTF', counterHtf: true }),
+      row({ symbol: 'CTR', counterTrend: true }),
+      row({ symbol: 'REV', reversalRisk: true }),
+      row({ symbol: 'TRAP', trapVeto: true }),
+      row({ symbol: 'WALL', zoneWallVeto: true }),
+      row({ symbol: 'NEUTRAL', side: null }),
+      row({ symbol: 'WEAK', superScore: 49, earlyIgnition: true }),
+      row({ symbol: 'OK1', earlyIgnition: true }),
+    ]);
+    expect(radar.map(r => r.symbol)).toEqual(['OK1']);
+  });
+
+  it('dedupes symbols and caps the radar at the requested limit', () => {
+    const radar = buildEarlyRadar([
+      row({ symbol: 'BTC', superScore: 70 }),
+      row({ symbol: 'BTC', earlyIgnition: true, superScore: 90 }),
+      row({ symbol: 'ETH' }), row({ symbol: 'SOL' }), row({ symbol: 'XRP' }), row({ symbol: 'DOGE' }),
+    ], 2);
+    expect(radar).toHaveLength(2);
+    expect(new Set(radar.map(r => r.symbol)).size).toBe(2);
+    expect(radar[0].symbol).toBe('BTC');
+  });
+
+  it('honest empty radar (never fabricates signals)', () => {
+    expect(buildEarlyRadar([])).toEqual([]);
+    expect(buildEarlyRadar(null)).toEqual([]);
+    expect(buildEarlyRadar([row({ triggerFired: false, earlyIgnition: false })])).toEqual([]);
   });
 });
 

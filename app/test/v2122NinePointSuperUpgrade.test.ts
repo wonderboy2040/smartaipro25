@@ -261,7 +261,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
     expect(recheckSrc).toContain('AUTO-TRADE DEEP MONITOR (15s REALTIME)');
   });
 
-  it('6 & 7) MTF Dual Board includes GOLD & SILVER (XAU/XAG perps) + EQUITY SIM + 3-Model Local Ollama AI verdicts + 6s 24x7 feed', async () => {
+  it('6 & 7) MTF Dual Board includes GOLD & SILVER (XAU/XAG perps) + EQUITY SIM + 3-Model Local Ollama AI verdicts + 2s 24x7 feed', async () => {
     const trio = getOllamaTrioModels();
     expect(trio.models.length).toBe(3);
     const verdict = evaluateMtfRowWithOllamaTrio({
@@ -289,7 +289,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
 
     expect(board.ok).toBe(true);
     expect(board.liveFeed24x7?.active).toBe(true);
-    expect(board.liveFeed24x7?.cadenceMs).toBe(6000);
+    expect(board.liveFeed24x7?.cadenceMs).toBe(2000);
     expect(Array.isArray(board.metalsRows)).toBe(true);
     expect(board.metalsRows.map((r: any) => r.symbol)).toEqual(expect.arrayContaining(['XAU', 'XAG']));
     expect(Array.isArray(board.equitySimRows)).toBe(true);

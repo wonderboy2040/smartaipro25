@@ -435,7 +435,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
 // 2) BOARD ROW BUILDER (async — candles via the cached MTF chain)
 // ------------------------------------------------------------
 const ROW_CACHE = new Map(); // key → { at, row }
-const ROW_TTL_MS = 6_000;    // v21.22.0: 6s ultra-fast 24x7 direct price & candle refresh
+const ROW_TTL_MS = 2_000;    // v21.23.13: 2s ultra-fast 24x7 direct price & candle refresh
 const ROW_CACHE_MAX = 200;
 
 /** v21.20.0 ULTRA-FAST LIVE TICK STAMP: overlays sub-second live LTP onto the latest candle. */
@@ -655,7 +655,7 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
 // 3) BOARD VIEW (matches) — Top 6 Deep-Trend (LONG or SHORT) symbols
 //    + GOLD & SILVER (XAU/XAG Perps) + EQUITY SIM (US Global)
 // ------------------------------------------------------------
-const BOARD_TTL_MS = 6_000;
+const BOARD_TTL_MS = 2_000;
 const _boardCache = new Map();
 
 const SIDEABLE = new Set(['LONG', 'SHORT']);
@@ -697,6 +697,66 @@ function rankDualRows(rows, minBar = 75) {
     return bEff - aEff;
   });
   return candidateRows;
+}
+
+/**
+ * v21.23.13 EARLY RADAR — leading signals BEFORE full PAKKA verification.
+ *
+ * USER PROBLEM: "trend pura banne ke baad signal milta hai — late entry se
+ * TP1/TP2 reach nahi hote". Root cause: top-6 ranking by superScore
+ * structurally favours mature trends (verified rows outrank fresh ignition),
+ * so the earliest actionable wave never reaches the cards.
+ *
+ * Radar sirf UNCONFIRMED leading setups dikhata hai (earlyIgnition ya
+ * trigger-fired-but-not-yet-verified). Ye auto/live lane me KABHI nahi
+ * jaate — `autoBlockers` intact rehte hain; PAKKA verify hone par row
+ * khud main cards me promote ho jati hai. Counter-HTF / counter-trend /
+ * reversal-risk rows radar me bhi nahi aate (wahi hard veto).
+ */
+export function buildEarlyRadar(rows, limit = 3) {
+  if (!Array.isArray(rows)) return [];
+  const max = Math.max(1, Math.min(5, Number(limit) || 3));
+  const seen = new Set();
+  return rows
+    .filter(r => r && r.ok && SIDEABLE.has(r.side))
+    .filter(r => (Number(r.superScore) || 0) >= 50) // noise floor: weak rows radar me nahi
+    .filter(r => !r.directionVerified && !r.counterHtf && !r.counterTrend)
+    .filter(r => !r.reversalRisk && !r.trapVeto && !r.zoneWallVeto)
+    .filter(r => !!r.earlyIgnition || !!r.triggerFired)
+    .sort((a, b) => {
+      if (!!b.earlyIgnition !== !!a.earlyIgnition) return Number(!!b.earlyIgnition) - Number(!!a.earlyIgnition);
+      if (!!b.triggerFired !== !!a.triggerFired) return Number(!!b.triggerFired) - Number(!!a.triggerFired);
+      return (Number(b.superScore) || 0) - (Number(a.superScore) || 0);
+    })
+    .filter(r => {
+      const k = String(r.symbol || '').toUpperCase();
+      if (!k || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    })
+    .slice(0, max)
+    .map(r => ({
+      symbol: r.symbol,
+      market: r.market,
+      side: r.side,
+      superScore: r.superScore ?? null,
+      tier: r.tier ?? null,
+      quoteCcy: r.quoteCcy ?? null,
+      ltp: r.ltp ?? null,
+      entry: r.plan?.entry ?? null,
+      triggerLevel: r.triggerLevel ?? null,
+      stopLoss: r.plan?.stopLoss ?? null,
+      t1: r.plan?.t1 ?? null,
+      t2: r.plan?.t2 ?? null,
+      earlyIgnition: !!r.earlyIgnition,
+      triggerFired: !!r.triggerFired,
+      tfFit: r.tfFit ?? null,
+      reason: r.earlyIgnition
+        ? 'EARLY IGNITION — 5m/1m momentum + EMA stack fresh, deep-trend PAKKA confirm pending'
+        : 'TRIGGER FIRED — HTF/PAKKA alignment confirm pending',
+      blockers: (r.autoBlockers || []).slice(0, 5),
+      asOf: r.asOf ?? null,
+    }));
 }
 
 export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', holdMin = null, boardSigs = [], minScore = 75, limit = TOP_DEEP_TREND_LIMIT, fx = null, fresh = false, force = false, candlesFor = null } = {}) {
@@ -746,7 +806,7 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
   const livePriceBySym = new Map();
   if (typeof candlesFor !== 'function') {
     try {
-      const fpx = await fetchFuturesPrices({ maxAgeMs: fresh ? 1000 : 2500 });
+      const fpx = await fetchFuturesPrices({ maxAgeMs: fresh ? 700 : 1200 });
       const fpxRows = Array.isArray(fpx) ? fpx : (fpx?.rows || []);
       for (const row of fpxRows) {
         const symKey = String(row?.base || row?.symbol || '').toUpperCase();
@@ -810,6 +870,7 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
   const candidateRows = rankDualRows(rows, minBar);
   const trimmed = candidateRows.slice(0, maxRows);
   const q75 = trimmed.filter(r => r.superScore != null && r.superScore >= Number(minScore));
+  const earlyRadar = buildEarlyRadar([...rows, ...metalsRowsRaw, ...equitySimRowsRaw].filter(Boolean), 3);
 
   // Phase 3 (3.1 / 3.2 / 3.3): Log top-6 scan rows into MTF ledger (deduped 30m),
   // resolve pending outcomes against live LTPs, and attach 30d MTF Direction Scorecard.
@@ -869,11 +930,13 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
     ollamaTrio: getOllamaTrioModels(),
     metalsRows,
     equitySimRows,
+    earlyRadar,
     counts: {
       rows: trimmed.length, overBar: q75.length,
       eligible: trimmed.filter(r => r.autoEligible).length,
       strong: trimmed.filter(r => r.tier === 'STRONG' || r.tier === 'ELITE').length,
       fired: trimmed.filter(r => r.triggerFired).length,
+      earlyRadar: earlyRadar.length,
       unavailable: trimmed.filter(r => !r.ok).length,
       metalsEligible: metalsRows.filter(r => r.autoEligible).length,
       equitySimEligible: equitySimRows.filter(r => r.autoEligible).length,
@@ -892,7 +955,8 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
           : 'India rows NSE ₹ domain me hain + Gold/Silver (XAU/XAG) & Equity Sim tabs bhi board me integrated hain.',
       `v21.22.0 Pure 8 Institutional Top Indicators + Ledger-Calibrated Win-Rate Confluence + 3-Seat Local Ollama Guard: Full ${rows.length}-symbol desk scan me se Top ${TOP_DEEP_TREND_LIMIT} Deep-Trend setups + Gold/Silver (XAU/XAG) + Equity Sim.`,
       '75+ score = ACTION/STRONG/ELITE tier — Live Auto-Trade ON karne par 100% CoinDCX Wallet amount + leverage ke saath strictly 1 Verified Trade lagta hai aur TP1/TP2 tak Deep Monitor + Trailing SL + Reversal Profit-Booking active rehta hai.',
-      'Board rows 6s 24×7 ultra-fast cache + direct live tick overlay par hain.',
+      'Board rows 2s 24×7 ultra-fast cache + direct live tick overlay par hain (1ms exchange guarantee nahi — price tick ~1s, board re-score ~2s; early radar isi liye trend confirm se PEHLE leading setups dikhata hai).',
+      'EARLY RADAR = sirf leading/unconfirmed setups (fresh ignition ya trigger fired, PAKKA verify pending). Auto/live buttons radar rows par nahi hote — PAKKA confirm hone par wahi setup main card me promote hota hai.',
     ],
   };
   _boardCache.set(key, { at: now, payload });

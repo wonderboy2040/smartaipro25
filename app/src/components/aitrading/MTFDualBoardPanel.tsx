@@ -99,6 +99,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   const [paperOrdering, setPaperOrdering] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const reqRef = useRef(0);
+  const boardInflightRef = useRef(false);
 
   // debounced fetch inputs (typing/slider storm se bachne ke liye)
   const [debounced, setDebounced] = useState({ mode, holdMin, minScore, limit: 6 });
@@ -108,10 +109,17 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   }, [mode, holdMin, minScore]);
 
   const loadBoard = useCallback(async () => {
+    if (boardInflightRef.current) return; // 2s poll: slow response kabhi request pile-up na kare
+    boardInflightRef.current = true;
     const id = ++reqRef.current;
     setBoardBusy(true);
-    const b = await fetchMtfDualBoard(market, debounced);
-    if (reqRef.current === id) { if (b) setBoard(b); setBoardBusy(false); }
+    try {
+      const b = await fetchMtfDualBoard(market, debounced);
+      if (reqRef.current === id) { if (b) setBoard(b); }
+    } finally {
+      boardInflightRef.current = false;
+      if (reqRef.current === id) setBoardBusy(false);
+    }
   }, [market, debounced]);
 
   const loadAuto = useCallback(async () => {
@@ -123,15 +131,15 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   useEffect(() => { void loadBoard(); }, [loadBoard]);
   useEffect(() => {
     void loadAuto();
-    // v21.22.0 ULTRA-FAST REALTIME SL TRAIL & DIRECTION FOLLOW-THROUGH POLL:
-    // Poll every 3 seconds when any trade is active so SL trailing & direction verification update in real time!
-    const cadenceMs = (auto?.openCount ?? 0) > 0 || (auto?.deepMonitor?.activeCount ?? 0) > 0 ? 3_000 : 8_000;
+    // v21.23.13 ULTRA-FAST REALTIME SL TRAIL & DIRECTION FOLLOW-THROUGH POLL:
+    // Poll every 2 seconds when any trade is active so SL trailing & direction verification update in real time!
+    const cadenceMs = (auto?.openCount ?? 0) > 0 || (auto?.deepMonitor?.activeCount ?? 0) > 0 ? 2_000 : 5_000;
     const t = window.setInterval(() => { if (!document.hidden) void loadAuto(); }, cadenceMs);
     return () => window.clearInterval(t);
   }, [loadAuto, auto?.openCount, auto?.deepMonitor?.activeCount]);
   useEffect(() => {
-    // v21.22.0 ULTRA-FAST 24x7 DIRECT PRICE FETCHING: poll board every 8s
-    const t = window.setInterval(() => { if (!document.hidden) void loadBoard(); }, 8_000);
+    // v21.23.13 ULTRA-FAST 24x7 DIRECT PRICE FETCHING: poll board every 2s
+    const t = window.setInterval(() => { if (!document.hidden) void loadBoard(); }, 2_000);
     return () => window.clearInterval(t);
   }, [loadBoard]);
 
@@ -674,6 +682,49 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
           <span className="text-[8px] text-slate-400">
             {board.directionScorecard.calibrated ? '✓ Ledger-Calibrated (n ≥ 20)' : '⏳ Uncalibrated (<20 resolved scans)'}
           </span>
+        </div>
+      )}
+
+      {/* ================= v21.23.13 EARLY RADAR — leading setups BEFORE PAKKA verification ================= */}
+      {board?.earlyRadar && board.earlyRadar.length > 0 && (
+        <div data-testid="mtf-early-radar" className="mt-2 rounded-xl border border-amber-500/35 bg-amber-500/5 px-3 py-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-[10px] font-black text-amber-300 tracking-wider">
+              ⚡ EARLY RADAR — trend PAKKA confirm se PEHLE ke leading setups
+            </span>
+            <span className="text-[8px] text-slate-400">
+              Sirf detection alert · auto/live locked · PAKKA verify hone par wahi setup main card me promote hota hai
+            </span>
+          </div>
+          <div className="mt-1.5 grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+            {board.earlyRadar.map(e => {
+              const isLong = e.side === 'LONG';
+              const eIsUsd = e.quoteCcy === 'USDT' || e.quoteCcy === 'USD';
+              const eCcy = eIsUsd ? '$' : '₹';
+              return (
+                <div key={`early-${e.symbol}`} data-testid={`mtf-early-${e.symbol}`}
+                  className="rounded-lg border border-amber-500/25 bg-black/30 px-2 py-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[11px] font-black text-slate-100">{e.symbol}</span>
+                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${isLong ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/50' : 'bg-rose-500/20 text-rose-200 border-rose-400/50'}`}>
+                      {e.side}
+                    </span>
+                    <span className="px-1 py-0.5 rounded text-[8px] font-black bg-amber-500/20 text-amber-200 border border-amber-400/40">
+                      {e.earlyIgnition ? '⚡ EARLY IGNITION' : '⚡ TRIGGER FIRED'}
+                    </span>
+                    <span className="ml-auto text-[9px] font-mono text-slate-400">{e.superScore ?? '—'} {e.tier ?? ''}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-2 flex-wrap text-[9px] font-mono">
+                    {e.entry != null && <span className="text-slate-300">E {eCcy}{fmt(e.entry)}</span>}
+                    {e.triggerLevel != null && <span className="text-cyan-300">trigger {eCcy}{fmt(e.triggerLevel)}</span>}
+                    {e.t1 != null && <span className="text-emerald-300">T1 {eCcy}{fmt(e.t1)}</span>}
+                    {e.tfFit && <span className={e.tfFit === 'GOOD' || e.tfFit === 'OK' ? 'text-emerald-300' : 'text-amber-300'}>{e.tfFit}</span>}
+                  </div>
+                  <div className="mt-0.5 text-[8px] text-slate-500 truncate" title={e.reason || ''}>{e.reason || 'Leading setup'}</div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
