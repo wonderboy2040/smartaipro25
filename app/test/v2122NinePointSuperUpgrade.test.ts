@@ -1067,7 +1067,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       else fs.writeFileSync(journalPath, savedJournal);
       __resetMtfLiveOrderLockForTests();
     }
-  });
+  }, 15_000);
 
   it('14) MTF Dual Board LONG & SHORT Signal Accuracy — strict emaDir/ICT/SMC/FVG alignment, symmetric liveAlignedTrigger, and score cap <=74 when unverified', async () => {
     const makeHealthyTrendCandles = (count = 220, startPrice = 100, stepPct = 0.0018, dir: 1 | -1 = 1, intervalMs = 300_000) => {

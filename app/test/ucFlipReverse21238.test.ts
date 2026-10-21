@@ -219,7 +219,7 @@ describe('v21.23.8 S2 — LOSS trade + UC flip PAKKA → minimal-loss close + IM
     // 1) purana LONG trade minimal-loss CLOSE
     expect(out.closed).toHaveLength(1);
     expect(out.closed[0].reason).toBe('UC_FLIP_MINIMAL_LOSS_EXIT');
-    expect(paper.closePaperTrade).toHaveBeenCalledWith(777, expect.anything());
+    expect(paper.closePaperTrade).toHaveBeenCalledWith(777, expect.anything(), 'UC_FLIP_MINIMAL_LOSS_EXIT');
     // 2) IMMEDIATE same-symbol SHORT reverse entry (paper)
     expect(out.opened).toHaveLength(1);
     const flip = out.opened[0];
@@ -301,6 +301,44 @@ describe('v21.23.8 S2 — LOSS trade + UC flip PAKKA → minimal-loss close + IM
     expect(out2.closed).toHaveLength(1);      // protective minimal-loss exit hua
     expect(out2.opened).toHaveLength(0);       // par reverse entry NAHI (traded-only)
     expect(liveExecuteFail).toHaveBeenCalledTimes(1);
+  });
+
+  it('PAPER trade + siteLiveActive: reverse PAPER hi rehta hai — LIVE order leak nahi', async () => {
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'paper', minScore: 75 },
+      state: { book: [openLongBtc()] },
+    });
+    const { paper, calls } = fakePaper([{ id: 777, symbol: 'BTC', market: 'FUTURES', status: 'OPEN', direction: 'LONG', openedAt: NOW - 5 * 60_000 }]);
+    const liveClose = vi.fn(async () => ({ ok: true }));
+    const liveExecute = vi.fn(async () => ({ ok: true }));
+    const out = await mtfAutoTick(tickP(paper, cryptoBoardRows([flippedShortRow()]), {
+      siteLiveActive: true, liveClose, liveExecute,
+    }));
+    expect(out.closed[0].reason).toBe('UC_FLIP_MINIMAL_LOSS_EXIT');
+    expect(liveClose).not.toHaveBeenCalled();
+    expect(liveExecute).not.toHaveBeenCalled();
+    expect(out.opened).toHaveLength(1);
+    expect(out.opened[0].executionMode).toBe('PAPER');
+    expect(calls.opened[0].source).toBe('uc-flip-reverse');
+  });
+
+  it('board top-6 se bahar open trade ke liye fresh row build hota hai — flip exit silent nahi', async () => {
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'paper', minScore: 75 },
+      state: { book: [openLongBtc()] },
+    });
+    const { paper } = fakePaper([{ id: 777, symbol: 'BTC', market: 'FUTURES', status: 'OPEN', direction: 'LONG', openedAt: NOW - 5 * 60_000 }]);
+    const buildRow = vi.fn(async ({ symbol }) => ({
+      ok: true, symbol, market: 'CRYPTO', side: 'SHORT', triggerFired: false,
+      superScore: 80, plan: { entry: 99.6, stopLoss: 100.6, t1: 98.5, t2: 97.5 },
+      context: { dir: -1 }, triggerDir: -1, ltp: 99.6,
+    }));
+    const out = await mtfAutoTick(tickP(paper, cryptoBoardRows([]), { buildDualRow: buildRow }));
+    expect(buildRow).toHaveBeenCalledTimes(1);
+    expect(out.closed).toHaveLength(1);
+    expect(out.closed[0].reason).toBe('UC_FLIP_MINIMAL_LOSS_EXIT');
+    expect(out.opened).toHaveLength(1);
+    expect(out.opened[0].side).toBe('SHORT');
   });
 });
 

@@ -1383,6 +1383,7 @@ export function registerAITradingRoutes(app, deps) {
       const liveCtx = await mtfAutoLiveCtx(cfg);
       const out = await mtfAutoTick({
         boards,
+        buildDualRow,
         paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
         quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
         killSwitch,
@@ -3201,6 +3202,7 @@ export function registerAITradingRoutes(app, deps) {
       }
       await mtfAutoTick({
         boards,
+        buildDualRow,
         paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
         quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
         fx: fxLive,
@@ -3382,6 +3384,7 @@ export function registerAITradingRoutes(app, deps) {
         }
         await mtfAutoTick({
           boards,
+          buildDualRow,
           // v21.23.7: updatePaperTradeT1ClosePct — deep monitor LIVE vol-class
           // shift pe paper trade ka TP1 partial % refresh karta hai (volTrail).
           paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },

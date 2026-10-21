@@ -689,13 +689,13 @@ export function paperCircuitWatch(quotes, events, opts = {}) {
   return fired;
 }
 
-export function closePaperTrade(id, quotes) {
+export function closePaperTrade(id, quotes, reason = 'MANUAL') {
   const t = _state.trades.find(x => x.id === id && x.status !== 'CLOSED');
   if (!t) return { error: 'Open paper trade not found.' };
   const q = _quoteFor(t, quotes || {}, _marketOfTrade(t));
   const price = (q?.price > 0) ? q.price : t.lastPrice;
   if (!(price > 0)) return { error: 'No live price available — try again shortly.' };
-  _closePart(t, t.remainingQty, price, 'MANUAL');
+  _closePart(t, t.remainingQty, price, String(reason || 'MANUAL').slice(0, 40));
   _persist();
   return { ok: true, trade: t };
 }

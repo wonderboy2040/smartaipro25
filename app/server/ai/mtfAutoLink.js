@@ -1060,7 +1060,7 @@ function _ucFlipCountToday(symbol, execMarket, now = null) {
  *   • Daily quota + notional budget + flip-churn cap (4/symbol/day) respected.
  *   • Direction lock: purana release + naya opposite-side acquire (atomic).
  */
-async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now, isLiveSession }) {
+async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
   try {
     if (cfg?.ucFlipReverse === false) return null;
     if (!(Number(ltp) > 0)) return null;
@@ -1073,6 +1073,9 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now, isLiv
     const execMarket = String(b.execMarket || b.market || 'FUTURES').toUpperCase();
     const isSim = execMarket === 'GLOBALFUTURES';
     const side = b.side === 'LONG' ? 'SHORT' : 'LONG';
+    // Reverse ka mode purane trade ke mode se hi mirror hota hai. PAPER trade
+    // ke liye site-live hone se relaxed live quota / LIVE order dono galat hain.
+    const priorWasLive = b.executionMode === 'LIVE' || Boolean(b.livePositionId) || Boolean(b.liveOrderId);
 
     const ticket = deriveUcFlipReverseTicket({ side, ltp, boardRow });
     if (!ticket) return null;
@@ -1089,7 +1092,7 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now, isLiv
     }
     // daily quota — hard cap (live session me wahi relaxed 15 headroom)
     const stq = _rollDayIfNeeded();
-    const flipQuota = isLiveSession ? Math.max(Number(cfg.maxTradesPerDay) || 5, 15) : (Number(cfg.maxTradesPerDay) || 5);
+    const flipQuota = priorWasLive ? Math.max(Number(cfg.maxTradesPerDay) || 5, 15) : (Number(cfg.maxTradesPerDay) || 5);
     if (stq.dayCount >= flipQuota) {
       _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: daily quota ${stq.dayCount}/${flipQuota} done`);
       return null;
@@ -1149,7 +1152,12 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now, isLiv
     // LIVE reverse order — sirf REAL desks (FUTURES perps / INDIA);
     // EQUITY SIM desk paper/SIM-only hai (CoinDCX par listed hi nahi).
     let liveOrderResult = null;
-    const wantLiveOrder = !isSim && (cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false));
+    // [PAPER-LIVE-LEAK FIX] Site live credentials hone se PAPER trade ka
+    // reverse LIVE order ban jata tha (live reject → paper mirror rollback).
+    // Reverse ka mode purane trade ke mode se hi mirror hoga: PAPER close →
+    // PAPER reverse, LIVE close → LIVE reverse (jab live session active ho).
+    const wantLiveOrder = !isSim && priorWasLive
+      && (cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false));
     if (wantLiveOrder) {
       if (typeof p.liveExecute !== 'function') {
         _voidRollbackPaperTrade(paper, res, p.quotes);
@@ -1332,10 +1340,26 @@ export async function mtfAutoTick(p = {}) {
         ...(mktBoard?.metalsRows || []),
         ...(mktBoard?.equitySimRows || []),
       ];
-      const boardRow = allBoardRows.find(r => normalizeLinkSymbol(r?.symbol, b.market) === b.symbol);
+      let boardRow = allBoardRows.find(r => normalizeLinkSymbol(r?.symbol, b.market) === b.symbol);
+      // [TOP-6 FLIP-BLINDSPOT] Top-6 rotation ke baad 120s snapshot expire ho
+      // jata tha — open trade ka symbol board se bahar reh jaye to opposite
+      // signal kabhi evaluate hi nahi hota tha. Open trade ke liye fresh row
+      // build karo (60s sweep me max 1 open trade — cost bounded), taaki
+      // confirmed flip ka protective exit SILENT dead na ho.
+      if (!boardRow && typeof p.buildDualRow === 'function') {
+        try {
+          const fresh = await p.buildDualRow({
+            symbol: String(b.symbol || '').toUpperCase(),
+            market: String(b.market || b.execMarket || 'CRYPTO').toUpperCase(),
+            modeId: String(b.mode || cfg.mode || 'INTRADAY').toUpperCase(),
+            holdMin: b.holdMin || cfg.holdMin || null,
+            fx: p.fx ?? cfg.inrPerUsdt,
+          });
+          if (fresh?.ok) boardRow = fresh;
+        } catch { /* non-fatal — snapshot fallback below */ }
+      }
       // v21.23.10 [BOARD-ROTATION CACHE]: row milte hi snapshot yaad rakho;
-      // row na mile (top-6 rotation) to ≤120s purana snapshot fallback —
-      // warna UC-flip/reversal detection usi tick SILENT mar jaati thi.
+      // row na mile (top-6 rotation) to ≤120s purana snapshot fallback.
       if (boardRow) _rememberBoardRow(b.symbol, boardRow, now);
       const effRow = boardRow || _snapshotRowFor(b.symbol, now);
       const livePaper = (summary.open || []).find(t => t.id === b.paperId);
@@ -1520,11 +1544,14 @@ export async function mtfAutoTick(p = {}) {
           _logEvent('live-close-failed', `⚠️ LIVE close FAILED ${b.symbol} — book row OPEN raha (exchange par position abhi bhi hai): ${b.syncError} — next tick retry`);
           continue;
         }
+        const closeReason = ucFlipProtectiveExit
+          ? 'UC_FLIP_MINIMAL_LOSS_EXIT'
+          : (revEval?.shouldExit ? revEval.stage : (deepEval.exitReason || 'DEEP_MONITOR_PROFIT_BOOK'));
         const r = paper.closePaperTrade(b.paperId, {
           ...(p.quotes || {}),
           [b.symbol]: { price: rawQuote },
           [`${b.execMarket || b.market}|${b.symbol}`]: { price: rawQuote },
-        });
+        }, closeReason);
         // v21.23.12 [PAPER-MIRROR VOID]: LIVE row CLOSED par mirror close FAIL
         // (r not ok) hone par paper row OPEN reh jaati thi → wahi trade dobara
         // paper-side SL/T2 se book hota (double-booked track-record poison —
@@ -1538,9 +1565,7 @@ export async function mtfAutoTick(p = {}) {
         if (r?.ok || b.executionMode === 'LIVE') {
           const ccyPrefix = b.ccy === 'USDT' ? '$' : '₹';
           b.status = 'CLOSED';
-          b.closeReason = ucFlipProtectiveExit
-            ? 'UC_FLIP_MINIMAL_LOSS_EXIT'
-            : (revEval?.shouldExit ? revEval.stage : (deepEval.exitReason || 'DEEP_MONITOR_PROFIT_BOOK'));
+          b.closeReason = closeReason;
           b.closedAt = now;
           b.pnl = r?.trade?.realizedPnl ?? revEval?.netTotalPnl ?? deepEval.grossPnl;
           out.closed.push({
@@ -1570,7 +1595,6 @@ export async function mtfAutoTick(p = {}) {
           if (ucFlipConfirmed && cfg.ucFlipReverse !== false && !deepEval.tp2Hit) {
             await _tryOpenUcFlipReverse({
               b, boardRow: effRow, ltp: rawQuote, p, cfg, out, now,
-              isLiveSession: cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false),
             });
           }
         }
@@ -1589,11 +1613,12 @@ export async function mtfAutoTick(p = {}) {
       if (!b.holdMin || !b.openedAt) continue;
       const ageMs = now - b.openedAt;
       if (ageMs < b.holdMin * 60_000 + TIME_STOP_GRACE_MS) continue;
-      const r = paper.closePaperTrade(b.paperId, p.quotes);
+      const timeStopReason = `TIME_STOP ${b.holdMin}m`;
+      const r = paper.closePaperTrade(b.paperId, p.quotes, timeStopReason);
       if (r?.ok) {
         const ccyPrefix = b.ccy === 'USDT' ? '$' : '₹';
         b.status = 'CLOSED';
-        b.closeReason = `TIME_STOP ${b.holdMin}m`;
+        b.closeReason = timeStopReason;
         b.closedAt = now;
         b.pnl = r.trade?.realizedPnl ?? null;
         out.closed.push({ symbol: b.symbol, market: b.market, reason: b.closeReason, pnl: b.pnl });
@@ -2070,7 +2095,13 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}) {
     const ltp = (rawLtp > 0 && (!(entryPx > 0) || (rawLtp / entryPx >= 0.35 && rawLtp / entryPx <= 2.85)))
       ? rawLtp
       : (Number(b.ltp) > 0 ? Number(b.ltp) : entryPx);
-    const mon = evaluateActiveTradeDeepMonitor(b, { ltp });
+    // [FAST-LOOP FLIP VISIBILITY] 3s status loop ko latest known board row do —
+    // warna woh reversal-aware trendStatus ko price-only "LIVE WATCH" se
+    // overwrite kar deta hai (flip hua tha, UI par normal pullback dikhta tha).
+    const mon = evaluateActiveTradeDeepMonitor(b, {
+      ltp,
+      boardRow: _snapshotRowFor(b.symbol, Date.now()),
+    });
     // v21.22.0 ULTRA-FAST REALTIME SL RATCHET PERSISTENCE:
     // Persist peakPrice and ratcheted trailedStopLoss directly onto `_state.book`
     // so SL never regresses backward on pullbacks between background ticks.
