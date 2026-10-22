@@ -109,6 +109,26 @@ describe('v21.23.1 direction-lock RELEASE-ON-CLOSE (paper engine central hook)',
     // ETH ka lock paper engine ke BTC close se kabhi release nahi hona chahiye
     expect(getDirectionLocks(T0 + 61_000).find(l => l.symbol === 'ETH')?.active).toBe(true);
   });
+
+  it('LIVE board lock survives its mtf-auto paper mirror close (release ownership)', () => {
+    const t = openPaperTrade({
+      symbol: 'BTC', direction: 'LONG', entry: 100, qty: 5,
+      stopLoss: 98, target1: 103, target2: 106, market: 'CRYPTO', source: 'mtf-auto',
+    });
+    acquireDirectionLock({ symbol: 'BTC', side: 'LONG', source: 'mtf-board-live', cooldownMin: 240, now: T0 });
+    closePaperTrade(t.trade.id, { BTC: { price: 105 } });
+    expect(getDirectionLocks(T0 + 61_000).find(l => l.symbol === 'BTC')?.active).toBe(true);
+  });
+
+  it('manual board PAPER close releases its own mtf-board-paper lock', () => {
+    const t = openPaperTrade({
+      symbol: 'BTC', direction: 'LONG', entry: 100, qty: 5,
+      stopLoss: 98, target1: 103, target2: 106, market: 'CRYPTO', source: 'mtf-board-ui',
+    });
+    acquireDirectionLock({ symbol: 'BTC', side: 'LONG', source: 'mtf-board-paper', cooldownMin: 240, now: T0 });
+    closePaperTrade(t.trade.id, { BTC: { price: 105 } });
+    expect(getDirectionLocks(T0 + 61_000).find(l => l.symbol === 'BTC')?.active).toBe(false);
+  });
 });
 
 describe('v21.23.1 reconcileDirectionLocks sweep (routes.js 60s always-on watcher)', () => {

@@ -309,7 +309,13 @@ export function proTraderGate(sig, cfg = PROTRADER_DEFAULTS) {
 
   if (!['LONG', 'SHORT'].includes(side)) reasons.push('side:' + (side || 'FLAT'));
   if (sig?.grade !== 'STRONG') reasons.push('grade:' + (sig?.grade || 'NONE'));
-  if (!sig?.plan?.entry) reasons.push('no-plan-entry');
+  const planEntry = Number(sig?.plan?.entry);
+  const planSl = Number(sig?.plan?.stopLoss);
+  if (!(planEntry > 0)) reasons.push('no-plan-entry');
+  if (!(planSl > 0)) reasons.push('no-plan-stop');
+  else if ((side === 'LONG' && planSl >= planEntry) || (side === 'SHORT' && planSl <= planEntry)) {
+    reasons.push(`stop-polarity:${side} entry ${planEntry} vs SL ${planSl}`);
+  }
   if (ai < cfg.minAiScore) reasons.push(`aiScore:${ai}<${cfg.minAiScore}`);
   if (conf < cfg.minConfidence) reasons.push(`conf:${conf}<${cfg.minConfidence}`);
   if (vScore < cfg.minVerifiedScore) reasons.push(`verified:${vScore}<${cfg.minVerifiedScore}`);
@@ -883,8 +889,16 @@ async function _tryEntry(deps, cfg, sig, sendTelegram) {
     };
 
     if (cfg.mode === 'paper') {
-      trade.browser.actions.push('PAPER-SIM: browser click nahi hua — journal entry only (limit @ entry)');
+      trade.browser.actions.push('PAPER-SIM: browser click nahi hua �?" journal entry only (limit @ entry)');
     } else {
+      // v21.23.14 [STOP IS A HARD STOP]: re-read the persisted switch right
+      // before the browser order. A tick can be inside a 20-30s CDP wait when
+      // the user presses STOP; the in-memory cfg is stale by then.
+      const liveCfgNow = loadProTraderConfig();
+      if (!_s.running || liveCfgNow?.enabled !== true) {
+        _log('skip', `ENTRY ABORTED ${sig.symbol} - STOP pressed during tick (no order placed)`);
+        return { ok: false, error: 'stopped during tick' };
+      }
       let r;
       try {
         r = market === 'INDIA' ? await _placeBrowserIndia(sig, cfg) : await _placeBrowserCrypto(sig, cfg, fxPre);
@@ -1140,6 +1154,16 @@ async function _monitorPositions(deps, cfg, sendTelegram) {
         });
         _log('warn', `PLACED EXPIRED ${t.symbol} — ${ttlWhy}. Agar broker pe resting order hai to manually cancel karo.`);
         try { sendTelegram?.(`[PRO TRADER AUTO] ⚠️ ${t.symbol} ${t.side} limit order FILL verify nahi ho paya — slot free kiya. Broker pe resting order hai to manually cancel karo.`); } catch { /* best-effort */ }
+        continue;
+      }
+
+      // ---- UNFILLED LIMIT GUARD (v21.23.14): a live PLACED row is not a
+      // position yet. Never run LTP/TP/SL/reversal logic on it - that used to
+      // book phantom TP/SL closes (and could close a different same-pair
+      // position) while the broker order was still resting. Only fill
+      // verification + TTL above may move a PLACED row.
+      if (t.status === 'PLACED') {
+        _updTrade(t.id, { lastCheckAt: Date.now() });
         continue;
       }
 

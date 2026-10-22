@@ -483,7 +483,14 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
       ? 'EQUITY_SIM'
       : isUsdtPerp ? 'CRYPTO' : 'INDIA';
   const fxTag = isUsdDomain && Number(fx) > 40 && Number(fx) < 150 ? Math.round(Number(fx) * 10) / 10 : 'd';
-  const key = `${mkt}:${sym}:${mode.id}:${hold}:${fxTag}`;
+  // v21.23.14 [CACHE-IDENTITY]: boardSig was not part of the key, so the same
+  // symbol built with a different/absent ensemble signal could reuse the
+  // other desk's cached row (intermittent false "ENSEMBLE NOT READY" and
+  // stale side/verification). Fingerprint the inputs that change the row.
+  const sigTag = boardSig
+    ? `${String(boardSig.side || '').toUpperCase()}:${String(boardSig.grade || '').toUpperCase()}:${Math.round(Number(boardSig.confidence) || 0)}:${Number(boardSig.signalAge?.ageMs) || 0}`
+    : 'none';
+  const key = `${mkt}:${sym}:${mode.id}:${hold}:${fxTag}:${sigTag}`;
   const hit = ROW_CACHE.get(key);
   if (hit && Date.now() - hit.at < ROW_TTL_MS && !(Number(liveLtp) > 0) && typeof candlesFor !== 'function') return hit.row;
 
@@ -654,6 +661,16 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
     barCounts: { ctx: ctxCandles?.length ?? 0, trig: trigCandles?.length ?? 0 },
     asOf: Date.now(),
   };
+  // v21.23.14 [AUTO/MANUAL PARITY]: expose the main AI-BOARD signal age and
+  // make a <5m-old signal auto-ineligible too. Manual PAPER/LIVE already
+  // rejects it in mtfProEntryGate, but the auto lane never saw the age.
+  const mainSignalAgeMs = Number(boardSig?.signalAge?.ageMs);
+  row.mainSignalAgeMs = Number.isFinite(mainSignalAgeMs) && mainSignalAgeMs >= 0 ? mainSignalAgeMs : null;
+  if (row.mainSignalAgeMs != null && row.mainSignalAgeMs < 5 * 60_000) {
+    row.autoEligible = false;
+    const ageBlocker = `main AI-BOARD signal sirf ${Math.max(0, Math.round(row.mainSignalAgeMs / 60_000))}m old - stability confirm pending`;
+    row.autoBlockers = Array.from(new Set([...(row.autoBlockers || []), ageBlocker]));
+  }
   ROW_CACHE.set(key, { at: Date.now(), row });
   while (ROW_CACHE.size > ROW_CACHE_MAX) {
     const k = ROW_CACHE.keys().next().value;

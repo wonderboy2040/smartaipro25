@@ -112,6 +112,7 @@ function flippedShortRow(over = {}) {
     ok: true, symbol: 'BTC', market: 'CRYPTO', mode: 'INTRADAY', label: '15m → 5m', holdMin: 45,
     superScore: 86, tier: 'ELITE', side: 'SHORT', dir: -1, grade: 'A',
     triggerFired: true, dualAligned: true, counterTrend: false, tfFit: 'OK',
+    directionVerified: true, ensembleSignalAvailable: true,
     autoEligible: true, autoBlockers: [],
     plan: { entry: 100.5, stopLoss: 100.6, t1: 98.5, t2: 97.5 },
     context: { dir: -1 }, ltp: 99.6, drivers: ['x'],
@@ -247,6 +248,23 @@ describe('v21.23.8 S2 — LOSS trade + UC flip PAKKA → minimal-loss close + IM
     expect(lockLong.allowed).toBe(false);
   });
 
+  it('protective exit still happens, but unverified/ensemble-missing opposite row NEVER opens a reverse entry', async () => {
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'paper', minScore: 75 },
+      state: { book: [openLongBtc()] },
+    });
+    const { paper } = fakePaper([{ id: 777, symbol: 'BTC', market: 'FUTURES', status: 'OPEN', direction: 'LONG', openedAt: NOW - 5 * 60_000 }]);
+    const out = await mtfAutoTick(tickP(paper, cryptoBoardRows([flippedShortRow({
+      directionVerified: false,
+      ensembleSignalAvailable: false,
+    })])));
+
+    expect(out.closed).toHaveLength(1);
+    expect(out.closed[0].reason).toBe('UC_FLIP_MINIMAL_LOSS_EXIT');
+    expect(out.opened).toHaveLength(0);
+    expect(paper.openPaperTrade).not.toHaveBeenCalled();
+  });
+
   it('dayCount accounting: flip entry din ka ek trade count karti hai (quota honest)', async () => {
     __resetMtfAutoForTests({
       config: { enabled: true, executionMode: 'paper', minScore: 75 },
@@ -330,6 +348,7 @@ describe('v21.23.8 S2 — LOSS trade + UC flip PAKKA → minimal-loss close + IM
     const { paper } = fakePaper([{ id: 777, symbol: 'BTC', market: 'FUTURES', status: 'OPEN', direction: 'LONG', openedAt: NOW - 5 * 60_000 }]);
     const buildRow = vi.fn(async ({ symbol }) => ({
       ok: true, symbol, market: 'CRYPTO', side: 'SHORT', triggerFired: false,
+      directionVerified: true, ensembleSignalAvailable: true, autoEligible: true,
       superScore: 80, plan: { entry: 99.6, stopLoss: 100.6, t1: 98.5, t2: 97.5 },
       context: { dir: -1 }, triggerDir: -1, ltp: 99.6,
     }));

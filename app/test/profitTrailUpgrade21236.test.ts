@@ -348,6 +348,33 @@ describe('v21.23.6 G2 — LIVE session entry = ELITE/STRONG (superScore>=80) ONL
     expect(out.opened).toHaveLength(1);
   });
 
+  it('desk-scope: India-only live session never places a CRYPTO LIVE order', async () => {
+    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75 } });
+    const { paper } = fakePaper();
+    const liveExecute = liveExecuteOk();
+    const out = await mtfAutoTick(liveP(paper, {
+      siteLiveActive: true,
+      siteLiveByDesk: { crypto: false, india: true },
+      liveExecute,
+    }));
+    expect(liveExecute).not.toHaveBeenCalled();
+    expect(paper.openPaperTrade).toHaveBeenCalledTimes(1);
+    expect(out.opened).toHaveLength(1);
+  });
+
+  it('desk-scope: crypto live session still places the CRYPTO LIVE order', async () => {
+    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75 } });
+    const { paper } = fakePaper();
+    const liveExecute = liveExecuteOk();
+    const out = await mtfAutoTick(liveP(paper, {
+      siteLiveActive: true,
+      siteLiveByDesk: { crypto: true, india: false },
+      liveExecute,
+    }));
+    expect(liveExecute).toHaveBeenCalledTimes(1);
+    expect(out.opened).toHaveLength(1);
+  });
+
   it('PAPER session (no siteLiveActive): ACTION-tier row still opens — paper mode UNCHANGED', async () => {
     __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75 } });
     const { paper } = fakePaper();

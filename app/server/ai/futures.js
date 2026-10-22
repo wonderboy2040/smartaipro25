@@ -2384,6 +2384,14 @@ export async function executeMtfDualLiveOrder(opts = {}) {
       const sameActiveExch = activeExchList.find(p => p.pair === pair);
       if (sameActiveExch) {
         const existingSame = openLivePositions.find(p => p.pair === pair) || null;
+        // v21.23.14 [SIDE-HONESTY]: same pair is NOT the same trade. A user's
+        // manual/journaled LONG on the pair must never make a requested SHORT
+        // return ok:true (callers then book a phantom opposite-side LIVE row).
+        const exchSide = Number(sameActiveExch.activePos) > 0 ? 'LONG' : 'SHORT';
+        if (exchSide !== reqSide) {
+          const msg = `Opposite ${exchSide} position already active on ${pair} - ${reqSide} entry blocked (1 session = 1 direction)`;
+          return { ok: false, blocked: true, reason: msg, error: msg, existingSide: exchSide, requestedSide: reqSide };
+        }
         return {
           ok: true,
           mode: 'live',

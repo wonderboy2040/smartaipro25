@@ -54,11 +54,16 @@ export function acquireDirectionLock({
  * Marks a symbol's active position as closed while keeping the post-entry flip cooldown
  * (or clearing immediately when `clearCooldown = true`).
  */
-export function releaseDirectionLock(symbol, { clearCooldown = false, now = Date.now() } = {}) {
+export function releaseDirectionLock(symbol, { clearCooldown = false, now = Date.now(), source = null } = {}) {
   const norm = normalizeLockSymbol(symbol);
   if (!norm) return false;
   const cur = _locks.get(norm);
   if (!cur) return false;
+  // v21.23.14 [RELEASE OWNERSHIP]: a paper close may only release the lock
+  // its own engine owns. A live-book lock (e.g. mtf-board-live) must stay
+  // active while that exchange position is open; the 60s cross-book sweeper
+  // releases it once every book is flat.
+  if (source && cur.source !== source) return false;
   if (clearCooldown) {
     _locks.delete(norm);
     return true;

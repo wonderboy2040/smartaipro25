@@ -1102,6 +1102,7 @@ export interface MtfAutoStatus {
   executionMode?: 'paper' | 'live';
   autoSyncSiteLive?: boolean;
   siteLiveActive?: boolean;
+  siteLiveByDesk?: { crypto: boolean; india: boolean };
   coindcxConnected?: boolean;
   walletAmountINR?: number;
   walletDeployPct?: number;

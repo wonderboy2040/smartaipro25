@@ -796,6 +796,16 @@ export async function agentStart({ mode, liveConfirmPhrase } = {}) {
   }
   return { ok: true, config: next, ...(warning ? { warning } : {}) };
 }
+/** Last refresh of the crypto wallet (live equity when connected) - used by the
+ *  India desk's global-risk gate so cross-desk heat is not sized against a
+ *  hardcoded practice balance while the crypto agent has a real wallet view. */
+export function agentLastWalletEquityINR() {
+  const eq = Number(_state.lastWallet?.equityINR);
+  const at = Number(_state.lastWallet?.at);
+  if (!(eq > 0) || !(at > 0) || Date.now() - at > 10 * 60_000) return null;
+  return eq;
+}
+
 export function agentStop({ reason = 'user' } = {}) {
   const cfg = loadAgentConfig();
   saveAgentConfig({ ...cfg, enabled: false });
@@ -1976,8 +1986,24 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
       best.symbol, { ltp: best.plan.entry, levels: 20 },
     ).catch(() => null);
   let out = null;
+  // v21.23.14 [STOP DURING TICK]: cfg was snapshotted at tick start. A STOP
+  // pressed while the gauntlet/scan/depth awaits were in flight must abort
+  // the order before the executor call - not place one last trade.
+  const stopRequestedMidTick = () => {
+    try { return loadAgentConfig()?.enabled !== true; } catch { return true; }
+  };
+  const abortSplitForStop = (leg, legs) => {
+    if (splitOpenedLegs > 0) {
+      log('skip', `STOP pressed during split - ${best.symbol}: ${splitOpenedLegs}/${legs} filled, remaining legs aborted`);
+      out = { ...(out || {}), ok: true, splitIncomplete: true, error: 'STOP pressed during split - remaining legs aborted' };
+      return 'break';
+    }
+    log('skip', `STOP pressed during tick - ${best.symbol} ${best.side} entry aborted before order (leg ${leg + 1}/${legs})`);
+    persistState();
+    return 'return';
+  };
   // v20.7.3: tracks how many split legs actually filled (futures AND spot
-  // loops below) — a later leg refused by the one-per-pair gate must NOT
+  // loops below) �?" a later leg refused by the one-per-pair gate must NOT
   // turn a partially-filled entry into a "failed" one.
   let splitOpenedLegs = 0;
   if (wantFutures || best.market === 'GLOBALFUTURES') {
@@ -2026,6 +2052,10 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
     const marginPerLeg = Math.round((marginUSDT / legs) * 1000) / 1000;
     for (let leg = 0; leg < legs; leg++) {
       if (leg > 0) await new Promise(r => setTimeout(r, SLIP_CHILD_GAP_MS));
+      if (stopRequestedMidTick()) {
+        if (abortSplitForStop(leg, legs) === 'return') return;
+        break;
+      }
       if (isGlobal) {
         // v10.4 GLOBAL EQUITY FUTURES SIM — paper/notify only (LIVE reject
         // hota hai executeGlobalSignal gate 0 me — CoinDCX par ye equities nahi)
@@ -2078,6 +2108,10 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
     const { getFreshSignalForExec } = await import('./signals.js');
     for (let leg = 0; leg < legs; leg++) {
       if (leg > 0) await new Promise(r => setTimeout(r, SLIP_CHILD_GAP_MS));
+      if (stopRequestedMidTick()) {
+        if (abortSplitForStop(leg, legs) === 'return') return;
+        break;
+      }
       out = await executeSignal({
         symbol: best.symbol, side: best.side,
         mode: cfg.mode === 'live' ? 'live' : cfg.mode === 'notify' ? 'notify' : 'paper',

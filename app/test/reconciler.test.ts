@@ -72,6 +72,18 @@ describe('v20.7 reconciler — kill-switch hierarchy', () => {
     expect((await port.getPositions()).length).toBe(0);
   });
 
+  it('L2 close verdict {ok:false} is NOT treated as flat - position stays + CRITICAL alert', async () => {
+    const port = new PaperPort({ startingEquityUSDT: 1000 });
+    await port.open({ pair: 'B-BTC_USDT', side: 'LONG', qty: 0.1, leverage: 5, type: 'market', price: 100, sl: 95, tp: 110, clientId: 'reject1' });
+    (port as unknown as { close: () => Promise<unknown> }).close = async () => ({ ok: false, error: 'exchange rejected' });
+    const alerts: string[] = [];
+    initReconciler({ port, env: {}, alertSink: (m: string) => { alerts.push(m); }, heartbeatFile: HEARTBEAT, killFlagFile: KILL_FLAG });
+    setKill(2, 'reduce-only drill');
+    await __driveReconcileTickForTests();
+    expect((await port.getPositions()).length).toBe(1);
+    expect(alerts.some(m => /L2 REDUCE-ONLY CLOSE FAILED/.test(m))).toBe(true);
+  });
+
   it('L3: setKill(3) flatten + disable — closes all + refuses future starts', async () => {
     const port = new PaperPort({ startingEquityUSDT: 1000 });
     await port.open({ pair: 'B-BTC_USDT', side: 'LONG', qty: 0.1, leverage: 5, type: 'market', price: 100, sl: 95, tp: 110, clientId: 'c1' });
@@ -182,6 +194,24 @@ describe('v20.7 reconciler — orphan adoption (reconcile)', () => {
     expect(alertMsgs.some(m => /ORPHAN/i.test(m))).toBe(true);
     // orphan was flattened
     expect((await port.getPositions()).length).toBe(0);
+  });
+
+  it('orphan close {ok:false} stays open + FLATTEN FAILED alert (no false flat claim)', async () => {
+    const port = new PaperPort({ startingEquityUSDT: 1000 });
+    await port.open({ pair: 'B-BTC_USDT', side: 'LONG', qty: 0.1, leverage: 5, type: 'market', price: 100, sl: null, tp: null, clientId: 'orphan-reject' });
+    (port as unknown as { close: () => Promise<unknown> }).close = async () => ({ ok: false, error: 'reduce-only rejected' });
+    const alertMsgs: string[] = [];
+    initReconciler({
+      port,
+      positionManager: { _stateForTests: () => [] },
+      alertSink: (m: string) => { alertMsgs.push(m); },
+      env: {},
+      heartbeatFile: HEARTBEAT, killFlagFile: KILL_FLAG,
+    });
+    __setEnginePairsForTests(['B-BTC_USDT']);
+    await __driveReconcileTickForTests();
+    expect((await port.getPositions()).length).toBe(1);
+    expect(alertMsgs.some(m => /ORPHAN .*FLATTEN FAILED/.test(m))).toBe(true);
   });
 
   it('v20.7.12 [H1]: MANUAL orphan (not engine-owned) with no SL → ADOPT-ONLY — kabhi close nahi', async () => {

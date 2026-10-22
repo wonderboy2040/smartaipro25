@@ -22,7 +22,8 @@ const TMP_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'mtf-auto-test-'));
 process.env.MTF_AUTO_DATA_DIR = TMP_DATA;
 import {
   mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig,
-  setMtfAutoEnabled, normalizeLinkSymbol, __resetMtfAutoForTests, MTF_AUTO_DEFAULTS,
+  setMtfAutoEnabled, normalizeLinkSymbol, recordPaperMtfBoardTrade,
+  __resetMtfAutoForTests, MTF_AUTO_DEFAULTS,
 } from '../server/ai/mtfAutoLink.js';
 
 /** Injected paper engine fake — records every call. */
@@ -74,6 +75,17 @@ describe('mtfAutoLink — config + status', () => {
     const st = mtfAutoStatus();
     expect(st.paperOnly).toBe(true);
     expect(st.note).toMatch(/PAPER/i);
+  });
+
+  it('v21.23.14: GLOBALFUTURES sim book row stays GLOBALFUTURES/USDC', () => {
+    const rec = recordPaperMtfBoardTrade({
+      symbol: 'NVDA', market: 'GLOBALFUTURES', side: 'LONG',
+      entry: 100, stopLoss: 98, t1: 103, t2: 106, qty: 2,
+    });
+    expect(rec?.market).toBe('GLOBALFUTURES');
+    expect(rec?.execMarket).toBe('GLOBALFUTURES');
+    expect(rec?.ccy).toBe('USDC');
+    expect(rec?.fxUsed).toBeNull();
   });
 
   it('clamps a hostile config (score floor 65, risk 100..25000)', () => {

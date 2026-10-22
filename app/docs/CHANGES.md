@@ -3336,3 +3336,58 @@ S1 India wrapper arity ×3 + gauntlet dataDegraded ×4 + S3/4/5/6 side-doctrine 
 Neutral-tape injection semantics ×4 + aggregateVotes freshTapeAbsent neutrality + engine boardSigs parity ×3 + paper-quota (paper click no-count / live click count / auto path count) + summary/history desk-filter semantics + SL-trail hint order + journal market stamp/filter + spot body side-strict + marginExitBody strict + browser builders throw-on-invalid + openPaperTrade side-honest + restore side-inference + recordLiveMtfBoardTrade throw + Yahoo local sorts ×2 + cert cdc-official chain + version/stamps. + honest pins: launcherAutoBuild 21.23.13, bat stale-stamp list.
 
 **FULL RELEASE GATE**: tsc 0 · lint 0 · tests ALL PASS · dist 21.23.13 · check:routes PASS · check:version OK
+
+## v21.23.14 — FULL-FLOW AUDIT #3: FAIL-CLOSED CLOSE/ENTRY FIXES + LIVE/PAPER DESK HONESTY
+
+**User ask: top AI trading agents ka full working flow deep recheck + confirmed defects fix karo (MTF board → SAPTA/auto/manual → LIVE/PAPER → exits/UI).**
+
+Do parallel read-only audits (SAPTA/agent/order-flow + MTF board/manual/auto-flow) ke baad confirmed high-risk defects fix kiye. Objective: PAPER↔LIVE leakage, opposite-side adoption, phantom closes, unverified reverse entries aur misleading P&L band; koi gate weaken nahi kiya.
+
+### 1) CRITICAL — reconciler `{ok:false}` close verdict ko flat maan raha tha
+- **Root cause**: `ApiFuturesPort.close()` throw nahi karta, `{ok:false}` return karta hai; reconciler L2/L3 loops verdict ignore karke "closed" count/alerts bhej rahe the, orphan flatten bhi success report karta tha — exchange par position zinda, system me flat.
+- **Fix**: L2/L3 close + orphan flatten ab strictly `r?.ok === true` demand karte hain; failure par `lastErr`/CRITICAL alert + retry, position book me open rehti hai.
+
+### 2) CRITICAL — SAPTA `PLACED` live limit row ko filled position ki tarah monitor karta tha
+- **Root cause**: unfilled `PLACED` row LTP/TP/SL/reversal monitor me girta tha → phantom close, wrong position, stale stop updates.
+- **Fix**: hard `PLACED` guard (lastCheckAt only) + live order se pehle persisted STOP re-read + valid plan entry/SL + LONG/SHORT stop-polarity gate (`no-plan-stop`, `stop-polarity`).
+
+### 3) CRITICAL — live entry same pair ki OPPOSITE active position ko success maan sakta tha
+- **Fix**: `executeMtfDualLiveOrder` exchange position side verify karta hai; mismatched active side par honest `{ok:false, blocked:true, existingSide}` — reverse/hedge silently adopt nahi hota.
+
+### 4) HIGH — India live MTF book stale board levels par save hoti thi
+- **Fix**: India manual LIVE record ab broker fill (`filled.price/qty`) + position SL/TP/T2 par anchored; qty bhi actual fill.
+
+### 5) HIGH — UC flip protective exit ke baad unverified row par reverse entry
+- **Root cause**: protective exit sahi tha, par reverse ticket `directionVerified`/ensemble/auto eligibility verify nahi karta tha.
+- **Fix**: reverse ab sirf verified direction + ensemble available + `autoEligible` + non-counter-trend/HTF + no veto/opposing-flow par; warna exit-only (`flip-skip`), protective exit kabhi block nahi.
+
+### 6) HIGH — PAPER TEST + global `siteLiveActive` = live-order risk; UI gate server se loose
+- **Fix**: PAPER TEST auto config ab explicit `autoSyncSiteLive:false`; server gate jaisa hi UI `canPaper` (`autoEligible`, score ≥65, no counter-trend), LIVE button EQUITY SIM/GLOBALFUTURES par hidden.
+- `siteLiveActive` ab desk-scoped hai: `siteLiveByDesk: { crypto, india }` route/context me compute hota hai aur engine ko diya jaata hai (`siteLiveForDesk(p, market)`). India LIVE arming crypto auto ko arm nahi karti (aur reverse bhi nahi); purana boolean sirf backward-compatible fallback ke liye rakha gaya.
+
+### 7) HIGH — EQUITY SIM rows CRYPTO/FUTURES/USDT domain me record ho rahi thi
+- **Fix**: GLOBALFUTURES/EQUITY_SIM ab `market/execMarket:'GLOBALFUTURES'`, `ccy:'USDC'`; re-anchor bhi domain + `fxUsed` update karta hai. CRYPTO board route GLOBALFUTURES signals merge karta hai + `mainSignalForEntry` global fallback.
+- **Double-wall**: `/api/ai/mtf-dual/live` ab `market=GLOBALFUTURES` ko explicit `PAPER-only` reject karta hai (pehle `isUsd` fall-through India/Dhan branch me ja sakta tha).
+
+### 8) CONTROL-PLANE HARDENING
+- Board `ROW_CACHE` key me `boardSig` fingerprint (side/grade/confidence/signalAge) — cross-signal stale row reuse band.
+- Auto lane ko manual gate jaisa 5-minute main-signal age floor (`mainSignalAgeMs` + blocker).
+- LIVE close ab `pnlVerified/pnlSource` carry karta hai; exchange realized P&L na mile to UI/log `(estimate)`, fake confirmed P&L nahi.
+
+### 9) HIGH - manual MTF board entries direction-lock ke bahar thi
+- **Root cause**: board ke PAPER/LIVE button paths cross-engine lock na check karte the na acquire - ek opposite-side manual PAPER trade live auto/agent position ke saath khul sakti thi; manual close ownership bhi clear nahi tha.
+- **Fix**: dono paths order se PEHLE `checkDirectionLock(baseSym, side)` (409 + honest reason), aur position/fill ke baad `acquireDirectionLock` (`mtf-board-paper` / `mtf-board-live`). Release ab source-owned hai: `mtf-auto` paper mirror manual LIVE lock ko release nahi kar sakta (`releaseDirectionLock(..., { source })`), manual board PAPER apna `mtf-board-paper` lock release karta hai, aur live/journal-only locks 60s all-books sweeper se flat hone par release hote hain - opposite side post-entry cooldown tak blocked.
+
+### 10) HIGH - crypto agent STOP during in-flight tick
+- **Root cause**: `cfg.enabled` tick start pe snapshot hota tha; gauntlet/scan/depth awaits ke beech STOP dabane par bhi last order place ho sakta tha (split ka har leg bhi).
+- **Fix**: har executor call se pehle persisted config re-read (`loadAgentConfig()?.enabled !== true` = fail-closed abort). Split me pehle legs fill ho chuke hon to remaining aborted + partial-filled outcome honestly recorded.
+
+### 11) MEDIUM - India desk global-risk heat hardcoded ?10k crypto capital
+- **Root cause**: India `globalRiskGate` hamesha `cryptoEquityINR: 10_000` bhejta tha, chahe crypto agent ne real wallet refresh kiya ho - combined-heat cap connected account par late fire hota tha.
+- **Fix**: naya lightweight `agentLastWalletEquityINR()` crypto agent ke last refreshed wallet equity ko expose karta hai; India gate wahi use karta hai, cold-start par hi honest ?10k practice fallback.
+
+### Tests / gate
+- New `test/fullFlowAudit212314.test.ts` + reconciler close-rejection, SAPTA SL-polarity/PLACED, UC reverse-parity, sim-domain, manual direction-lock, agent STOP, India capital pins.
+- Targeted agent/MTF/SAPTA/reconciler/UI/direction-lock suites: **215 passed**; version/site/launcher pins: **123 passed**.
+- `tsc 0`, `lint 0`, `check:version OK (21.23.14)`, `check:routes PASS`, `dist 21.23.14`.
+- Full suite excluding 5 known environment-dependent files: **222 files / 4230 tests PASS**. Unfiltered run's 6 failures (`v69-core` network timeout, `cryptoAgent`/`llmValidator`/`council` key/mock timing, `signalRecheck` ordering) reproduced independently of this change set (no regression in affected suites).

@@ -171,6 +171,21 @@ export function loadMtfAutoConfig() {
   return _cfg;
 }
 
+/**
+ * v21.23.14 [SITE-LIVE DESK SCOPE]: one global `siteLiveActive` boolean let an
+ * India-only live session arm CRYPTO live auto (and vice-versa). Routes supply
+ * `siteLiveByDesk`; the boolean stays as a backwards-compatible fallback.
+ * SIM books are never live.
+ */
+function siteLiveForDesk(p = {}, market = 'CRYPTO') {
+  const m = String(market || '').toUpperCase();
+  if (m === 'GLOBALFUTURES' || m === 'EQUITY_SIM') return false;
+  if (p.siteLiveByDesk && typeof p.siteLiveByDesk === 'object') {
+    return m === 'INDIA' ? p.siteLiveByDesk.india === true : p.siteLiveByDesk.crypto === true;
+  }
+  return Boolean(p.siteLiveActive);
+}
+
 function _sanitizeCfg(cfg) {
   // v21.23.10 [F10-DEAD-KEYS]: pehle `{ ...cfg }` passthrough spread config ke
   // HAR dead key ko persist karta tha — `markets` (['CRYPTO']) aur
@@ -321,6 +336,9 @@ function _rememberBoardRow(symbol, row, now) {
     triggerDir: Number(row.triggerDir) || 0,
     contextDir: Number(row.context?.dir) || 0,
     atrPct: Number(row.context?.atrPct) > 0 ? Number(row.context.atrPct) : null,
+    directionVerified: row.directionVerified === true,
+    ensembleSignalAvailable: row.ensembleSignalAvailable !== false,
+    autoEligible: row.autoEligible === true,
   });
   if (_lastBoardRowSeenMap.size > 64) {
     const firstKey = _lastBoardRowSeenMap.keys().next().value;
@@ -337,6 +355,9 @@ function _snapshotRowFor(symbol, now) {
     triggerFired: s.triggerFired,
     superScore: s.superScore,
     triggerDir: s.triggerDir,
+    directionVerified: s.directionVerified === true,
+    ensembleSignalAvailable: s.ensembleSignalAvailable !== false,
+    autoEligible: s.autoEligible === true,
     context: { dir: s.contextDir, ...(s.atrPct != null ? { atrPct: s.atrPct } : {}) },
     __snapshot: true,
   };
@@ -1077,6 +1098,27 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     // ke liye site-live hone se relaxed live quota / LIVE order dono galat hain.
     const priorWasLive = b.executionMode === 'LIVE' || Boolean(b.livePositionId) || Boolean(b.liveOrderId);
 
+    // v21.23.14 [REVERSE-ENTRY PARITY]: a protective exit may use an
+    // opposite row, but a NEW reverse position must clear the same hard
+    // readiness gates as a manual/auto entry. Unverified / ensemble-warming /
+    // counter-trend / vetoed rows can exit the old trade but never open one.
+    const reverseReady = Boolean(
+      boardRow
+      && boardRow.directionVerified === true
+      && boardRow.ensembleSignalAvailable !== false
+      && boardRow.autoEligible === true
+      && boardRow.counterTrend !== true
+      && boardRow.counterHtf !== true
+      && !boardRow.trapVeto
+      && !boardRow.zoneWallVeto
+      && !boardRow.reversalRisk
+      && boardRow.trigger?.opposingFlow !== true
+    );
+    if (!reverseReady) {
+      _logEvent('flip-skip', `?? UC FLIP-REVERSE SKIP ${sym}: protective exit done, reverse entry blocked - direction/ensemble/auto readiness not verified`);
+      return null;
+    }
+
     const ticket = deriveUcFlipReverseTicket({ side, ltp, boardRow });
     if (!ticket) return null;
 
@@ -1157,7 +1199,7 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     // Reverse ka mode purane trade ke mode se hi mirror hoga: PAPER close →
     // PAPER reverse, LIVE close → LIVE reverse (jab live session active ho).
     const wantLiveOrder = !isSim && priorWasLive
-      && (cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false));
+      && (cfg.executionMode === 'live' || Boolean(siteLiveForDesk(p, b.market) && cfg.autoSyncSiteLive !== false));
     if (wantLiveOrder) {
       if (typeof p.liveExecute !== 'function') {
         _voidRollbackPaperTrade(paper, res, p.quotes);
@@ -1525,9 +1567,12 @@ export async function mtfAutoTick(p = {}) {
         // close record + churn). Ab {ok:false} = row OPEN + syncError stamp +
         // agle tick retry. undefined/legacy stub contract permissive rehta hai.
         let liveCloseFailed = null;
+        let liveClosePnl = null;
         if (b.executionMode === 'LIVE' && typeof p.liveClose === 'function') {
           try {
             const lc = await p.liveClose(b);
+            const lcPnl = Number(lc?.realizedPnl ?? lc?.pnl);
+            if (lc?.ok !== false && Number.isFinite(lcPnl)) liveClosePnl = lcPnl;
             // v21.23.12 [NULL-VERDICT HONESTY]: routes ka wrapper `.catch(() => null)`
             // hai — closeCoinDcxActivePosition kabhi throw nahi karta, par
             // AGAR wrapper me kuch bhi throw hua to null aata tha aur null
@@ -1563,28 +1608,44 @@ export async function mtfAutoTick(p = {}) {
           } catch { /* best-effort */ }
         }
         if (r?.ok || b.executionMode === 'LIVE') {
-          const ccyPrefix = b.ccy === 'USDT' ? '$' : '₹';
+          const ccyPrefix = (b.ccy === 'USDT' || b.ccy === 'USDC') ? '$' : '?';
           b.status = 'CLOSED';
           b.closeReason = closeReason;
           b.closedAt = now;
-          b.pnl = r?.trade?.realizedPnl ?? revEval?.netTotalPnl ?? deepEval.grossPnl;
+          const estimatedPnl = r?.trade?.realizedPnl ?? revEval?.netTotalPnl ?? deepEval.grossPnl;
+          if (b.executionMode === 'LIVE' && liveClosePnl != null) {
+            b.pnl = liveClosePnl;
+            b.pnlVerified = true;
+            b.pnlSource = 'EXCHANGE';
+          } else if (b.executionMode === 'LIVE') {
+            // Exchange close response carried no realized P&L. Keep the honest
+            // estimate but never present it as verified exchange truth.
+            b.pnl = estimatedPnl;
+            b.pnlVerified = false;
+            b.pnlSource = 'ESTIMATE';
+          } else {
+            b.pnl = estimatedPnl;
+            b.pnlVerified = true;
+            b.pnlSource = 'PAPER';
+          }
           out.closed.push({
             symbol: b.symbol,
             market: b.market,
             reason: b.closeReason,
             pnl: b.pnl,
+            pnlVerified: b.pnlVerified,
             feeCovered: Boolean(revEval?.feeCovered || deepEval.feeCovered),
             feeBePrice: revEval?.feeBePrice ?? deepEval.feeBreakevenPrice,
             trailedStopLoss: b.trailedStopLoss ?? b.stopLoss,
           });
           _logEvent(ucFlipProtectiveExit ? 'flip-exit' : 'reversal-exit', ucFlipProtectiveExit
             ? `🔁 UC FLIP MINIMAL-LOSS EXIT ${b.symbol} ${b.side} @ ${rawQuote} — board ${oppSide} PAKKA hone par full SL (-1R) se pehle bacha liya (R ${deepEval.currentR})`
-            : `REVERSAL FEE-SAFE EXIT ${b.symbol} @ ${rawQuote} (reason ${b.closeReason} · fee floor ${deepEval.feeBreakevenPrice}) — pnl ${ccyPrefix}${b.pnl ?? '—'} (ZERO LOSS)`);
+            : `REVERSAL FEE-SAFE EXIT ${b.symbol} @ ${rawQuote} (reason ${b.closeReason} · fee floor ${deepEval.feeBreakevenPrice}) — pnl ${ccyPrefix}${b.pnl ?? '—'}${b.pnlVerified === false ? ' (ESTIMATE - exchange P&L not reported)' : ''}`);
           if (typeof p.notify === 'function') {
             try {
               const exitMsg = ucFlipProtectiveExit
                 ? `🔁 MTF AUTO UC FLIP: ${b.symbol} ${b.side} closed @ ${rawQuote} MINIMAL LOSS (${deepEval.currentR}R) — board ${oppSide} PAKKA, reverse entry opening...`
-                : `🛡️ MTF AUTO Deep Monitor Exit: ${b.symbol} ${b.side} closed @ ${rawQuote} (${b.closeReason}) — net pnl ${ccyPrefix}${b.pnl ?? '—'}`;
+                : `🛡️ MTF AUTO Deep Monitor Exit: ${b.symbol} ${b.side} closed @ ${rawQuote} (${b.closeReason}) — net pnl ${ccyPrefix}${b.pnl ?? '—'}${b.pnlVerified === false ? ' (estimate)' : ''}`;
               await p.notify(exitMsg);
             } catch { /* non-fatal */ }
           }
@@ -1642,7 +1703,8 @@ export async function mtfAutoTick(p = {}) {
   // "ab sirf auto trade button activate hone par Strong trade ko verfied signal lagna chahiye
   //  long or short accurately aur 1 session me ek hi trade aur full amount of wallet ka
   //  ye trade hone ke baad then next trade ek sath 2 trades mat lagao"
-  const isLiveSession = cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false);
+  const isLiveSession = cfg.executionMode === 'live'
+    || Boolean(cfg.autoSyncSiteLive !== false && (siteLiveForDesk(p, 'CRYPTO') || siteLiveForDesk(p, 'INDIA')));
   const currentOpenInSession = _openLinked();
   if (isLiveSession && currentOpenInSession.length >= 1) {
     const act = currentOpenInSession[0];
@@ -1908,7 +1970,7 @@ export async function mtfAutoTick(p = {}) {
       const isEliteOrStrong = row.tier === 'ELITE' || row.tier === 'STRONG' || row.tier === 'ACTION' || Number(row.superScore) >= (Number(cfg.minScore) || 75);
       // v21.23.8: EQUITY SIM (GLOBALFUTURES) rows KABHI live order nahi lagati
       // — CoinDCX par US equities listed nahi, SIM/paper-only desk hai.
-      const wantLiveOrder = !isSimRow && (cfg.executionMode === 'live' || Boolean(p.siteLiveActive && cfg.autoSyncSiteLive !== false)) && isEliteOrStrong;
+      const wantLiveOrder = !isSimRow && (cfg.executionMode === 'live' || Boolean(siteLiveForDesk(p, row.market) && cfg.autoSyncSiteLive !== false)) && isEliteOrStrong;
 
       // In strict live-only mode, only ELITE/STRONG rows auto-place
       if (cfg.executionMode === 'live' && !isEliteOrStrong) {
@@ -2232,8 +2294,14 @@ export function recordLiveMtfBoardTrade(item = {}) {
   const SIDE_ALIAS_BOARD = { BUY: 'LONG', SELL: 'SHORT', LONG: 'LONG', SHORT: 'SHORT' };
   const sideNorm = SIDE_ALIAS_BOARD[String(item.side || '').toUpperCase()] || null;
   if (!sideNorm) {
-    throw new Error(`recordLiveMtfBoardTrade: invalid side "${item.side}" for ${sym} — LONG/SHORT (ya BUY/SELL) required; silent default v21.23.13 se mana hai (direction-honesty)`);
+    throw new Error(`recordLiveMtfBoardTrade: invalid side "${item.side}" for ${sym} - LONG/SHORT (ya BUY/SELL) required; silent default v21.23.13 se mana hai (direction-honesty)`);
   }
+  const rawBookMarket = String(item.market || 'CRYPTO').toUpperCase();
+  const isSimBook = rawBookMarket === 'GLOBALFUTURES' || rawBookMarket === 'EQUITY_SIM';
+  const isUsdBook = !isSimBook && rawBookMarket !== 'INDIA';
+  const bookMarket = isSimBook ? 'GLOBALFUTURES' : isUsdBook ? 'CRYPTO' : 'INDIA';
+  const execMarket = isSimBook ? 'GLOBALFUTURES' : isUsdBook ? 'FUTURES' : 'INDIA';
+  const bookCcy = isSimBook ? 'USDC' : isUsdBook ? 'USDT' : 'INR';
   const existing = st.book.find(b => b.status === 'OPEN' && b.symbol === sym);
   if (existing) {
     // v21.23.12 [RE-ANCHOR LIFECYCLE RESET]: existing OPEN row par re-anchor
@@ -2250,6 +2318,13 @@ export function recordLiveMtfBoardTrade(item = {}) {
     existing.traded = true;
     existing.fullControl = true;
     existing.side = sideNorm;
+    // v21.23.14 [SIM DESK HONESTY]: re-anchored rows must also update their
+    // execution domain; a GLOBALFUTURES equity paper row used to keep the old
+    // CRYPTO/FUTURES/USDT mapping and lose its quote on the next tick.
+    existing.market = bookMarket;
+    existing.execMarket = execMarket;
+    existing.ccy = bookCcy;
+    existing.fxUsed = isUsdBook ? clampN(item.fx ?? cfg.inrPerUsdt, 40, 150, 102) : null;
     existing.peakPrice = Number(item.entry) > 0 ? Number(item.entry) : (Number(existing.entry) > 0 ? Number(existing.entry) : null);
     existing.t1Hit = false;
     existing.openedAt = Date.now();
@@ -2294,7 +2369,6 @@ export function recordLiveMtfBoardTrade(item = {}) {
   const t1 = Number(item.t1) || 0;
   const t2 = Number(item.t2) || 0;
   const qty = Number(item.qty) || 1;
-  const isUsd = String(item.market || 'CRYPTO').toUpperCase() !== 'INDIA';
   const fxRate = clampN(item.fx ?? cfg.inrPerUsdt, 40, 150, 102);
   const leverage = Number(item.leverage) || computeMtfWalletLeverage(item.walletINR || cfg.walletAmountINR, cfg);
   const w95 = computeWallet95Deployment({
@@ -2304,7 +2378,6 @@ export function recordLiveMtfBoardTrade(item = {}) {
     deployPct: cfg.walletDeployPct ?? 100,
     cfg,
   });
-  const execMarket = isUsd ? 'FUTURES' : 'INDIA';
   const feeBePrice = feeBreakevenFloor({ entry, side: sideNorm, market: execMarket });
   const riskPerUnit = Math.abs(entry - sl);
   const now = Date.now();
@@ -2317,10 +2390,10 @@ export function recordLiveMtfBoardTrade(item = {}) {
     fullControl: true,
     openedInLiveMode: !isPaperExec,
     symbol: sym,
-    market: isUsd ? 'CRYPTO' : 'INDIA',
+    market: bookMarket,
     execMarket,
-    ccy: isUsd ? 'USDT' : 'INR',
-    fxUsed: isUsd ? fxRate : null,
+    ccy: bookCcy,
+    fxUsed: isUsdBook ? fxRate : null,
     side: sideNorm,
     score: item.superScore ?? 85,
     tier: item.tier || 'ELITE',
@@ -2345,12 +2418,12 @@ export function recordLiveMtfBoardTrade(item = {}) {
     deepMonitorStage: 'STAGE_0_INITIAL_GUARD',
     deepMonitorLabel: isPaperExec ? 'Stage 0 · Paper Direction Test · SL Auto-Trail Ready' : 'Stage 0 · Initial SL Guard (Full Control)',
     trendStatus: `📡 ${sideNorm === 'SHORT' ? 'BEARISH' : 'BULLISH'} LIVE WATCH (+0.00R)`,
-    marginINR: +(qty * entry * (isUsd ? fxRate : 1) / leverage).toFixed(2),
-    marginUsdt: isUsd ? +(qty * entry / leverage).toFixed(4) : null,
-    riskINR: +(qty * riskPerUnit * (isUsd ? fxRate : 1)).toFixed(2),
-    riskUsdt: isUsd ? +(qty * riskPerUnit).toFixed(4) : null,
-    notional: +(qty * entry * (isUsd ? fxRate : 1)).toFixed(2),
-    notionalUsdt: isUsd ? +(qty * entry).toFixed(4) : null,
+    marginINR: +(qty * entry * (isUsdBook ? fxRate : 1) / leverage).toFixed(2),
+    marginUsdt: isUsdBook ? +(qty * entry / leverage).toFixed(4) : null,
+    riskINR: +(qty * riskPerUnit * (isUsdBook ? fxRate : 1)).toFixed(2),
+    riskUsdt: isUsdBook ? +(qty * riskPerUnit).toFixed(4) : null,
+    notional: +(qty * entry * (isUsdBook ? fxRate : 1)).toFixed(2),
+    notionalUsdt: isUsdBook ? +(qty * entry).toFixed(4) : null,
     openedAt: now,
     dayKey: dayKeyFor(execMarket),
     status: 'OPEN',

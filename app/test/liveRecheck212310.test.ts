@@ -436,7 +436,7 @@ describe('v21.23.10 S9 — isStaleIntradaySeries (Yahoo stale-200 age gate)', ()
 describe('v21.23.10 S10 — proTraderGate dataDegraded block (v21.23.4 parity)', () => {
   const baseSig: Record<string, unknown> = {
     symbol: 'RELIANCE', market: 'INDIA', side: 'LONG', grade: 'STRONG',
-    plan: { entry: 100 }, superIntel: { aiScore: 85 }, confidence: 80,
+    plan: { entry: 100, stopLoss: 95 }, superIntel: { aiScore: 85 }, confidence: 80,
     verify: { score: 75, action: 'CONFIRM', finalCall: 'LONG' },
     executable: false,
   };

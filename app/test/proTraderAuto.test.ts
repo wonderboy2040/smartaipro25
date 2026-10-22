@@ -62,9 +62,32 @@ describe('v18.6 ProTraderAuto — USER-SPEC gates (75 / 65 / 70)', () => {
     expect(g.reasons).toEqual([]);
   });
 
-  it('SHORT side bhi pass hota hai (finalCall SHORT ke saath)', () => {
-    const g = proTraderGate(sig({ side: 'SHORT', verify: { score: 93, action: 'CONFIRM', finalCall: 'SHORT' } }), PROTRADER_DEFAULTS);
+  it('SHORT side bhi pass hota hai (valid SL above entry + finalCall SHORT)', () => {
+    const g = proTraderGate(sig({
+      side: 'SHORT',
+      plan: { entry: 100, stopLoss: 105, target1: 88, target2: 80 },
+      verify: { score: 93, action: 'CONFIRM', finalCall: 'SHORT' },
+    }), PROTRADER_DEFAULTS);
     expect(g.pass).toBe(true);
+  });
+
+  it('missing/zero/wrong-polarity SL rejects entry (naked leveraged position guard)', () => {
+    for (const plan of [
+      { entry: 100, target1: 112, target2: 120 },
+      { entry: 100, stopLoss: 0, target1: 112, target2: 120 },
+      { entry: 100, stopLoss: 101, target1: 112, target2: 120 },
+    ]) {
+      const g = proTraderGate(sig({ plan }), PROTRADER_DEFAULTS);
+      expect(g.pass).toBe(false);
+      expect(g.reasons.join(' ')).toMatch(/no-plan-stop|stop-polarity/);
+    }
+    const shortBad = proTraderGate(sig({
+      side: 'SHORT',
+      plan: { entry: 100, stopLoss: 99, target1: 88, target2: 80 },
+      verify: { score: 93, action: 'CONFIRM', finalCall: 'SHORT' },
+    }), PROTRADER_DEFAULTS);
+    expect(shortBad.pass).toBe(false);
+    expect(shortBad.reasons.join(' ')).toContain('stop-polarity');
   });
 
   it('verified 69 < 70 pe FAIL (v20.8.5 — 70 = SVA CONFIRM floor + buffer; 90 practically unreachable tha)', () => {

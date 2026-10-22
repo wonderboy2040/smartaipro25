@@ -215,7 +215,7 @@ import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, mtfProEntryGate, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
 import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isGenuinelyTradedEntry, isLiveAttemptBackoffActive } from './mtfAutoLink.js';
 // v21.23.1: cross-engine direction-lock release-on-close sweeper (directionLock.js)
-import { reconcileDirectionLocks } from './directionLock.js';
+import { acquireDirectionLock, checkDirectionLock, reconcileDirectionLocks } from './directionLock.js';
 // v21.23.4: runtime direction certificate (user demand: "accurately fix
 // karo, concrete level pe" — rising→LONG/BUY · falling→SHORT/SELL proof)
 import { runDirectionSelfTest } from './directionSelfTest.js';
@@ -365,11 +365,17 @@ export function registerAITradingRoutes(app, deps) {
     const canon = (v) => normalizeLinkSymbol(String(v || '').toUpperCase().trim().replace(/^B-/, ''), market);
     const wantRaw = String(symbol || '').toUpperCase().trim();
     const want = canon(wantRaw);
-    const list = Array.isArray(base?.signals) ? base.signals : [];
-    return list.find(s => {
+    const findIn = (list) => (Array.isArray(list) ? list : []).find(s => {
       const raw = String(s?.symbol || '').toUpperCase().trim();
       return raw === wantRaw || canon(raw) === want;
     }) || null;
+    const direct = findIn(base?.signals);
+    if (direct || market === 'INDIA' || market === 'GLOBALFUTURES') return direct;
+    // v21.23.14: an equity-symbol request may arrive with market=CRYPTO
+    // (legacy API callers). Fall back to its real GLOBALFUTURES ensemble
+    // instead of permanently failing the entry gate.
+    const eqBase = await getSignals('GLOBALFUTURES', deps, { warmOnly: true }).catch(() => null);
+    return findIn(eqBase?.signals);
   };
 
   // v6.5: telegram — secrets WIN over env; one resolver, one sender.
@@ -871,13 +877,29 @@ export function registerAITradingRoutes(app, deps) {
         getSignals(market === 'CRYPTO' ? 'FUTURES' : market, deps, { warmOnly: true }).catch(() => null),
         new Promise(r => { const t = setTimeout(() => r(null), 400); t.unref?.(); }),
       ]);
+      // v21.23.14 [EQUITY-SIM BOARD FIX]: the CRYPTO tab's EQUITY SIM cards
+      // need their OWN GLOBALFUTURES board signal. Previously they were built
+      // with `boardSig:null` (FUTURES universe has no NVDA/TSLA), so the new
+      // ensemble gate marked them "AI ENSEMBLE NOT READY" and hid PAPER.
+      const boardSigs = Array.isArray(base?.signals) ? base.signals : [];
+      if (market === 'CRYPTO' || market === 'FUTURES') {
+        const eqBase = await Promise.race([
+          getSignals('GLOBALFUTURES', deps, { warmOnly: true }).catch(() => null),
+          new Promise(r => { const t = setTimeout(() => r(null), 400); t.unref?.(); }),
+        ]);
+        const seen = new Set(boardSigs.map(s => String(s?.symbol || '').toUpperCase()));
+        for (const s of (eqBase?.signals || [])) {
+          const k = String(s?.symbol || '').toUpperCase();
+          if (k && !seen.has(k)) { seen.add(k); boardSigs.push(s); }
+        }
+      }
       const out = await getDualMtfBoard({
         market,
         mode: String(req.query.mode || cfg.mode || 'INTRADAY').toUpperCase(),
         holdMin: req.query.hold != null ? Number(req.query.hold) : cfg.holdMin,
         minScore: req.query.minScore != null ? Number(req.query.minScore) : cfg.minScore,
         limit: req.query.limit != null ? Math.min(TOP_DEEP_TREND_LIMIT, Number(req.query.limit)) : TOP_DEEP_TREND_LIMIT,
-        boardSigs: base?.signals || [],
+        boardSigs,
         fx: await mtfLiveFx(),
         fresh: req.query.fresh === '1' || req.query.fresh === 'true',
       });
@@ -924,6 +946,16 @@ export function registerAITradingRoutes(app, deps) {
       const isUsd = market === 'CRYPTO' || market === 'FUTURES' || market === 'METALS' || market === 'GLOBALFUTURES';
       const execMarket = market === 'GLOBALFUTURES' ? 'GLOBALFUTURES' : isUsd ? 'FUTURES' : 'INDIA';
       const baseSym = normalizeLinkSymbol(row.symbol, market) || symbol;
+      // v21.23.14 [MANUAL BOARD LOCK]: board-button entries were the last
+      // engine that neither checked nor acquired the cross-engine direction
+      // lock - an opposite-side manual PAPER trade could open next to a live
+      // auto/agent position. Check before opening; acquire after the position
+      // actually exists (release stays with the paper close/60s sweeper).
+      const paperLock = checkDirectionLock(baseSym, row.side);
+      if (!paperLock.allowed) {
+        const lockMsg = `${symbol}: PAPER ${row.side} blocked - ${paperLock.reason}`;
+        return res.status(409).json({ ok: false, blocked: true, error: lockMsg, reason: lockMsg, directionLock: paperLock });
+      }
       if (!isUsd) {
         const { isNseMarketOpen, freshEntriesAllowedFor } = await import('../intraday/time.js');
         if (!(isNseMarketOpen() && freshEntriesAllowedFor('INDIA'))) {
@@ -958,6 +990,12 @@ export function registerAITradingRoutes(app, deps) {
         label: `MTF BOARD · ${row.tier} ${row.superScore} · ${row.label} ${row.holdMin}m · ${isUsd ? 'USDT' : '₹'}`,
       });
       if (r0?.error) return jsonError(res, 400, r0.error);
+      try {
+        acquireDirectionLock({
+          symbol: baseSym, side: row.side, source: 'mtf-board-paper',
+          cooldownMin: Number(cfg.flipReentryBlockMin) || 240,
+        });
+      } catch { /* lock is best-effort - an already-open paper position must stay manageable */ }
       // v21.22.0: Register Paper Trade into Auto-Trade Deep Monitor so real-time Direction Follow-Through
       // ("pakka jo direction trade signal mila hai vo follow kar raha hai kya") & Ultra-Fast Auto SL Trail
       // are tracked live on the MTF Dual Board and Signal Recheck panels.
@@ -1001,6 +1039,14 @@ export function registerAITradingRoutes(app, deps) {
       const mode = String(body.mode || cfg.mode || 'INTRADAY').toUpperCase();
       const holdMin = body.hold != null ? Number(body.hold) : cfg.holdMin;
       if (!symbol) return jsonError(res, 400, 'symbol required');
+
+      // v21.23.14 [SIM LIVE DOUBLE-WALL]: GLOBALFUTURES/EQUITY SIM is a PAPER
+      // desk. This endpoint previously fell through the `isUsd` check into the
+      // INDIA/Dhan branch for market=GLOBALFUTURES - a direct API caller could
+      // send an equity SIM row to the wrong broker. UI already hides LIVE.
+      if (market === 'GLOBALFUTURES') {
+        return jsonError(res, 400, `${symbol}: GLOBALFUTURES/EQUITY SIM is PAPER-only - live execution not supported`);
+      }
 
       const fxLive = await mtfLiveFx();
       const mainSignal = await mainSignalForEntry(market, symbol);
@@ -1055,6 +1101,14 @@ export function registerAITradingRoutes(app, deps) {
 
       const isUsd = market === 'CRYPTO' || market === 'FUTURES' || market === 'METALS';
       const baseSym = normalizeLinkSymbol(row.symbol, market) || symbol;
+      // v21.23.14 [MANUAL BOARD LOCK]: live button entries must obey the same
+      // cross-engine direction lock as auto/agent/SAPTA. Check BEFORE touching
+      // the broker; acquire only after a real fill (paper mirror excluded).
+      const liveLock = checkDirectionLock(baseSym, side);
+      if (!liveLock.allowed) {
+        const lockMsg = `${symbol}: LIVE ${side} blocked - ${liveLock.reason}`;
+        return res.status(409).json({ ok: false, blocked: true, error: lockMsg, reason: lockMsg, directionLock: liveLock });
+      }
       const activeSt = mtfAutoStatus();
       const activeSessionTrades = (activeSt?.deepMonitor?.trades || []).filter(t => t.traded !== false);
       if (activeSessionTrades.length >= 1) {
@@ -1085,6 +1139,12 @@ export function registerAITradingRoutes(app, deps) {
         }
         // Register in paper mirror + Auto-Trade Deep Monitor book so 15s Signal Recheck
         // and 5-Stage Dynamic SL Trailing monitor this live order until TP1/TP2 or reversal exit!
+        try {
+          acquireDirectionLock({
+            symbol: baseSym, side, source: 'mtf-board-live',
+            cooldownMin: Number(cfg.flipReentryBlockMin) || 240,
+          });
+        } catch { /* lock is best-effort - a filled exchange position must stay manageable */ }
         const filled = liveOut.filled || {};
         const paperMirror = openPaperTradeExec({
           symbol: baseSym,
@@ -1155,16 +1215,26 @@ export function registerAITradingRoutes(app, deps) {
       if (!outIndia?.ok) {
         return res.status(400).json({ ok: false, error: outIndia?.error || outIndia?.reason || 'India live order failed' });
       }
+      try {
+        acquireDirectionLock({
+          symbol: baseSym, side, source: 'mtf-board-live',
+          cooldownMin: Number(cfg.flipReentryBlockMin) || 240,
+        });
+      } catch { /* lock is best-effort - a filled broker position must stay manageable */ }
+      const iFilled = outIndia.filled || {};
       recordLiveMtfBoardTrade({
         orderId: outIndia.orderId ?? null,
         symbol: baseSym,
         market: 'INDIA',
         side,
-        entry: Number(row.plan?.entry),
-        stopLoss: Number(row.plan?.stopLoss),
-        t1: Number(row.plan?.t1),
-        t2: Number(row.plan?.t2),
-        qty: Number(row.plan?.qty ?? 1),
+        // v21.23.14: anchor the live book to the BROKER fill, not the board
+        // plan. Dhan may fill with slippage/partial qty; plan levels would
+        // corrupt every downstream SL/TP/P&L calculation.
+        entry: Number(iFilled.price) > 0 ? Number(iFilled.price) : Number(row.plan?.entry),
+        stopLoss: Number(outIndia.position?.sl) > 0 ? Number(outIndia.position.sl) : Number(row.plan?.stopLoss),
+        t1: Number(outIndia.position?.tp) > 0 ? Number(outIndia.position.tp) : Number(row.plan?.t1),
+        t2: Number(outIndia.position?.tp2) > 0 ? Number(outIndia.position.tp2) : Number(row.plan?.t2),
+        qty: Number(iFilled.qty) > 0 ? Number(iFilled.qty) : Number(outIndia.position?.qty ?? row.plan?.qty ?? 1),
         leverage: 5,
         walletINR: cfg.walletAmountINR,
         superScore: row.superScore,
@@ -1186,11 +1256,15 @@ export function registerAITradingRoutes(app, deps) {
   const mtfAutoLiveCtx = async (cfg) => {
     const tcfg = (() => { try { return loadConfig() || {}; } catch { return {}; } })();
     const hasEnvOrSavedCreds = Boolean(loadCredsForOrder());
-    const siteLiveActive = Boolean(
-      cfg?.executionMode === 'live'
-      || (tcfg.mode === 'live' && (tcfg.allowAuto || hasEnvOrSavedCreds))
-      || tcfg.indiaMode === 'live'
-    );
+    // v21.23.14 [DESK SCOPE]: crypto and India live are independent sessions.
+    // Keep the boolean for old consumers, but the engine must receive the
+    // per-desk map - India-live must never arm CRYPTO live auto (or reverse).
+    const autoLinkLive = cfg?.executionMode === 'live';
+    const siteLiveByDesk = {
+      crypto: Boolean(autoLinkLive || (tcfg.mode === 'live' && (tcfg.allowAuto || hasEnvOrSavedCreds))),
+      india: Boolean(autoLinkLive || tcfg.indiaMode === 'live'),
+    };
+    const siteLiveActive = siteLiveByDesk.crypto || siteLiveByDesk.india;
     let walletEquityINR = Number(cfg?.walletAmountINR) || 10000;
     try {
       const w = await Promise.race([
@@ -1287,6 +1361,7 @@ export function registerAITradingRoutes(app, deps) {
     };
     return {
       siteLiveActive,
+      siteLiveByDesk,
       walletEquityINR,
       syncLivePositions,
       liveExecute,
@@ -1324,14 +1399,14 @@ export function registerAITradingRoutes(app, deps) {
         }
       } catch { /* non-fatal */ }
       const st = mtfAutoStatus(combinedQuotes);
-      const siteLiveActive = Boolean(
-        st?.config?.executionMode === 'live'
-        || st?.executionMode === 'live'
-        || (tcfg.mode === 'live' && (tcfg.allowAuto || hasCreds))
-        || tcfg.indiaMode === 'live'
-      );
+      const autoLinkLive = st?.config?.executionMode === 'live' || st?.executionMode === 'live';
+      const siteLiveByDesk = {
+        crypto: Boolean(autoLinkLive || (tcfg.mode === 'live' && (tcfg.allowAuto || hasCreds))),
+        india: Boolean(autoLinkLive || tcfg.indiaMode === 'live'),
+      };
+      const siteLiveActive = siteLiveByDesk.crypto || siteLiveByDesk.india;
       res.set('Cache-Control', 'no-store');
-      res.json({ ...st, siteLiveActive, coindcxConnected: hasCreds });
+      res.json({ ...st, siteLiveActive, siteLiveByDesk, coindcxConnected: hasCreds });
     } catch (e) {
       jsonError(res, 500, 'mtf auto status failed', e);
     }
@@ -1434,6 +1509,7 @@ export function registerAITradingRoutes(app, deps) {
         fx: fxLive,
         usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
         siteLiveActive: liveCtx.siteLiveActive,
+        siteLiveByDesk: liveCtx.siteLiveByDesk,
         walletEquityINR: liveCtx.walletEquityINR,
         syncLivePositions: liveCtx.syncLivePositions,
         liveExecute: liveCtx.liveExecute,
@@ -3252,6 +3328,7 @@ export function registerAITradingRoutes(app, deps) {
         fx: fxLive,
         usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
         siteLiveActive: liveCtx.siteLiveActive,
+        siteLiveByDesk: liveCtx.siteLiveByDesk,
         walletEquityINR: liveCtx.walletEquityINR,
         syncLivePositions: liveCtx.syncLivePositions,
         liveExecute: liveCtx.liveExecute,
@@ -3436,6 +3513,7 @@ export function registerAITradingRoutes(app, deps) {
           fx: fxLive,
           usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
           siteLiveActive: liveCtx.siteLiveActive,
+          siteLiveByDesk: liveCtx.siteLiveByDesk,
           walletEquityINR: liveCtx.walletEquityINR,
           syncLivePositions: liveCtx.syncLivePositions,
           liveExecute: liveCtx.liveExecute,

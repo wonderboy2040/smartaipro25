@@ -239,6 +239,10 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     try {
       const cfgPatch: Record<string, unknown> = {
         executionMode: 'paper',
+        // v21.23.14: PAPER TEST must be paper-only even when another desk is
+        // live. Without this, autoSyncSiteLive:true (default) turned the
+        // paper-test tick into REAL CoinDCX/India orders on a live site.
+        autoSyncSiteLive: false,
         mode,
         holdMin,
         minScore,
@@ -750,8 +754,9 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             const key = `${r.symbol}-${r.mode}`;
             const open = !!expanded[key];
             const canPaper = r.ok && (r.side === 'LONG' || r.side === 'SHORT') && p?.entry && p?.stopLoss && p?.t1
-              && !r.counterHtf && r.ensembleSignalAvailable !== false
-              && r.directionVerified === true && r.triggerFired === true && r.autoEligible !== false;
+              && !r.counterHtf && !r.counterTrend && r.ensembleSignalAvailable !== false
+              && r.directionVerified === true && r.triggerFired === true && r.autoEligible === true
+              && Number(r.superScore ?? 0) >= 65;
             const isRowUsd = r.quoteCcy === 'USDT' || r.quoteCcy === 'USD';
             const rowCcyPrefix = isRowUsd ? '$' : '₹';
             const assetTag = r.assetClass === 'METALS' || r.symbol === 'XAU' || r.symbol === 'XAG'
@@ -774,7 +779,8 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             const isPakka = Boolean(r.directionVerified ?? r.worldIndicators?.directionVerified);
             const oppBoardSide = r.boardSide || r.signals?.board?.side || null;
             const hasBoardConflict = Boolean(r.boardSideConflict || (oppBoardSide && r.side && oppBoardSide !== r.side));
-            const rowLiveReady = canPaper && !!r.directionVerified && !r.counterTrend && !r.counterHtf && !hasBoardConflict && !r.svaConflict && !r.councilConflict && Number(r.superScore ?? 0) >= 65;
+            const rowLiveReady = canPaper && !!r.directionVerified && !r.counterTrend && !r.counterHtf && !hasBoardConflict && !r.svaConflict && !r.councilConflict
+              && r.assetClass !== 'EQUITY_SIM' && r.market !== 'GLOBALFUTURES' && Number(r.superScore ?? 0) >= 65;
             return (
               <div key={key} data-testid={`mtf-card-${r.symbol}`} className="quantum-panel rounded-2xl p-3 border border-violet-500/15">
                 {/* card header */}

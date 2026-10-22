@@ -448,10 +448,15 @@ async function _tick(deps, sendTelegram) {
   // system finally sees it. ----
   let grGate = null;
   try {
-    const { loadAgentConfig } = await import('./agent.js');
-    const _cxCfg = loadAgentConfig();
+    const { agentLastWalletEquityINR } = await import('./agent.js');
+    // v21.23.14 [CROSS-DESK CAPITAL]: use the crypto agent's last refreshed
+    // wallet equity when available; the old hardcoded ?10k understated a
+    // connected account and made the combined-heat cap fire late. Practice
+    // ?10k remains only the honest cold-start fallback.
+    const cxEq = Number(agentLastWalletEquityINR?.());
+    const cxEquityINR = cxEq > 0 ? cxEq : 10_000;
     grGate = await globalRiskGate({
-      cryptoEquityINR: 10_000, // practice default; the crypto agent refreshes with its live wallet on ITS ticks
+      cryptoEquityINR: cxEquityINR,
       indiaCapitalINR: equityINR,
     });
     if (grGate.veto) {

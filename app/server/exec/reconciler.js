@@ -200,8 +200,11 @@ async function _reconcileTick() {
       for (const p of positions) {
         let closed = false, lastErr = null;
         for (let attempt = 0; attempt < 2 && !closed; attempt++) {
-          try { await _state.port.close({ positionId: p.id }); closed = true; }
-          catch (e) { lastErr = e; }
+          try {
+            const r = await _state.port.close({ positionId: p.id });
+            if (r?.ok === true) closed = true;
+            else lastErr = r?.error ? new Error(String(r.error)) : new Error('close verdict not ok');
+          } catch (e) { lastErr = e; }
         }
         if (!closed) _alertCall(`🚨 L3 FLATTEN FAILED ${p.pair}: ${String(lastErr?.message || lastErr || '').slice(0, 120)} — next 12s tick retry karega, MANUAL VERIFY KARO.`);
       }
@@ -214,8 +217,11 @@ async function _reconcileTick() {
       for (const p of positions) {
         let closed = false, lastErr = null;
         for (let attempt = 0; attempt < 2 && !closed; attempt++) {
-          try { await _state.port.close({ positionId: p.id }); closed = true; }
-          catch (e) { lastErr = e; }
+          try {
+            const r = await _state.port.close({ positionId: p.id });
+            if (r?.ok === true) closed = true;
+            else lastErr = r?.error ? new Error(String(r.error)) : new Error('close verdict not ok');
+          } catch (e) { lastErr = e; }
         }
         if (!closed) _alertCall(`🚨 L2 REDUCE-ONLY CLOSE FAILED ${p.pair}: ${String(lastErr?.message || lastErr || '').slice(0, 120)} — next 12s tick retry karega, MANUAL VERIFY KARO.`);
       }
@@ -243,8 +249,10 @@ async function _reconcileTick() {
             // v21.1.0: flatten fail ho to "FLATTENED" ka jhootha claim nahi —
             // honest error alert (next 12s tick retry karega).
             let flatErr = null;
-            try { await _state.port.close({ positionId: p.id }); }
-            catch (e) { flatErr = e; }
+            try {
+              const r = await _state.port.close({ positionId: p.id });
+              if (r?.ok !== true) flatErr = r?.error ? new Error(String(r.error)) : new Error('close verdict not ok');
+            } catch (e) { flatErr = e; }
             if (flatErr) _alertCall(`🚨 ORPHAN ${p.pair} no SL — FLATTEN FAILED: ${String(flatErr?.message || flatErr || '').slice(0, 120)}. Next tick retry; MANUAL VERIFY.`);
             else _alertCall(`🚨 ORPHAN ${p.pair} no SL on exchange — FLATTENED (core rule).`);
           }

@@ -481,7 +481,16 @@ function _closePart(trade, qty, price, reason) {
       const norm = normalizeLockSymbol(trade.symbol);
       const stillOpenElsewhere = norm
         && _state.trades.some(t => t !== trade && t.status !== 'CLOSED' && normalizeLockSymbol(t.symbol) === norm);
-      if (norm && !stillOpenElsewhere) releaseDirectionLock(norm);
+      // Source-owned release: a paper mirror of a manual LIVE board trade
+      // (source 'mtf-auto' here) must not release that live lock. The 60s
+      // all-books sweeper owns live/journal-only locks.
+      const lockSource = trade.source === 'mtf-board-ui' ? 'mtf-board-paper'
+        : trade.source === 'mtf-auto' ? 'mtf-auto'
+        : trade.source === 'uc-flip-reverse' ? 'uc-flip-reverse'
+        : null;
+      if (norm && !stillOpenElsewhere) {
+        releaseDirectionLock(norm, lockSource ? { source: lockSource } : {});
+      }
     } catch { /* lock release best-effort — close accounting kabhi block nahi hoga */ }
   }
 }
