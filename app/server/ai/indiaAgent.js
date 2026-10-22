@@ -1274,7 +1274,6 @@ export function __resetIndiaAgentForTests() {
   saveIndiaAgentConfig({ ...INDIA_AGENT_DEFAULTS });
   _lastSkip = { key: '', at: 0 };
 }
-export function __indiaAgentLogForTests() { return _state.log; }
 export function __setIndiaAgentStateForTests(s) { _state = { ...freshState(), ...s }; }
 
 // v18.1: lightweight liveness for the enriched GET /health — no async deps.

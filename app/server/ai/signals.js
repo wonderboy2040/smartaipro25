@@ -28,9 +28,6 @@ import { FUTURES_UNIVERSE, futuresPairFor, fetchFuturesPrices, fetchFuturesCandl
 // kar raha tha jab real USDINR ~89 ho (v20.2 ne baaki sab sites fix kiye the,
 // ye sync-branch chhoot gaya tha).
 import { usdInrFallback } from './lib/usdinr.js';
-// v21.13.x recheck (B1): maCrossFromCandles import removed — it was a
-// dead import since v21.13 (the deep-path MACROSS revival calls the
-// registered seat fn, not this helper directly).
 import { MODELS, runQuantModels, aiCouncilVoteFromVerdict, v2ModelsEnabled, mtfConfluenceEnabled, tapeVote, meshModelsEnabled, structurePro } from './models.js';
 // v21.3.0 (Issue-5) lineage: Jev AI confirmation on board signals
 // (v21.14: Laya removed — jev-only confirm layer)

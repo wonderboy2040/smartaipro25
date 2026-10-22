@@ -206,6 +206,3 @@ export async function globalRiskGate({ cryptoEquityINR, indiaCapitalINR, usdInr 
     heatCapPct: v.heatCapPct,
   };
 }
-
-// ---------------- test hook ----------------
-export function __globalRiskCacheForTest() { return _cache; }

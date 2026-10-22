@@ -3690,9 +3690,9 @@ export function registerAITradingRoutes(app, deps) {
   // user polls after wake hit COLD caches and used to time out behind
   // three full board scans ("Agent status unavailable" / "Expert
   // engine unavailable"). Pre-heat the boards ~2s after boot so the
-  // first poll is warm. Boards first (parallel), expert scans after —
-  // single-flight joins any request that arrives mid-warm. Disable
-  // with WARM_ON_BOOT=0.
+  // first poll is warm. Expert Picks warm-up is intentionally not
+  // scheduled — that UI was removed in v21.22.0. Single-flight joins
+  // any request that arrives mid-warm. Disable with WARM_ON_BOOT=0.
   // v21.3.0 (Issue-1): constrained platforms (Render free dyno etc.) ab
   // warm-up ko DEFAULT-OFF karte hain — ek 0.1-CPU 512MB dyno par boot
   // ke turant baad 3 board scans + expert scans stack karna hi tha
@@ -3709,13 +3709,8 @@ export function registerAITradingRoutes(app, deps) {
       getSignals('FUTURES', depsForSignals()).catch(() => null),
       getSignals('INDIA', depsForSignals()).catch(() => null),
     ]);
-    const warmPicks = () => Promise.allSettled([
-      getExpertPicks('CRYPTO', {}).catch(() => null),
-      getExpertPicks('FUTURES', {}).catch(() => null),
-    ]);
     const warmer = setTimeout(() => {
       warmBoards()
-        .then(() => warmPicks())
         .catch(() => { /* best-effort warm */ });
     }, 2000);
     if (warmer.unref) warmer.unref();

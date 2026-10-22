@@ -220,7 +220,6 @@ export function positionsStreamHandler(req, res) {
 /** Drive ONE poll cycle and await it (the regression suite's "tick"). */
 export async function __tickForTests() { await _poll(); }
 export function __clientsForTests() { return _clients.size; }
-export function __lastViewForTests() { return _lastView; }
 export function __resetPositionsStreamForTests() {
   if (_timer) { clearTimeout(_timer); _timer = null; }
   _clients = new Set();

@@ -58,6 +58,21 @@ vi.mock('../server/ai/signals.js', () => ({
   getFreshGlobalSignalForExec: vi.fn(async () => null),
 }));
 
+// Same hermetic boundary as test/agent.test.ts: the sizing/entry path's
+// readDepth does real CoinDCX→Binance fetches (6s chain) and blows the
+// 5s tick budget on a slow sandbox route. Depth has its own suites; here
+// it degrades instantly to the documented single-order path.
+vi.mock('../server/ai/orderFlowDepth.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, readDepth: vi.fn(async () => null) };
+});
+// Pair correlation does real Yahoo fetches when positions exist; null is
+// the documented "unknown → allow" contract.
+vi.mock('../server/ai/correlation.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, pairCorrelation: vi.fn(async () => null) };
+});
+
 let _connected = false;
 function mockConnected() { return _connected; }
 

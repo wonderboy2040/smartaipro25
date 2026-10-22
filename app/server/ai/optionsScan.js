@@ -280,4 +280,3 @@ export function __resetOptionsScanForTests() {
 export function __setScanCacheForTests(data) {
   _cache = { at: Date.now(), data };
 }
-export function __seedForTests() { return STOCK_OPTION_SEED; }

@@ -214,7 +214,3 @@ export async function calibrationSnapshot() {
   _calSnap = { at: Date.now(), val };
   return val;
 }
-
-// ---------------- test hooks ----------------
-export function __resetWinProbForTests() { _calSnap = { at: 0, val: null }; }
-export function __setCalibrationForTests(snap) { _calSnap = { at: Date.now(), val: snap }; }

@@ -732,5 +732,4 @@ export function councilStatus() {
 
 // ---------------- test hooks ----------------
 export function __resetCouncilForTests() { _verdicts.clear(); _deepInflight.clear(); }
-export function __councilCacheForTests() { return { size: _verdicts.size, ttl: VERDICT_TTL, inflight: _deepInflight.size }; }
 export const __testables = { personaPrompt, verdictCacheGet, verdictCacheSet, cacheKey, gateContextFor, riskContextFor };

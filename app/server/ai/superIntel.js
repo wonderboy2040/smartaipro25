@@ -44,8 +44,6 @@ export const SUPER_TIERS = {
   ACTION: 65,  // 65-79 — tradeable, smaller size
   WATCH: 50,   // 50-64 — watch-only
 };
-export const SUPER_MIN_STRONG = SUPER_TIERS.STRONG;
-
 const clamp = (v, lo = 1, hi = 99) => Math.max(lo, Math.min(hi, v));
 const num = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
 const pR = (v) => {

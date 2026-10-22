@@ -2694,7 +2694,6 @@ export function __resetAgentForTests() {
   _lastWalletView = null;
 }
 export function __setAgentStateForTests(s) { _state = { ...freshState(), ...s }; }
-export function __agentLogForTests() { return _state.log; }
 
 // v18.1: lightweight liveness for the enriched GET /health — no async deps,
 // no full agentStatus() payload, just "is it looping and when did it last scan".

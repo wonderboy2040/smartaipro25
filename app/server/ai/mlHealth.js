@@ -62,6 +62,3 @@ export function mlServiceHealth({ force = false } = {}) {
   // return the stale cache immediately while the refresh rides in the background
   return _cached || { reachable: false, detail: 'probing…', checkedAt: now };
 }
-
-/** Test hook. */
-export function __resetMlHealthCacheForTests() { _cached = null; }

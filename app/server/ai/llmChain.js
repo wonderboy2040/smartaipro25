@@ -18,9 +18,8 @@
 //     30-60s for a 2k-token JSON verdict — the old shared 15s bound
 //     made it ALWAYS time out on CPU machines).
 //   • aiKeysPresent now counts ALL SIX cloud engines (a saved HF or
-//     NVIDIA key no longer reads as "offline"), and the new async
-//     aiEnginesOnline() also counts a reachable local ollama — the
-//     gate the council/validator use to decide LLM availability.
+//     NVIDIA key no longer reads as "offline"); the council/validator
+//     combine it with a reachable local ollama probe.
 //   • signals.js's private 4-provider copy is DELETED — one chain,
 //     one health ledger, one place to fix (the exact drift that let
 //     the desk agents get the v18.7 upgrade while the board's AI
@@ -148,12 +147,6 @@ export function aiKeysPresent(KEYS) {
     KEYS.gemini || KEYS.groq || KEYS.cerebras
     || KEYS.openrouter || KEYS.huggingface || KEYS.nvidia
   ));
-}
-
-/** v18.8 async gate: cloud keys OR a reachable local ollama. */
-export async function aiEnginesOnline(KEYS) {
-  if (aiKeysPresent(KEYS)) return true;
-  try { return !!(await ollamaProbe()); } catch { return false; }
 }
 
 async function askGemini(prompt, KEYS) {

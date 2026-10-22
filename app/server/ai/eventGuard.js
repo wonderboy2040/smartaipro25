@@ -325,8 +325,3 @@ export function eventGuardStatus({ desk, days = 7, now = Date.now() } = {}) {
     note: 'Graded guard: T-30m blackout on new entries · T-2h sizing haircut ×0.5. Earnings/macro dates approximate where labeled. AI_DISABLE_EVENT_GUARD=true kills it.',
   };
 }
-
-// ---------------- test hooks ----------------
-export function __eventGuardTestables() {
-  return { NSE_EARNINGS, US_EARNINGS, FOMC_DECISIONS_UTC, RBI_DECISIONS_IST };
-}

@@ -919,12 +919,6 @@ export function buildOrderTicket(desk, strat, consensus, now = Date.now()) {
   }
 }
 
-// ---------------- convenience: options-context for ensemble ----------------
-export async function getOptionsContext(symbol = 'NIFTY') {
-  const desk = await getOptionsDesk(symbol);
-  return { desk, ctx: desk?.ok ? desk.optionsCtx : null };
-}
-
 // ------------------------------------------------------------
 // v9.4 — F&O OPTION SIGNAL CARDS ("Stock name: Nifty50 17Sep 23400 CE
 // · Target · Entry (Buy) · Stop Loss"). Converts the ensemble's INDEX

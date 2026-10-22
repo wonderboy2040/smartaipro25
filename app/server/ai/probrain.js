@@ -490,5 +490,3 @@ export function qualityVerdict({
 
   return { flags, reasons, confAdj, gradeCap, regime: rg, mtf, extension: ext, session: ses, stop };
 }
-
-export const PROBRAIN_VERSION = 'v9.3.0';

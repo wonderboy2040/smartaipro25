@@ -445,10 +445,7 @@ async function _pollFutures(_now) {
 }
 
 /** Binance USDT-perp 24h ticker book, Map<BASE, row>, 5s cache — the
- *  fallback chain for the FUT domain (mirrors the board's own).
- *  Test-injectable via _setBinanceFutFetchForTest. */
-let _bnFutFetchImpl = null;
-export function _setBinanceFutFetchForTest(fn) { _bnFutFetchImpl = fn; }
+ *  fallback chain for the FUT domain (mirrors the board's own). */
 // v11.4 recheck: in-flight dedup + negative cache — on failure nothing
 // was cached, so during a CoinDCX-dark + slow-Binance episode every 2s
 // beat stacked ANOTHER full ~1-2MB fapi/ticker/24hr fetch while the
@@ -484,7 +481,7 @@ async function _binanceFutBook(bases) {
   if (_bnFutInflight && _bnFutInflight.sig === sig) return _bnFutInflight.p;
   const inflight = { sig, p: null };
   inflight.p = (async () => {
-    const f = _bnFutFetchImpl || globalThis.fetch;
+    const f = globalThis.fetch;
     const urls = _bnFutSymbolUrls(sig);
     let j = null;
     if (urls) {
@@ -933,7 +930,6 @@ export function _resetCxRtForTest() {
   _sessionStartAt = 0; // v12.6
   _fallbackAt = 0;
   _bnFut = { at: 0, sig: '', byBase: null };
-  _bnFutFetchImpl = null;
   _closeWs('test-reset');
   if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
   _wsFactory = null;

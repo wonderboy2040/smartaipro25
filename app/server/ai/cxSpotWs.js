@@ -103,7 +103,6 @@ export function _setSpotWsEnabledForTest(v) { _enabled = !!v; }
 // keeps running (enrichment: stats/high/low + the REST chain anchor).
 let _onPrice = null;
 export function setSpotWsOnPrice(fn) { _onPrice = typeof fn === 'function' ? fn : null; }
-export function _getSpotWsOnPriceForTest() { return _onPrice; }
 
 const _num = (v) => {
   const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''));

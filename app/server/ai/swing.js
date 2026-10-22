@@ -197,7 +197,6 @@ function cacheGet(key, ttl) {
   return null;
 }
 function cacheSet(key, payload) { _cache.set(key, { at: Date.now(), payload }); }
-export function __clearSwingCache() { _cache.clear(); }
 
 const SWING_UNIVERSE = {
   INDIA: ['RELIANCE', 'HDFCBANK', 'ICICIBANK', 'INFY', 'TCS', 'SBIN', 'TATAMOTORS', 'AXISBANK', 'LT', 'ITC'],

@@ -76,14 +76,6 @@ function _getProviders() {
   return _providers;
 }
 
-/** Provider registry flush — memo reset (koi in-flight decision disturb
- *  nahi hota). Config change ke baad agle board cycle naye provider
- *  instance ke saath chalta hai. */
-export function boardAiConfirmRefresh() {
-  _providers = null;
-  _providersAt = 0;
-}
-
 /** Is the layer enabled + at least one provider configured? */
 export function boardAiConfirmActive() {
   if (MODE === 'off') return false;

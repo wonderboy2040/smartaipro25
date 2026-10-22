@@ -321,6 +321,5 @@ export function councilWeights(calibration) {
 }
 
 // ---------------- test hooks ----------------
-export function __setNearMissForTests(n) { saveNearMiss(n || { entries: [] }); }
 export function __resetConsensusForTests() { saveNearMiss({ entries: [] }); }
 export const __testables = { NEARMISS_FILE, NEARMISS_MAX, dirSign };

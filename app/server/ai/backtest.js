@@ -500,5 +500,3 @@ export async function runBacktest({ market = 'CRYPTO', symbols, minGrade = 'ACTI
   }
   return payload;
 }
-
-export function __clearBacktestCache() { _cache.clear(); }

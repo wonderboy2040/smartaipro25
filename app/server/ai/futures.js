@@ -8,7 +8,6 @@
 //
 //  PUBLIC (no auth):
 //   • fetchFuturesPrices()      RT prices (ls/mark/pc) — 20s cache
-//   • fetchFuturesActiveInstruments() — ["B-BTC_USDT", …] — 6h cache
 //   • fetchFuturesInstrumentMeta(pair) — max leverage / qty rules — 6h cache
 //   • fetchFuturesCandles(pair)  candlesticks?…&pcode=f — TA source
 //
@@ -58,7 +57,6 @@ export const COINDCX_INR_PER_USDT = 102;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 const PRICES_URL = 'https://public.coindcx.com/market_data/v3/current_prices/futures/rt';
 const CANDLES_URL = 'https://public.coindcx.com/market_data/candlesticks';
-const INSTRUMENTS_URL = 'https://api.coindcx.com/exchange/v1/derivatives/futures/data/active_instruments';
 const INSTRUMENT_URL = 'https://api.coindcx.com/exchange/v1/derivatives/futures/data/instrument';
 const ORDERS_CREATE_PATH = '/exchange/v1/derivatives/futures/orders/create';
 const POSITIONS_PATH = '/exchange/v1/derivatives/futures/positions';
@@ -584,24 +582,6 @@ function _rowsFromBinanceFut(raw, source) {
   }
   return rows;
 }
-export async function fetchFuturesLtpMap() {
-  const rows = await fetchFuturesPrices().catch(() => []);
-  return new Map((Array.isArray(rows) ? rows : []).map(x => [x.pair, x.last]));
-}
-
-// ---------------- PUBLIC: instruments ----------------
-let _instrumentsCache = null, _instrumentsAt = 0;
-export async function fetchFuturesActiveInstruments() {
-  if (_instrumentsCache && Date.now() - _instrumentsAt > 0 && Date.now() - _instrumentsAt < 6 * 3600_000) return _instrumentsCache;
-  const url = `${INSTRUMENTS_URL}?margin_currency_short_name[]=USDT`;
-  const r = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) });
-  if (!ok(r)) throw new Error(`futures instruments HTTP ${r?.status}`);
-  const list = await r.json();
-  if (!Array.isArray(list) || list.length === 0) throw new Error('futures instruments: empty');
-  _instrumentsCache = list.map(String); _instrumentsAt = Date.now();
-  return _instrumentsCache;
-}
-
 let _instrumentMetaCache = new Map();
 /** Instrument rules for one pair (max leverage, qty precision, minimums).
  *  The endpoint shape is documented with max_leverage_long/short; qty
@@ -3542,7 +3522,6 @@ export async function futuresMarketsView(limit = 24) {
 export function __resetFuturesForTests() {
   _pricesCache = null; _pricesAt = 0; _pricesInflight = null;
   _synthDownUntil = 0; // v11.3: the Binance/Bybit synth negative cache
-  _instrumentsCache = null; _instrumentsAt = 0;
   _instrumentMetaCache = new Map();
   _walletsTransport.mode = null;
   _walletsTransport.coolUntil = 0;

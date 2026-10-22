@@ -380,7 +380,6 @@ export function __setHotForTests(hot) {
 export function __hotForTests() { return _hot; }
 export function __ptrForTests() { return _ptr; }
 export function __setPtrForTests(p) { _ptr = p; }
-export function __fullSizeForTests() { return FULL_SIZE; }
 
 // ------------------------------------------------------------
 // v20.2 BOARD UNIVERSE OVERRIDES — the UniverseEditor finally affects
@@ -409,10 +408,4 @@ export function boardUniverseOverrides() {
   _uniOverridesCache = { removedBase: new Set(removedBase), custom };
   _uniOverridesAt = now;
   return _uniOverridesCache;
-}
-
-/** Test hook — clear the overrides cache between cases. */
-export function __clearBoardUniverseOverridesForTests() {
-  _uniOverridesCache = null;
-  _uniOverridesAt = 0;
 }
