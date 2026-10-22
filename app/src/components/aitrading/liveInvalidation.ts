@@ -12,8 +12,7 @@
 //
 // Mirror of server/ai/superIntel.js liveInvalidationCheck (canonical).
 // The signal liveLtp fed into SignalCard is ALREADY freshness-gated by
-// useCxLivePrices (ticks older than 30s are dropped, same rule as
-// manualLiveMerge) — so the two checks never conflict: this only ever
+// useCxLivePrices (ticks older than 30s are dropped) — this only ever
 // runs on genuinely-live prices.
 //
 // Informative only — honest degrade, never fake-block: the trade

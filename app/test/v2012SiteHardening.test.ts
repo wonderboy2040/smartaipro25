@@ -365,10 +365,6 @@ describe('v20.7.12 [F] source contracts — hardening wiring', () => {
     expect(s).toMatch(/genAt \+ REFRESH_MS - now/);
     expect(s).toMatch(/if \(!document\.hidden\) setNow/);
   });
-  it('ManualTradeMonitor: memo-wrapped (H2-1)', () => {
-    const s = src('src/components/aitrading/ManualTradeMonitor.tsx');
-    expect(s).toMatch(/export const ManualTradeMonitor = memo/);
-  });
   it('liveInvalidation: weakening is DIRECTIONAL (L-3)', () => {
     const s = src('src/components/aitrading/liveInvalidation.ts');
     expect(s).toMatch(/long \? px < farEdge - 0\.5 \* a : px > farEdge \+ 0\.5 \* a/);

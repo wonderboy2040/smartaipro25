@@ -5,7 +5,9 @@
 // THREE /api/stream SSE connections once a manual trade is open
 //   1. useAppState's global liveStream (App-level, always mounted)
 //   2. CoinDcxTab's useCxLivePrices (board symbols)
-//   3. ManualTradeMonitor's useCxLivePrices (open-trade symbols)
+//   3. ManualTradeMonitor's useCxLivePrices (open-trade symbols) — panel
+//      removed in v21.22.0; the historical 3-connection cap bug below
+//      remains the reason the class-aware cap exists.
 // which lands EXACTLY on the old SSE_MAX_PER_IP = 3. Any FOURTH
 // connection — a reconnect race against a slow socket close, a
 // second browser tab of the app, a phone peek — gets HTTP 429, and

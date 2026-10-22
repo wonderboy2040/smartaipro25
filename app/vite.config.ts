@@ -45,8 +45,8 @@ export default defineConfig({
     cssMinify: 'esbuild',
     sourcemap: false,
     cssCodeSplit: true,
-    // v20.7.12 [L-8]: deskShared (~327KB) intentionally large — shared desk
-    // primitives; re-audit with `node scripts/orphan-files.mjs` on changes.
+    // v20.7.12 [L-8]: deskShared (~327KB) intentionally large - shared desk
+    // primitives; re-audit chunk sizes with `npm run build` on changes.
     chunkSizeWarningLimit: 500,
     rollupOptions: {
       output: {

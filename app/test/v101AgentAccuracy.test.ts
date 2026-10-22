@@ -162,7 +162,7 @@ describe('B2 dynamicMaxHoldMin', () => {
     });
     mockGetSignals.mockResolvedValue({ ok: true, market: 'FUTURES', signals: [] }); // no fresh candidates needed
     await agentTick({}, vi.fn());
-    expect(mockCloseFutures).toHaveBeenCalledWith('fast1');
+    expect(mockCloseFutures).toHaveBeenCalledWith('fast1', 'Time-exit');
   });
 
   it('slow mover is NOT cut at 50m (its window is 120m)', async () => {

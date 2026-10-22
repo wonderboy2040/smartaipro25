@@ -4,19 +4,14 @@
 // LOCKED HERE:
 //   • liveInvalidationCheck: null/absent stopLoss = NO SL check
 //     (Number(null)===0 used to invalidate EVERY SHORT card)
-//   • mergeLiveTicks: OPTION trades never take the underlying spot
-//     tick (₹150 premium vs ₹24,600 index = -₹36L fantasy P&L)
 //   • SignalCard renders exactly ONE VerifyBadge per card + ONE
 //     VerifyChecklist when expanded (both used to render twice)
-//   • ManualRow: an OPEN trade without __view renders 'conviction —'
-//     instead of crashing the tab
 // ============================================================
 // @ts-nocheck
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
 import { liveInvalidationCheck } from '../src/components/aitrading/liveInvalidation';
-import { mergeLiveTicks, liveKeyFor } from '../src/components/aitrading/manualLiveMerge';
 
 const NOW = Date.now();
 const mins = (m) => m * 60_000;
@@ -38,39 +33,6 @@ describe('v18.6.4 — liveInvalidationCheck: null stopLoss guard', () => {
   it('LONG with real stopLoss still invalidates', () => {
     const r = liveInvalidationCheck({ side: 'LONG', liveLtp: 94.5, stopLoss: 95 });
     expect(r.status).toBe('invalidated');
-  });
-});
-
-// ============================================================
-describe('v18.6.4 — mergeLiveTicks: OPTION-domain guard', () => {
-  const optTrade = {
-    status: 'OPEN', market: 'INDIA', symbol: 'NIFTY', assetKind: 'OPTION',
-    __view: { ltp: 150, pnl: { pnlINR: 0, pnlPct: 0, pnlUSDT: null, currency: 'INR' } },
-  };
-  const ticks = { IN_NIFTY: { price: 24600, time: NOW - 1000 } }; // the UNDERLYING index spot
-
-  it('an OPTION trade is NOT overwritten by the underlying index tick', () => {
-    const out = mergeLiveTicks([optTrade], ticks, 84);
-    expect(out[0]).toBe(optTrade);                 // same reference — unchanged
-    expect(out[0].__view.ltp).toBe(150);           // premium stays
-    expect(out[0].__view.pnl.pnlINR).toBe(0);      // no -₹36L fantasy
-  });
-  it('a normal INDIA equity trade still takes the live tick', () => {
-    const eqTrade = {
-      status: 'OPEN', market: 'INDIA', symbol: 'RELIANCE', assetKind: null,
-      entryPrice: 2900, qty: 2, side: 'BUY',
-      __view: { ltp: 2900, pnl: { pnlINR: 0, pnlPct: 0, pnlUSDT: null, currency: 'INR' } },
-    };
-    const out = mergeLiveTicks([eqTrade], { IN_RELIANCE: { price: 2950, time: NOW - 1000 } }, 84);
-    expect(out[0]).not.toBe(eqTrade);
-    expect(out[0].__view.ltp).toBe(2950);
-    expect(out[0].__view.pnl.pnlINR).toBe(100);    // (2950-2900) × 2 × BUY
-  });
-  it('liveKeyFor namespaces unchanged (regression)', () => {
-    expect(liveKeyFor('FUTURES', 'BTC')).toBe('FUT_BTC');
-    expect(liveKeyFor('GLOBALFUTURES', 'TSLA')).toBe('GLOB_TSLA');
-    expect(liveKeyFor('CRYPTO', 'XRP')).toBe('IN_XRP');
-    expect(liveKeyFor('INDIA', 'TCS')).toBe('IN_TCS');
   });
 });
 

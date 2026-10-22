@@ -29,6 +29,8 @@ app/data/
 # app/dist/ — tracked in repo so Start-SmartAI-Watchdog.bat serves immediately without 5min rebuild
 build/
 **/build/
+*.tsbuildinfo
+**/*.tsbuildinfo
 
 # ml-service / deploy artifacts (agar kahin build hue)
 ml-service/dist/
@@ -38,6 +40,10 @@ ml-service/dist/
 **/.test-data*
 coverage/
 **/coverage/
+.test-results.json
+**/.test-results.json
+*.vitest-report*
+**/*.vitest-report*
 
 # Logs
 npm-debug.log*

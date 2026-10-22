@@ -18,9 +18,6 @@
 //   • manualReversalCycles: the board view — legs, net ₹, live P&L,
 //     WAITING window state, the FLIP plan carried on the cycle
 //   • stateOfManualTrade: REVERSAL_BOOK banner at/above the ₹ target
-//   • manualLiveMerge (client realtime): the SSE tick merge — fresh
-//     tick overrides LTP + recomputes P&L in the native currency with
-//     the server's own fx; a stale (>30s) tick never masquerades
 // Same hermetic scaffolding as manualTrades.test.ts.
 // ============================================================
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -67,9 +64,6 @@ import {
 
 // the engine config rides the same agent-config file (mocked disk)
 import { loadReversalConfig } from '../server/ai/reversalEngine.js';
-
-// client-side pure helpers (real — no mocks needed)
-import { liveKeyFor, livePnlOf, mergeLiveTicks } from '../src/components/aitrading/manualLiveMerge';
 
 const CFG_ON = { enabled: true, lossCapINR: 150, profitTargetINR: 500, maxLegs: 3, reentryWindowMs: 45 * 60_000, reentryWindowMin: 45, cooldownMin: 3, cycleStopINR: 300, minReentryConf: 60, requireEnsembleConfirm: true };
 
@@ -260,44 +254,5 @@ describe('stateOfManualTrade — REVERSAL_BOOK banner', () => {
     const t = { ...XRP_USDT, origin: {} };
     const b = stateOfManualTrade({ convictionState: 'HOLDING', ltp: 0.498, trade: t, reversal: { enabled: true, pnlINR: -168, lossCapINR: 150 } });
     expect(b).toBe('LOSS_CAP');
-  });
-});
-
-// ------------------------------------------------------------
-describe('manualLiveMerge — the CLIENT realtime merge (pure)', () => {
-  it('liveKeyFor: market → SSE namespace', () => {
-    expect(liveKeyFor('FUTURES', 'xrp')).toBe('FUT_XRP');
-    expect(liveKeyFor('GLOBALFUTURES', 'AAPL')).toBe('GLOB_AAPL');
-    expect(liveKeyFor('CRYPTO', 'btc')).toBe('IN_BTC');
-    expect(liveKeyFor('INDIA', 'reliance')).toBe('IN_RELIANCE');
-    expect(liveKeyFor('', '')).toBeNull();
-  });
-
-  it('livePnlOf: native currency math (USDT for perps, ₹ for India, lotSize aware)', () => {
-    const usd = livePnlOf({ market: 'FUTURES', side: 'BUY', entryPrice: 0.5, qty: 1000 }, 0.52, 84);
-    expect(usd.currency).toBe('USDT');
-    expect(usd.pnlUSDT).toBeCloseTo(20, 1);
-    expect(usd.pnlINR).toBeCloseTo(1680, 0);
-    const inr = livePnlOf({ market: 'INDIA', side: 'SELL', entryPrice: 1000, qty: 2, lotSize: 75 }, 990, 84);
-    expect(inr.currency).toBe('INR');
-    expect(inr.pnlINR).toBeCloseTo(1500, 0); // (1000-990)*2*75
-    expect(livePnlOf({ market: 'FUTURES', side: 'BUY', entryPrice: 0, qty: 1 }, 1, 84)).toBeNull();
-  });
-
-  it('a FRESH tick overrides LTP + P&L; a STALE tick never does', () => {
-    const now = Date.now();
-    const trades = [{
-      id: 1, status: 'OPEN', market: 'FUTURES', symbol: 'XRP', side: 'BUY',
-      entryPrice: 0.5, qty: 1000,
-      __view: { ltp: 0.5, pnl: { pnlINR: 0, pnlPct: 0, pnlUSDT: 0, currency: 'USDT' } },
-    }];
-    const fresh = mergeLiveTicks(trades as never, { FUT_XRP: { price: 0.52, time: now - 1000 } }, 84, now);
-    expect((fresh[0] as { __view: { ltp: number } }).__view.ltp).toBe(0.52);
-    expect((fresh[0] as { __view: { pnl: { pnlUSDT: number } } }).__view.pnl.pnlUSDT).toBeCloseTo(20, 1);
-    const stale = mergeLiveTicks(trades as never, { FUT_XRP: { price: 0.52, time: now - 40_000 } }, 84, now);
-    expect((stale[0] as { __view: { ltp: number } }).__view.ltp).toBe(0.5); // server LTP stands
-    // CLOSED trades never merge
-    const closed = mergeLiveTicks([{ ...trades[0], status: 'CLOSED' } as never], { FUT_XRP: { price: 0.52, time: now - 1000 } }, 84, now);
-    expect((closed[0] as { __view: { ltp: number } }).__view.ltp).toBe(0.5);
   });
 });

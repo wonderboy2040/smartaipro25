@@ -267,14 +267,6 @@ describe('v18.9 #4 — data.js isNseOpen shares the NSE holiday calendar', () =>
 describe('v18.9 frontend — source contracts (money-display fixes)', () => {
   const read = (p) => fs.readFileSync(p, 'utf8');
 
-  it('ManualTradePrompt: lot-size is a validated user input (no more hardcoded 75)', () => {
-    const src = read('src/components/aitrading/ManualTradePrompt.tsx');
-    expect(src).toMatch(/const \[lotSize, setLotSize\]/);
-    expect(src).toMatch(/lotSize: lotValid \? Math\.round\(lotNum\) : 75/);
-    expect(src).not.toMatch(/lotSize: 75,/); // the old hardcoded submit line
-    expect(src).toMatch(/AbortSignal\.timeout\(20_000\)/); // fetch timeout
-  });
-
   it('deskShared: REFRESH_MS matches the real 60s board poll; mood is percentage-point math', () => {
     const src = read('src/components/aitrading/deskShared.tsx');
     // v20.7.11 dead-code purge: REFRESH_MS de-exported (internal-only now) —
