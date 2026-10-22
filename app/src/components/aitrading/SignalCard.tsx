@@ -167,10 +167,10 @@ const sideColor = (side: Side | string) =>
 
 const gradeBadge = (grade: string) => {
   switch (grade) {
-    case 'STRONG': return { cls: 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/40', label: '★ STRONG' };
-    case 'ACTION': return { cls: 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/40', label: 'ACTION' };
-    case 'WATCH': return { cls: 'bg-amber-500/15 text-amber-300 border border-amber-500/40', label: 'WATCH' };
-    default: return { cls: 'bg-slate-500/15 text-slate-400 border border-slate-500/30', label: 'NEUTRAL' };
+    case 'STRONG': return { cls: 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/40', label: '★ STRONG', title: 'LIVE-executable — full committee: 75%+ confidence + 70%+ agreement' };
+    case 'ACTION': return { cls: 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/40', label: 'ACTION', title: 'PAPER-practice grade (55%+) — LIVE order sirf STRONG par jaata hai. Grade decision-gate pe lock hota hai: quality/MTF boosts ke baad conf 75%+ dikh sakta hai, par badge upgrade nahi hota' };
+    case 'WATCH': return { cls: 'bg-amber-500/15 text-amber-300 border border-amber-500/40', label: 'WATCH', title: 'Watchlist only — koi entry nahi' };
+    default: return { cls: 'bg-slate-500/15 text-slate-400 border border-slate-500/30', label: 'NEUTRAL', title: 'No consensus side' };
   }
 };
 
@@ -1382,7 +1382,7 @@ export const SignalCard = memo(function SignalCard({ signal, busy, onExecute, on
               </span>
             )}
             <span className={`text-sm font-black ${sideColor(signal.side)}`}>{long ? '▲ LONG' : '▼ SHORT'}</span>
-            <span className={`px-2 py-0.5 rounded-md text-[10px] font-black tracking-wider ${isStale && signal.grade === 'ACTION' ? 'bg-amber-500/15 text-amber-300 border border-amber-500/40' : g.cls}`}>{gLabel}</span>
+            <span title={g.title} className={`px-2 py-0.5 rounded-md text-[10px] font-black tracking-wider ${isStale && signal.grade === 'ACTION' ? 'bg-amber-500/15 text-amber-300 border border-amber-500/40' : g.cls}`}>{gLabel}</span>
             {/* v13.1 SVA-v1 — THE final-call chip. Reads FIRST, before
                 every other badge: the pro-trader verdict (CONFIRM /
                 CAUTION / FLIP / STAND ASIDE + score). */}

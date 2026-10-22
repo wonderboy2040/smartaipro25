@@ -60,6 +60,11 @@ export const TrackRecordPanel = memo(function TrackRecordPanel({ refreshKey }: {
             {data.resolved} resolved • {data.openCount} tracking now
             {data.avgR != null && <> • avg <b className={data.avgR >= 0 ? 'text-emerald-400' : 'text-red-400'}>{data.avgR >= 0 ? '+' : ''}{data.avgR}R</b></>}
             {data.resolved > 0 && <> • P&L/₹1L <b className={pnlColor}>{data.disciplinedPnlPerLakh >= 0 ? '+' : '−'}₹{Math.abs(data.disciplinedPnlPerLakh).toFixed(0)}</b></>}
+            {(data.excludedCount ?? 0) > 0 && (
+              <span className="text-amber-400/80" title="Hard-vetoed reference signals (data-degraded / stale plan) aur proven duplicates ledger se excluded — audit ke liye JSON me preserved.">
+                • {data.excludedCount} excluded (non-executable)
+              </span>
+            )}
           </span>
         </div>
         <span className="text-slate-500 text-xs">{expanded ? '▾' : '▸'}</span>

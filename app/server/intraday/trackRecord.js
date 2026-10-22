@@ -94,7 +94,7 @@ function _pxRound(x) {
 
 export function trackedSymbolsForToday() {
   return _state.signals
-    .filter(s => s.status === 'OPEN' && s.dayKey === dayKeyFor(_marketOf(s)))
+    .filter(s => !s.excluded && s.status === 'OPEN' && s.dayKey === dayKeyFor(_marketOf(s)))
     .map(s => s.symbol);
 }
 
@@ -116,6 +116,7 @@ export function watcherSymbolsByMarket() {
   const futures = [];
   const global = [];
   for (const s of _state.signals) {
+    if (s.excluded) continue;
     if (s.status !== 'OPEN' && s.status !== 'PARTIAL') continue;
     if (s.dayKey !== dayKeyFor(_marketOf(s))) continue; // stale rows handled by reconcile
     const m = _marketOf(s);
@@ -219,8 +220,18 @@ export function recordSignals(signals) {
 
 function _openRow(sig, today, events, isFlip) {
   const market = _marketOf(sig);
+  // v21.23.15: a same-day re-entry after SL/FLIP is a NEW trade — give it a
+  // unique row id. The old symbol:market:dayKey id repeated across every
+  // re-entry (23 duplicate-id groups in the live ledger), which makes any
+  // id-keyed consumer ambiguous. First row keeps the legacy id verbatim.
+  let id = _id(sig.symbol, market);
+  if (_state.signals.some(s => s.id === id)) {
+    let n = 2;
+    while (_state.signals.some(s => s.id === `${id}#${n}`)) n++;
+    id = `${id}#${n}`;
+  }
   const row = {
-    id: _id(sig.symbol, market),
+    id,
     symbol: sig.symbol, exchange: sig.exchange || (market === 'CRYPTO' ? 'BINANCE' : 'NSE'),
     market,
     direction: sig.direction,
@@ -390,9 +401,12 @@ export function reconcileStale(events = []) {
 export function getTrackRecord(days = 30) {
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   const rows = _state.signals
-    .filter(s => (s.openedAt || 0) >= cutoff && s.status !== 'FLIP' && s.status !== 'OPEN' && s.status !== 'PARTIAL')
+    .filter(s => !s.excluded && (s.openedAt || 0) >= cutoff && s.status !== 'FLIP' && s.status !== 'OPEN' && s.status !== 'PARTIAL')
     .sort((a, b) => (b.openedAt || 0) - (a.openedAt || 0));
-  const open = _state.signals.filter(s => s.status === 'OPEN' || s.status === 'PARTIAL');
+  const open = _state.signals.filter(s => !s.excluded && (s.status === 'OPEN' || s.status === 'PARTIAL'));
+  // v21.23.15: rows explicitly marked excluded (hard-vetoed reference signal /
+  // proven duplicate) stay in the JSON for audit but never enter the ledger.
+  const excludedCount = _state.signals.filter(s => s.excluded).length;
 
   let wins = 0, losses = 0, rSum = 0, rCount = 0, pnlSum = 0;
   const byStatus = { T2_HIT: 0, BE_TRAIL_EXIT: 0, SL_HIT: 0, EOD_EXIT: 0 };
@@ -408,8 +422,9 @@ export function getTrackRecord(days = 30) {
   const resolved = wins + losses;
   return {
     days,
-    totalTracked: _state.signals.length,
+    totalTracked: _state.signals.filter(s => !s.excluded).length,
     openCount: open.length,
+    excludedCount,
     resolved,
     wins, losses,
     winRate: resolved > 0 ? +((wins / resolved) * 100).toFixed(1) : null,

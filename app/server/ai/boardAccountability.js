@@ -14,6 +14,14 @@
 // every ACTIONABLE board signal (STRONG + ACTION grades with a
 // valid plan) — same watcher then follows them to T1/T2/SL/EOD.
 //
+// v21.23.15 HONESTY GUARD: hard-vetoed reference signals (dataDegraded /
+// FRESH-TAPE-ABSENT / UCV rejected / HARD chase) are NOT tracked as
+// trades — they can never pass the execution gate, so counting them in
+// the win-rate/avgR ledger measures a trade nobody could take. Same for
+// a plan whose published LTP is already beyond its SL or T1 (stale /
+// late board payload): the move is gone, a tracked "entry" there is a
+// fabricated outcome, not accountability.
+//
 // Safety properties:
 //   • recordSignals is idempotent per (symbol, dayKey) — a 60s
 //     board refresh only updates confidence/lastPrice (v18.9
@@ -83,10 +91,20 @@ export function mapBoardSignalToTracked(s, mkt) {
   const target2 = Number(plan.target2);
   const ltp = Number(s.ltp) || entry;
   if (!(entry > 0) || !(stopLoss > 0) || !(target1 > 0) || !(target2 > 0)) return null;
+  // v21.23.15: hard-vetoed signals are reference-only (execution gate
+  // rejects them in live AND paper). Tracking them poisoned the ledger
+  // with replay-proven 29%-WR degenerate rows (SPACEX -6.77R ×3).
+  if (s.dataDegraded || s.freshTapeAbsent || s.ucRejected === true
+      || s.ultrafast?.verdict === 'REJECTED'
+      || s.chasing?.severity === 'HARD') return null;
   // Wrong-side plan (LONG stop above entry etc.) — buildTradePlan already
   // guards this; belt-and-braces so a bad row can never enter the ledger.
   const long = side === 'LONG';
   if (long ? (stopLoss >= entry || target1 <= entry) : (stopLoss <= entry || target1 >= entry)) return null;
+  // v21.23.15: the published move is already gone/invalidated — a stale
+  // board payload re-published after an SL/T1 must not open a second row
+  // at the same levels (ABMKNO double T2, SPACEX triple fake SL).
+  if (long ? (ltp <= stopLoss || ltp >= target1) : (ltp >= stopLoss || ltp <= target1)) return null;
 
   // qty semantics — the EXACT legacy engine formula (engine.js ~653):
   // 1% risk per ₹1L = ₹1000; cap the position at 25% of capital.

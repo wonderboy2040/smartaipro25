@@ -298,6 +298,22 @@ describe('indiaAgentTick — entries + gates', () => {
     expect(mockExecuteIndia).toHaveBeenCalledTimes(1);
   });
 
+  it('LIVE PARITY: an ACTION signal never reaches the order layer (live gate needs STRONG)', async () => {
+    _dhanConnected = true;
+    __setConfigForTests({ indiaMode: 'live' });
+    await indiaAgentStart({ mode: 'live', liveConfirmPhrase: 'LIVE' });
+    mockGetSignals.mockResolvedValue({
+      ok: true, market: 'INDIA', signals: [{
+        ...STRONG_IND, grade: 'ACTION', confidence: 90, agreement: 0.95, executable: false,
+        superIntel: { aiScore: 90 },
+      }], models: [], generatedAt: Date.now(),
+    });
+    await indiaAgentTick(DEPS, undefined);
+    // The Dhan order layer evaluates requireStrong=true and would reject it —
+    // the agent must never select a candidate the order layer cannot execute.
+    expect(mockExecuteIndia).not.toHaveBeenCalled();
+  });
+
   it('AI-SCORE GATE below bar: 70 AI score + 68% conf ACTION → no entry', async () => {
     await indiaAgentStart({ mode: 'paper' });
     mockGetSignals.mockResolvedValue({

@@ -57,6 +57,32 @@ describe('v20.2 A1 — board → track-record accountability', () => {
     }), 'INDIA')).toBeNull();
   });
 
+  it('v21.23.15: hard-vetoed reference signals are NOT tracked as trades', () => {
+    // Every one of these is refused by the execution gate (live AND paper),
+    // so a win-rate/avgR row for it would measure a trade nobody could take.
+    expect(mapBoardSignalToTracked(strongSignal({ dataDegraded: 'FRESH-TAPE-ABSENT' }), 'INDIA')).toBeNull();
+    expect(mapBoardSignalToTracked(strongSignal({ freshTapeAbsent: true }), 'INDIA')).toBeNull();
+    expect(mapBoardSignalToTracked(strongSignal({ ucRejected: true }), 'INDIA')).toBeNull();
+    expect(mapBoardSignalToTracked(strongSignal({ ultrafast: { verdict: 'REJECTED' } }), 'INDIA')).toBeNull();
+    expect(mapBoardSignalToTracked(strongSignal({ chasing: { severity: 'HARD' } }), 'INDIA')).toBeNull();
+  });
+
+  it('v21.23.15: a published plan already beyond its SL or T1 is NOT tracked (stale/late payload)', () => {
+    // LONG already stopped through: ltp 2400 < SL 2450
+    expect(mapBoardSignalToTracked(strongSignal({ ltp: 2400 }), 'INDIA')).toBeNull();
+    // LONG already at/past T1: ltp 2560 >= 2550 — move gone, no fake entry
+    expect(mapBoardSignalToTracked(strongSignal({ ltp: 2560 }), 'INDIA')).toBeNull();
+    // SHORT mirrors: stop 2550, target 2450
+    const shortSig = (ltp: number) => strongSignal({
+      side: 'SHORT', ltp,
+      plan: { entry: 2500, stopLoss: 2550, target1: 2450, target2: 2400, riskPct: 2, rewardRisk: 2 },
+    });
+    expect(mapBoardSignalToTracked(shortSig(2560), 'INDIA')).toBeNull(); // stopped through
+    expect(mapBoardSignalToTracked(shortSig(2440), 'INDIA')).toBeNull(); // target gone
+    // still-inside-the-plan LTP maps normally
+    expect(mapBoardSignalToTracked(shortSig(2490), 'INDIA')).toBeTruthy();
+  });
+
   it('v21.3.0: FUTURES/GLOBALFUTURES boards ARE tracked (USDT/USDC quote routing bridge), CRYPTO maps', () => {
     const fut = wireBoardAccountability('FUTURES', { signals: [strongSignal({ market: 'FUTURES', symbol: 'BTC' })] });
     expect(fut.tracked).toBe(1); // v21.3.0: stream.js routes FUTURES → USDT quotes — the unit-mismatch skip is GONE

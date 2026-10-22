@@ -343,7 +343,7 @@ describe('agentTick — daily quota + sizing + exits', () => {
     });
     __setJournalForTests(j);
     await agentTick({}, vi.fn());
-    expect(mockCloseFutures).toHaveBeenCalledWith('ag1');
+    expect(mockCloseFutures).toHaveBeenCalledWith('ag1', 'Time-exit');
   });
 
   it('KILL SWITCH: the agent stands down instantly', async () => {
@@ -402,7 +402,7 @@ describe('agentTick — daily quota + sizing + exits', () => {
       signals: [{ ...STRONG_CAND, side: 'SHORT', superIntel: { aiScore: 84 } }],
     });
     await agentTick({}, vi.fn());
-    expect(mockCloseFutures).toHaveBeenCalledWith('ag2');
+    expect(mockCloseFutures).toHaveBeenCalledWith('ag2', 'Trend flip');
     // the flip side (SHORT) can NOT re-enter this tick — cooldown stamped
     expect(mockExecuteFutures).not.toHaveBeenCalled();
   });
@@ -545,7 +545,7 @@ describe('v9.7 TREND-FLIP on MANUAL positions + v12.7 FLIP DISCIPLINE (notify-on
       signals: [{ ...STRONG_CAND, side: 'SHORT', grade: 'STRONG', superIntel: { aiScore: 84 } }],
     });
     await agentTick({}, vi.fn());
-    expect(mockCloseFutures).toHaveBeenCalledWith('man4');
+    expect(mockCloseFutures).toHaveBeenCalledWith('man4', 'Trend flip');
   });
 
   it('v12.7 close-mode still demands STRONG — a score-bar qualifier (ACTION grade) does NOT cut a manual position', async () => {

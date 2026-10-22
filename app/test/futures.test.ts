@@ -603,6 +603,21 @@ describe('executeFuturesSignal', () => {
     expect(j.entries[0].market).toBe('FUTURES');
   });
 
+  it('v21.23.15: AUTO-AGENT paper rejects a fresh WATCH downgrade (STRK fresh-degrade hole)', async () => {
+    // Board selected ACTION 73, but the execution-time re-run degraded to
+    // WATCH 55. The old practice floor executed it anyway. Agent source must
+    // now clear ACTION+/55 on the FRESH signal; manual paper clicks keep the
+    // relaxed practice floor.
+    const out = await executeFuturesSignal({
+      symbol: 'BTC', side: 'LONG', mode: 'paper', marginUSDT: 100, leverage: 3,
+      getFreshSignal: async () => ({ ...STRONG_FUT, grade: 'WATCH', confidence: 55 }),
+      source: 'agent',
+    });
+    expect(out.ok).toBe(false);
+    expect(String(out.error || '')).toMatch(/WATCH|ACTION\+|floor|grade/i);
+    expect(loadJournal().positions.length).toBe(0);
+  });
+
   it('v20.3: PAPER practice fill against a FLIPPED consensus is stamped relaxed (calibration corpus stays clean)', async () => {
     // request SHORT while the fresh consensus says LONG → practice synth plan
     const out = await executeFuturesSignal({
@@ -866,6 +881,16 @@ describe('watchFuturesPositions', () => {
     const out = await closeFuturesPosition('p1');
     expect(out.ok).toBe(true);
     expect(loadJournal().positions[0].closeReason).toBe('Manual close');
+  });
+
+  it('agent close reason (time-exit) propagates to the position + CLOSE entry', async () => {
+    __setJournalForTests({ entries: [], positions: [mkPos()] });
+    const out = await closeFuturesPosition('p1', 'Time-exit');
+    expect(out.ok).toBe(true);
+    const j = loadJournal();
+    expect(j.positions[0].closeReason).toBe('Time-exit');
+    const e = j.entries.find(x => x.kind === 'CLOSE' && x.pair === 'B-BTC_USDT');
+    expect(e?.reason).toBe('Time-exit');
   });
 });
 

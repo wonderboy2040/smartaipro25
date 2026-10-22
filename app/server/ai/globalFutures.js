@@ -163,6 +163,23 @@ export async function refreshGlobalUniverse() {
     });
     added.push(d.symbol);
   }
+  // v21.23.15 FIX: a discovered name can rotate out of CoinDCX's live
+  // instrument list while we still HOLD a position on it. If it leaves the
+  // universe, fetchGlobalQuotes stops pricing it and the watcher/time-exit
+  // can never manage or close the trade (ON-USD got stuck past its 90m
+  // window). Pin every open GLOBALFUTURES symbol into the universe until
+  // the position closes; the next refresh drops it naturally afterwards.
+  try {
+    const openSyms = (loadJournalFresh()?.positions || [])
+      .filter(p => p.market === 'GLOBALFUTURES' && (p.status === 'OPEN' || p.status === 'UNKNOWN'))
+      .map(p => String(p.symbol || '').toUpperCase())
+      .filter(Boolean);
+    for (const sym of openSyms) {
+      if (!bySymbol.has(sym)) {
+        bySymbol.set(sym, { symbol: sym, name: sym, yahoo: yahooForGlobal(sym), sim: false, pinned: true });
+      }
+    }
+  } catch { /* journal read best-effort — seed/discovery still valid */ }
   const next = [...bySymbol.values()];
   const dropped = GLOBAL_FUTURES_UNIVERSE
     .filter(u => u.discovered && !next.some(n => n.symbol === u.symbol))
@@ -546,6 +563,29 @@ export async function fetchGlobalLtpMap() {
   return m || new Map();
 }
 
+// v21.23.15 FIX: on-demand quote for a position whose symbol is no longer
+// in the live scan universe (discovered name rotated out). The normal quote
+// map only covers GLOBAL_FUTURES_UNIVERSE; without this fallback an open
+// position can become unpriceable and uncloseable (ON-USD, time-exit).
+async function fetchGlobalQuoteOne(symbol) {
+  const sym = String(symbol || '').toUpperCase();
+  const meta = globalInstrumentMeta(sym);
+  if (meta?.sim) return { price: syntheticPriceAt(sym), source: 'sim', sim: true, ts: Date.now() };
+  const yahoo = meta?.yahoo || yahooForGlobal(sym);
+  if (!yahoo) return null;
+  try {
+    const fh = await fetchFinnhubQuote(yahoo);
+    if (fh?.price > 0) return { price: fh.price, source: 'finnhub', sim: false, ts: fh.time || Date.now() };
+  } catch { /* fall through to Yahoo */ }
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahoo)}?interval=1d&range=5d`;
+    const r = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    const price = num((await r.json())?.chart?.result?.[0]?.meta?.regularMarketPrice);
+    return price > 0 ? { price, source: 'yahoo', sim: false, ts: Date.now() } : null;
+  } catch { return null; }
+}
+
 // ----------------------------------------------------------------
 // v21.3.0 (Issue-6: "Equity sim USDC me realtime price fetch nahi ho
 // raha") — 24/7 CANDLESTICK PRICE PATH.
@@ -879,7 +919,9 @@ export async function executeGlobalSignal(opts) {
     side: side || effectiveSignal.side, gates,
     requireStrong: false, // SIM desk — no live bar to enforce
     maxAgeMs: 600_000, maxRiskPct: riskCap, venue: 'GLOBALFUTURES',
-    practice: true,
+    // v21.23.15: SIM auto-agent entries must also clear the ACTION+/55
+  // floor on the FRESH signal; manual SIM clicks keep practice=true.
+  practice: source !== 'agent',
   });
   if (!verdict.ok) {
     return reject(verdict.reason, `Signal gate: ${verdict.reason}`, {
@@ -1034,13 +1076,18 @@ export async function executeGlobalSignal(opts) {
 // ============================================================
 // MANUAL CLOSE (market — at the live quote)
 // ============================================================
-export async function closeGlobalPosition(positionId) {
+export async function closeGlobalPosition(positionId, reason = 'Manual close') {
   return withJournalLock(async () => {
     const j = loadJournalFresh();
     const p = j.positions.find(x => x.id === positionId && x.market === 'GLOBALFUTURES' && x.status === 'OPEN');
     if (!p) return { ok: false, error: 'Open GLOBALFUTURES position not found' };
     const quotes = await fetchGlobalLtpMap();
-    const ltp = quotes.get(p.symbol)?.price;
+    let ltp = quotes.get(p.symbol)?.price;
+    if (!(ltp > 0)) {
+      // v21.23.15: dropped discovered symbol → direct on-demand quote.
+      const one = await fetchGlobalQuoteOne(p.symbol);
+      ltp = one?.price;
+    }
     if (!(ltp > 0)) return { ok: false, error: 'Live global price unavailable — thodi der baad close karo' };
     const usdInr = await fetchUsdInrShared();
     const long = p.side === 'LONG';
@@ -1051,11 +1098,11 @@ export async function closeGlobalPosition(positionId) {
     p.closePrice = ltp;
     p.pnlUSDT = r2(pnlUSD + bookedUSD);
     p.pnlINR = inrOfUsd(p.pnlUSDT, usdInr);
-    p.closeReason = 'Manual close';
-    try { settlePositionOutcome(p, 'Manual close'); } catch { /* best-effort */ }
+    p.closeReason = reason;
+    try { settlePositionOutcome(p, reason); } catch { /* best-effort */ }
     pushEntry(j, {
       kind: 'CLOSE', day: todayIST(), pair: p.pair, market: 'GLOBALFUTURES', mode: p.mode, source: p.source,
-      qty: p.qty, entryPrice: p.entryPrice, closePrice: ltp, pnlUSDT: p.pnlUSDT, pnlINR: p.pnlINR, reason: 'Manual close (SIM desk)',
+      qty: p.qty, entryPrice: p.entryPrice, closePrice: ltp, pnlUSDT: p.pnlUSDT, pnlINR: p.pnlINR, reason: `${reason} (SIM desk)`,
     });
     saveJournalFresh(j);
     return { ok: true, position: { ...p, ltp: r2(ltp), unrealizedPnlINR: p.pnlINR, unrealizedPnlUSDT: p.pnlUSDT } };
@@ -1081,7 +1128,12 @@ export async function watchGlobalPositions({ sendTelegram } = {}) {
     const quotes = await fetchGlobalLtpMap();
 
     for (const p of open) {
-      const price = quotes.get(p.symbol)?.price;
+      let price = quotes.get(p.symbol)?.price;
+      if (!(price > 0)) {
+        // v21.23.15: pinned/dropped symbol still needs SL/TP management.
+        const one = await fetchGlobalQuoteOne(p.symbol);
+        price = one?.price;
+      }
       if (!(price > 0)) continue;
       const long = p.side === 'LONG';
 

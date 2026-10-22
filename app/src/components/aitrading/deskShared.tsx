@@ -118,8 +118,8 @@ export const DeskStatsStrip = memo(function DeskStatsStrip({ board, deskLabel }:
   const stats: { label: string; value: string; cls?: string; title: string }[] = [
     { label: 'SCANNED', value: board ? `${board.scanned ?? 0}` : '…', title: 'Universe symbols the ensemble scanned' },
     { label: 'SIGNALS', value: `${sigs.length}`, title: 'Rows on the board (any grade)' },
-    { label: 'ACTIONABLE', value: `${actionable}`, cls: actionable > 0 ? 'text-cyan-300' : 'text-slate-400', title: 'STRONG + ACTION — tradeable consensus' },
-    { label: 'STRONG', value: `${strong}`, cls: strong > 0 ? 'text-emerald-300' : 'text-slate-400', title: 'Full-committee agreement (75%+ conf)' },
+    { label: 'ACTION+', value: `${actionable}`, cls: actionable > 0 ? 'text-cyan-300' : 'text-slate-400', title: 'STRONG + ACTION. Sirf STRONG live-executable hai (75%+ conf + 70%+ agreement); ACTION paper-practice grade hai.' },
+    { label: 'STRONG', value: `${strong}`, cls: strong > 0 ? 'text-emerald-300' : 'text-slate-400', title: 'LIVE-executable: full-committee agreement (75%+ conf + 70%+ agreement)' },
     { label: 'VERIFIED', value: sigs.some(s => s.verify) ? `${vConfirmed}` : '—', cls: vConfirmed > 0 ? 'text-emerald-300' : 'text-slate-400', title: `SVA pro-trader CONFIRM verdicts — full-risk setups${sigs.some(s => s.verify) ? ` (caution ${vCaution} · rejected ${vRejected})` : ''}` },
     { label: 'AVG CONF', value: b ? `${Math.round(b.avgConf ?? 0)}%` : '—', title: 'Average confidence across the board' },
     { label: 'MOOD', value: moodTxt, cls: moodCls, title: 'Breadth mood (bull − bear)' },
@@ -149,7 +149,7 @@ export const DeskStatsStrip = memo(function DeskStatsStrip({ board, deskLabel }:
 const FILTERS: { id: BoardFilter; label: string }[] = [
   { id: 'ALL', label: 'ALL' },
   { id: 'SUPER', label: '🔥 80+' },
-  { id: 'ACTION', label: '⚡ ACTIONABLE' },
+  { id: 'ACTION', label: '⚡ ACTION+ (paper)' },
   { id: 'STRONG', label: '★ STRONG' },
   { id: 'LONG', label: '▲ LONG' },
   { id: 'SHORT', label: '▼ SHORT' },
@@ -260,7 +260,7 @@ export function BoardSummary({ board }: { board: SignalBoard | null }) {
       <span className="px-2 py-1 rounded-lg bg-black/30 text-slate-400 font-mono">{board.scanned || 0} scanned</span>
       <span className="px-2 py-1 rounded-lg bg-black/30 text-slate-400 font-mono">{(board.signals || []).length} signals</span>
       <span className={`px-2 py-1 rounded-lg border ${strong > 0 ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40 animate-pulse' : 'bg-slate-600/20 text-slate-400 border-slate-600/30'}`}>★ {strong} STRONG</span>
-      <span className={`px-2 py-1 rounded-lg border ${actionable > 0 ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40' : 'bg-slate-600/20 text-slate-400 border-slate-600/30'}`}>⚡ {actionable} actionable</span>
+      <span className={`px-2 py-1 rounded-lg border ${actionable > 0 ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40' : 'bg-slate-600/20 text-slate-400 border-slate-600/30'}`}>⚡ {actionable} ACTION+ <span className="text-slate-500 font-normal">(paper)</span></span>
     </div>
   );
 }
@@ -320,8 +320,8 @@ export function IndiaHowToTrade() {
           <div className="text-[10px] font-black text-cyan-300 mb-1">① TOP 6 DEEP-TREND SIGNAL CHUNO (grade dekho)</div>
           <p className="text-slate-400">
             <b className="text-cyan-300">📡 TOP 6 DEEP-TREND SIGNALS</b> = 8 Institutional + 10 World Top Indicators + 3-Model Local Ollama AI se confluence-verified LONG/SHORT setups.
-            <b className="text-cyan-300"> ★ ELITE / STRONG</b> = full committee agree (75%+ conf) — highest-confluence setups (guaranteed accuracy claim nahi — ledger-calibrated win-rate hi dekho).
-            <b className="text-cyan-300"> ⚡ ACTION</b> (55%+) bhi tradeable hai.
+            <b className="text-cyan-300"> ★ ELITE / STRONG</b> = full committee agree (75%+ conf) — yehi LIVE-executable grade hai (guaranteed accuracy claim nahi — ledger-calibrated win-rate hi dekho).
+            <b className="text-cyan-300"> ⚡ ACTION</b> (55%+) sirf PAPER practice grade hai — LIVE order sirf ★ STRONG par jaata hai. Grade decision-gate pe lock hota hai, isliye quality/MTF boosts ke baad conf 75%+ dikh sakta hai bina badge upgrade ke.
             <span className="text-slate-500"> 9:30–14:30 ke beech entry best hai.</span>
           </p>
         </div>

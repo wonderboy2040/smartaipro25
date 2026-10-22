@@ -290,6 +290,7 @@ export interface TrackRecordData {
   days: number;
   totalTracked: number;
   openCount: number;
+  excludedCount?: number;
   resolved: number;
   wins: number;
   losses: number;

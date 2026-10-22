@@ -120,6 +120,24 @@ describe('v20.3 R2 — cross-source direction disagreement no longer flip-churns
     // (2 events — close and reopen both tag as FLIP)
     expect(ev.filter(e => e.type === 'FLIP')).toHaveLength(2);
   });
+
+  it('v21.23.15: excluded rows stay in the audit JSON but never enter the ledger stats', () => {
+    const base = {
+      ...sig('SPACEX', 'LONG'), dayKey: '2026-08-31', status: 'SL_HIT',
+      exitPrice: 97, openedAt: Date.now() - 60_000, closedAt: Date.now(),
+      disciplinedPnlPerLakh: -30, rMultiple: -1,
+    };
+    saveJSON('tracked-signals.json', { signals: [
+      { ...base, symbol: 'RELIANCE', status: 'T2_HIT', exitPrice: 106, disciplinedPnlPerLakh: 60, rMultiple: 2 },
+      { ...base, excluded: true, excludedReason: 'test reference-only' },
+    ], dayKey: '' });
+    __reloadTrackRecordForBoot();
+    const tr = getTrackRecord(30);
+    expect(tr.resolved).toBe(1);         // only the real, executable outcome
+    expect(tr.excludedCount).toBe(1);
+    expect(tr.totalTracked).toBe(1);
+    expect(tr.disciplinedPnlPerLakh).toBe(60);
+  });
 });
 
 // ---- R3: formatStrongSignal currency honesty ----

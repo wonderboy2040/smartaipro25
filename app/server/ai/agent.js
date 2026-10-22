@@ -1150,16 +1150,20 @@ Ye fix hote hi futures auto-entries phir se chalegi.`);
   }
 
   // ---- daily loss cap (agent's own, on top of the global ₹ cap) ----
-  if (_state.pausedToday) {
-    persistState(); return;
-  }
+  // v21.23.15 FIX: a stand-down blocks NEW ENTRIES, never exit management.
+  // The old early return sat BEFORE the time-exit/conviction/trend-flip
+  // sweeps, so hitting the cap left open positions unmanaged (ON-USD's
+  // time-exit never retried). Exits run first; the entry return is below.
   const agentPnl = agentRealizedToday(j);
   const lossCapINR = equityINR * (cfg.dailyLossCapPct / 100);
-  if (tradesToday.length > 0 && agentPnl <= -lossCapINR) {
+  if (tradesToday.length > 0 && agentPnl <= -lossCapINR && !_state.pausedToday) {
     _state.pausedToday = { day, reason: `daily loss cap hit: ₹${r2(agentPnl)} ≤ −₹${r2(lossCapINR)} (${cfg.dailyLossCapPct}% of equity)` };
-    log('skip', `STANDING DOWN for today — ${_state.pausedToday.reason}`);
-    await notify(sendTelegram, `🤖 <b>AGENT stood down</b> — ${_state.pausedToday.reason}\nKal phir se 3 fresh trades.`);
-    persistState(); return;
+    log('skip', `STANDING DOWN for today — ${_state.pausedToday.reason} (exits/monitoring continue)`);
+    await notify(sendTelegram, `🤖 <b>AGENT stood down — new entries band</b> — ${_state.pausedToday.reason}\nOpen positions ka exit/monitoring chalu rahega. Kal phir se 3 fresh trades.`);
+  }
+  const pausedForDay = !!_state.pausedToday;
+  if (pausedForDay) {
+    maybeLogSkip('paused_today', `STANDING DOWN for today — ${_state.pausedToday.reason} (naye entries band; exits continue)`);
   }
 
   // ---- v10.1 B3: rolling win-rate self-check (accuracy decay early
@@ -1185,11 +1189,14 @@ Ye fix hote hi futures auto-entries phir se chalegi.`);
   }
 
   // ---- equity floor ----
+  // v21.23.15: block new entries, but let the exit sweeps below manage
+  // whatever is already open (a low wallet must not trap a position).
+  let equityBlocked = false;
   if (equityINR < cfg.minEquityINR) {
+    equityBlocked = true;
     maybeLogSkip('equity_floor', `wallet equity ₹${r2(equityINR)} < floor ₹${cfg.minEquityINR} — not trading (wallet top-up needed)`);
     await alertOnce(sendTelegram, 'equity_floor',
       `🤖 <b>AGENT entry paused</b> — wallet equity ₹${r2(equityINR)} floor ₹${cfg.minEquityINR} se neeche hai.\nCoinDCX wallet top-up karo — scans turant resume honge.`);
-    persistState(); return;
   }
 
   // ---- v10.15 GAP 4: GLOBAL RISK BRAIN — the cross-desk check. The
@@ -1198,6 +1205,7 @@ Ye fix hote hi futures auto-entries phir se chalegi.`);
   // risk-off (VIX spike + BTC breakdown together) size-down apply
   // HERE, before any candidate is even scanned. Cached 5 min inside. ----
   let grGate = null;
+  let globalVeto = false;
   try {
     const { loadIndiaAgentConfig } = await import('./indiaAgent.js');
     const indiaCfg = loadIndiaAgentConfig();
@@ -1207,8 +1215,9 @@ Ye fix hote hi futures auto-entries phir se chalegi.`);
       usdInr,
     });
     if (grGate.veto) {
+      // v21.23.15: veto new entries only — closing/reducing heat must stay allowed.
+      globalVeto = true;
       maybeLogSkip('global_heat', `GLOBAL RISK BRAIN — entry vetoed: ${grGate.reason}; dono desks ka combined heat cap cross ho gaya hai`);
-      persistState(); return;
     }
     if (grGate.riskOff) {
       log('info', `GLOBAL RISK BRAIN — risk-off regime (VIX spike + BTC breakdown): new-entry sizing ×${grGate.sizeMul} across BOTH desks`);
@@ -1308,11 +1317,11 @@ Ye fix hote hi futures auto-entries phir se chalegi.`);
       _state.conviction[p.pair] = { ...c, entryScore: Number.isFinite(entryScore) ? entryScore : null, at: Date.now() };
       if (c.state === 'FLIPPED') {
         const out = p.market === 'FUTURES'
-          ? await closeFuturesPosition(p.id).catch(e => ({ ok: false, error: String(e?.message || e) }))
+          ? await closeFuturesPosition(p.id, 'Conviction flip').catch(e => ({ ok: false, error: String(e?.message || e) }))
           : p.market === 'GLOBALFUTURES'
             ? await (async () => {
                 const { closeGlobalPosition } = await import('./globalFutures.js');
-                return closeGlobalPosition(p.id).catch(e => ({ ok: false, error: String(e?.message || e) }));
+                return closeGlobalPosition(p.id, 'Conviction flip').catch(e => ({ ok: false, error: String(e?.message || e) }));
               })()
             : await (async () => {
                 const { closePosition } = await import('./coindcxOrders.js');
@@ -1395,11 +1404,11 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
         continue; // not closed this tick — the new window owns it now
       }
       const out = p.market === 'FUTURES'
-        ? await closeFuturesPosition(p.id).catch(e => ({ ok: false, error: String(e?.message || e) }))
+        ? await closeFuturesPosition(p.id, 'Time-exit').catch(e => ({ ok: false, error: String(e?.message || e) }))
         : p.market === 'GLOBALFUTURES'
           ? await (async () => {
               const { closeGlobalPosition } = await import('./globalFutures.js');
-              return closeGlobalPosition(p.id).catch(e => ({ ok: false, error: String(e?.message || e) }));
+              return closeGlobalPosition(p.id, 'Time-exit').catch(e => ({ ok: false, error: String(e?.message || e) }));
             })()
           : await (async () => {
               const { closePosition } = await import('./coindcxOrders.js');
@@ -1485,11 +1494,11 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
       continue;
     }
     const out = p.market === 'FUTURES'
-      ? await closeFuturesPosition(p.id).catch(e => ({ ok: false, error: String(e?.message || e) }))
+      ? await closeFuturesPosition(p.id, 'Trend flip').catch(e => ({ ok: false, error: String(e?.message || e) }))
       : p.market === 'GLOBALFUTURES'
         ? await (async () => {
             const { closeGlobalPosition } = await import('./globalFutures.js');
-            return closeGlobalPosition(p.id).catch(e => ({ ok: false, error: String(e?.message || e) }));
+            return closeGlobalPosition(p.id, 'Trend flip').catch(e => ({ ok: false, error: String(e?.message || e) }));
           })()
         : await (async () => {
             const { closePosition } = await import('./coindcxOrders.js');
@@ -1508,6 +1517,13 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
     await notify(sendTelegram, `🤖 <b>AGENT trend-flip ALERT</b> (manual positions — auto-close OFF, khud decide karo)\n${flipAlerted.map(a => `• ${a.pair} — aapki ${a.side} position OPEN hai, board ab ${a.flipSide} (${a.score}%) bole raha hai`).join('\n')}\nAgent in pairs par opposite-side entry ${cfg.flipReentryBlockMin}m se BLOCK kar di gayi hai.`);
   }
 
+  // v21.23.15: exit sweeps above are done; only NOW do the entry blockers
+  // (daily loss stand-down / equity floor / global-heat veto) stop the tick.
+  if (pausedForDay || equityBlocked || globalVeto) {
+    persistState();
+    return;
+  }
+
   // ---- 3-trade daily cap ----
   if (tradesToday.length >= cfg.maxTradesPerDay) {
     maybeLogSkip('quota', `quota ${tradesToday.length}/${cfg.maxTradesPerDay} used — waiting for IST midnight`);
@@ -1515,9 +1531,15 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
   }
 
   // ---- cooldown between entries ----
-  if (_state.lastEntryAt && (Date.now() - _state.lastEntryAt) / 60000 < cfg.cooldownMin) {
+  // v21.23.15 FIX (INJ miss): a GLOBALFUTURES SIM entry must never block a
+  // REAL FUTURES entry. The old global cooldown did exactly that - ON (sim)
+  // entered at 13:47, then INJ (84 AI, 6 voters) stayed locked out for 20m.
+  // Sim's own churn is controlled by the sim-only gate after `best` pick;
+  // here a sim-last entry simply doesn't arm the cross-desk cooldown.
+  const _lastMkt = String(_state.lastEntryMarket || '');
+  if (_lastMkt !== 'GLOBALFUTURES' && _state.lastEntryAt && (Date.now() - _state.lastEntryAt) / 60000 < cfg.cooldownMin) {
     const left = Math.max(1, Math.ceil(cfg.cooldownMin - (Date.now() - _state.lastEntryAt) / 60000));
-    maybeLogSkip('cooldown', `entry cooldown — ${left}m baaki (flip-side re-entry guard)`);
+    maybeLogSkip('cooldown', `entry cooldown - ${left}m baaki (same-desk re-entry guard)`);
     persistState(); return;
   }
 
@@ -1836,6 +1858,20 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
     }
   }
 
+  // v21.23.15 FIX (INJ miss): sim-only churn guard. Sim trades do NOT
+  // consume the real 3/day quota, so without this the 30s loop could open
+  // a fresh GLOBALFUTURES trade every cycle. Real FUTURES entries are
+  // never blocked by a preceding sim entry (the cross-desk gate above
+  // deliberately lets them through).
+  if (best && String(best.market || '') === 'GLOBALFUTURES'
+      && String(_state.lastEntryMarket || '') === 'GLOBALFUTURES'
+      && _state.lastEntryAt
+      && (Date.now() - _state.lastEntryAt) / 60000 < cfg.cooldownMin) {
+    const left = Math.max(1, Math.ceil(cfg.cooldownMin - (Date.now() - _state.lastEntryAt) / 60000));
+    maybeLogSkip('cooldown_sim', `SIM entry cooldown - ${left}m baaki (sim churn guard; futures entries open)`);
+    persistState(); return;
+  }
+
   // ---- v10.15 GAP 2: EVENT GUARD — "is anything scheduled?" The one
   // question a pro trader asks BEFORE entering that the system never
   // did. T-30min blackout on the affected symbol/desk → the entry is
@@ -2133,10 +2169,20 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
 
   if (out?.ok) {
     _state.lastEntryAt = Date.now();
+    _state.lastEntryMarket = best.market || 'CRYPTO';
     _state.lastEntryPair = pairOfSignal(best);
     acquireDirectionLock({ symbol: best.symbol, side: best.side, source: 'agent', cooldownMin: cfg.flipReentryBlockMin || 240 });
     const f = out.filled || {};
     const deskTag = best.market === 'GLOBALFUTURES' ? '🌍 Global SIM' : wantFutures ? '⚡ Futures' : '₿ Spot';
+    // v21.23.15 FIX: log the signal that ACTUALLY executed (fresh re-run),
+    // not the scan-time board signal. STRK board showed ACTION 73 but the
+    // fresh execution signal degraded to WATCH 55 — the old log lied.
+    const execSig = out?.position?.signal || out?.alert || {};
+    const execConf = Number(execSig.confidence ?? execSig.conf ?? best.confidence);
+    const execGrade = execSig.grade || best.grade || null;
+    const execAgreement = Number(execSig.agreement ?? best.agreement ?? 0);
+    const execSl = out?.position?.sl ?? best.plan?.stopLoss;
+    const execTp2 = out?.position?.tp2 ?? best.plan?.target2;
     // v10.8: near-miss entries get a journal marker (NEAR_MISS kind —
     // accounting-neutral: the ORDER entry the executor pushed already
     // counts the trade against quota; this is the audit trail for the
@@ -2167,15 +2213,15 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
       saveJournal(jj);
     }).catch(() => { /* best-effort marker */ });
     if (out.mode === 'notify') {
-      log('entry', `NOTIFY ${deskTag} ${best.symbol} ${best.side} (${best.confidence}% conf) — alert-only, koi order nahi${out.telegramSent ? '' : ' (telegram off)'}`);
+      log('entry', `NOTIFY ${deskTag} ${best.symbol} ${best.side} (${execConf}% conf${execGrade ? ` · ${execGrade}` : ''}) — alert-only, koi order nahi${out.telegramSent ? '' : ' (telegram off)'}`);
     } else {
-      log('entry', `AUTO-ENTRY ${deskTag} ${best.symbol} ${best.side} (${best.confidence}% conf)${nearMissInfo ? ` [NEAR-MISS ${nearMissInfo.aiScore}/${nearMissInfo.needScore}]` : ''} — ${f.qty ?? '?'} @ ${f.price ?? best.plan.entry}${wantFutures || best.market === 'GLOBALFUTURES' ? ` · ${f.leverage ?? '?'}x · margin ${f.marginUSDT ?? '?'} USDT` : ''} · SL ${best.plan.stopLoss} · T2 ${best.plan.target2}${kelly?.mode === 'kelly' ? ` · kelly ${riskPct}%` : ''}`);
+      log('entry', `AUTO-ENTRY ${deskTag} ${best.symbol} ${best.side} (${execConf}% conf${execGrade ? ` · ${execGrade}` : ''})${nearMissInfo ? ` [NEAR-MISS ${nearMissInfo.aiScore}/${nearMissInfo.needScore}]` : ''} — ${f.qty ?? '?'} @ ${f.price ?? best.plan.entry}${wantFutures || best.market === 'GLOBALFUTURES' ? ` · ${f.leverage ?? '?'}x · margin ${f.marginUSDT ?? '?'} USDT` : ''} · SL ${execSl} · T2 ${execTp2}${kelly?.mode === 'kelly' ? ` · kelly ${riskPct}%` : ''}`);
       await notify(sendTelegram,
         `🤖 <b>AGENT AUTO-ENTRY${nearMissInfo ? ' · NEAR-MISS' : ''}</b> — ${deskTag} ${best.symbol} ${best.side}\n` +
         `${nearMissInfo ? `AI ${nearMissInfo.aiScore} (bar ${nearMissInfo.needScore}, conf ${nearMissInfo.confidence}%, ${nearMissInfo.voters} voters)\n` : ''}` +
-        `Confidence ${best.confidence}% · agreement ${Math.round((best.agreement || 0) * 100)}% · trade ${tradesToday.length + 1}/${cfg.maxTradesPerDay} today\n` +
+        `Confidence ${execConf}%${execGrade ? ` (${execGrade})` : ''} · agreement ${Math.round(execAgreement * 100)}% · trade ${tradesToday.length + 1}/${cfg.maxTradesPerDay} today\n` +
         `${f.qty ?? '?'} @ ${f.price ?? best.plan.entry}${wantFutures || best.market === 'GLOBALFUTURES' ? ` · ${f.leverage ?? 1}x · margin ${Math.round(f.marginUSDT ?? 0)} USDT` : ''}\n` +
-        `SL ${best.plan.stopLoss} · T2 ${best.plan.target2} · time-exit ${cfg.maxHoldMin}m (winner-extension armed)${kelly?.mode === 'kelly' ? ` · kelly-sized ${riskPct}%` : ''}`,
+        `SL ${execSl} · T2 ${execTp2} · time-exit ${cfg.maxHoldMin}m (winner-extension armed)${kelly?.mode === 'kelly' ? ` · kelly-sized ${riskPct}%` : ''}`,
       );
     }
   } else {

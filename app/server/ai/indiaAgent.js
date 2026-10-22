@@ -508,13 +508,21 @@ async function _tick(deps, sendTelegram) {
   const voterCount = (s) => Number(s?.voters ?? s?.participating ?? 0);
   // v10.2 parity — QUORUM-AWARE threshold: thin committees (<5 voters)
   // need MORE conviction to touch money, not less.
-  const qualifies = (s) => !!(s && s.plan && s.side && (
-    signalOf(s) >= effectiveScoreBar(cfg, s) || (
-      s.grade === 'STRONG' && s.executable
+  // v21.23.15 LIVE PARITY: live orders pass through evaluateExecutionGate
+  // with requireStrong=true (indiaOrders.js). The old OR branch also
+  // required `s.executable`, which is FALSE for every INDIA signal by
+  // design (executable is only stamped on CRYPTO/FUTURES/GLOBALFUTURES),
+  // so the STRONG route was dead code and LIVE picked ACTION signals
+  // that the order layer then rejected. LIVE now selects exactly what
+  // the order layer accepts; PAPER keeps the practice aiScore route.
+  const qualifies = (s) => {
+    if (!(s && s.plan && s.side)) return false;
+    const strongOk = s.grade === 'STRONG'
       && (s.confidence ?? 0) >= cfg.minConfidence
-      && (s.agreement ?? 0) >= cfg.minAgreement
-    )
-  ));
+      && (s.agreement ?? 0) >= cfg.minAgreement;
+    if (cfg.mode === 'live') return strongOk;
+    return signalOf(s) >= effectiveScoreBar(cfg, s) || strongOk;
+  };
 
   // ---- v10.15 GAP 1: LIVE CONVICTION SWEEP (India parity) — the
   // ensemble re-votes every open India position via the SAME cached
@@ -910,11 +918,35 @@ async function _tick(deps, sendTelegram) {
 async function managePartialTp(openAgent, cfg, sendTelegram) {
   if (!openAgent.length) return;
   const syms = [...new Set(openAgent.map(p => p.symbol))];
-  const rows = await fetchTVIndiaBatch(syms).catch(() => ({}));
+  // v21.23.15 FIX (live TITAN miss): the TV scanner is a ~30s SAMPLE and
+  // can skip a fast dip/spike that Groww's realtime last-trade tape sees.
+  // TITAN went to 4309 (Groww, below T1 4317.2) while the TV row still
+  // showed 4334 -> T1 never booked. Fetch BOTH sources and, for exit
+  // checks only, use the price most FAVORABLE to the position (max for
+  // LONG, min for SHORT). This can only book a profit leg earlier; it
+  // never widens risk (SL management stays on its own path).
+  const [rows, growwList] = await Promise.all([
+    fetchTVIndiaBatch(syms).catch(() => ({})),
+    Promise.all(syms.map(s => fetchGrowwNseQuote(s).catch(() => null))),
+  ]);
+  const growwBySym = {};
+  syms.forEach((s, i) => {
+    const px = Number(growwList[i]?.price);
+    growwBySym[s] = Number.isFinite(px) && px > 0 ? px : null;
+  });
   for (const p of openAgent) {
-    const ltp = Number(rows[p.symbol]?.ltp);
-    if (!Number.isFinite(ltp) || ltp <= 0) continue;
+    const tvLtp = Number(rows[p.symbol]?.ltp);
+    const gwLtp = Number(growwBySym[p.symbol]);
     const long = p.side === 'LONG';
+    const sources = [
+      Number.isFinite(tvLtp) && tvLtp > 0 ? { px: tvLtp, src: 'tv' } : null,
+      Number.isFinite(gwLtp) && gwLtp > 0 ? { px: gwLtp, src: 'groww' } : null,
+    ].filter(Boolean);
+    if (!sources.length) continue;
+    const best = sources.reduce((a, b) => (long ? (b.px > a.px ? b : a) : (b.px < a.px ? b : a)));
+    const ltp = best.px;
+    const srcNote = best.src === 'groww' && Number.isFinite(tvLtp) && tvLtp !== gwLtp
+      ? ` [Groww realtime ${r2(gwLtp)} vs TV ${r2(tvLtp)}]` : '';
     const orig = Number(p.originalQty ?? p.qty) || p.qty;
     const t1 = Number(p.tp);
     const t2 = Number(p.tp2);
@@ -931,7 +963,7 @@ async function managePartialTp(openAgent, cfg, sendTelegram) {
         }
         continue;
       }
-      const out = await closeIndiaPosition(p.id, { qty: legQty, reason: `T1 PARTIAL ${cfg.tp1ClosePct}% @ ₹${r2(ltp)}` }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+      const out = await closeIndiaPosition(p.id, { qty: legQty, reason: `T1 PARTIAL ${cfg.tp1ClosePct}% @ ₹${r2(ltp)}${srcNote}` }).catch(e => ({ ok: false, error: String(e?.message || e) }));
       if (out?.ok) {
         if (cfg.breakEvenAfterTp1) {
           await adjustAgentPositionSl(p.id, p.entryPrice, `BE-lock after T1: SL → ₹${r2(p.entryPrice)} (risk-free runner)`, p);

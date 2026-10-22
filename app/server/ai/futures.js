@@ -1741,7 +1741,11 @@ export async function executeFuturesSignal(opts) {
     requireStrong: wantMode === 'live',
     maxAgeMs: wantMode === 'live' ? 90_000 : 600_000,
     maxRiskPct: riskCap, venue: 'FUTURES',
-    practice: wantMode !== 'live', // v9.0.2: paper/notify practice — floor relaxed, honesty journaled
+    // v21.23.15 FIX (STRK fresh-degrade): desk clicks keep the relaxed
+    // practice floor, but AUTO-AGENT entries must not execute a signal
+    // that degraded after selection (board ACTION 73 -> fresh WATCH 55).
+    // Agent source now enforces the ACTION+/55 floor on the FRESH signal.
+    practice: wantMode !== 'live' && source !== 'agent',
   });
   if (!verdict.ok) {
     return reject(verdict.reason, `Signal gate: ${verdict.reason}`, {
@@ -3471,7 +3475,7 @@ async function partialCloseFuturesLeg(j, p, price, { stage, pct }) {
 }
 
 // ---------------- manual close ----------------
-export async function closeFuturesPosition(positionId) {
+export async function closeFuturesPosition(positionId, reason = 'Manual close') {
   return withJournalLock(async () => {
     const j = loadJournalFresh();
     const p = j.positions.find(x => x.id === positionId || x.exchangePositionId === positionId);
@@ -3503,9 +3507,9 @@ export async function closeFuturesPosition(positionId) {
     const pnlUSDT = (long ? ltp - p.entryPrice : p.entryPrice - ltp) * p.qty;
     p.status = 'CLOSED'; p.closedAt = Date.now(); p.closePrice = ltp;
     p.pnlUSDT = r2(pnlUSDT); p.pnlINR = inrOfUsdt(pnlUSDT, usdInr);
-    p.closeReason = 'Manual close';
-    try { settlePositionOutcome(p, 'Manual close'); } catch { /* best-effort */ }
-    pushEntry(j, { kind: 'CLOSE', day: todayIST(), pair: p.pair, market: 'FUTURES', mode: p.mode, source: p.source, qty: p.qty, entryPrice: p.entryPrice, closePrice: ltp, pnlUSDT: p.pnlUSDT, pnlINR: p.pnlINR, reason: 'Manual close' });
+    p.closeReason = reason;
+    try { settlePositionOutcome(p, reason); } catch { /* best-effort */ }
+    pushEntry(j, { kind: 'CLOSE', day: todayIST(), pair: p.pair, market: 'FUTURES', mode: p.mode, source: p.source, qty: p.qty, entryPrice: p.entryPrice, closePrice: ltp, pnlUSDT: p.pnlUSDT, pnlINR: p.pnlINR, reason });
     saveJournalFresh(j);
     return { ok: true, position: p };
   });

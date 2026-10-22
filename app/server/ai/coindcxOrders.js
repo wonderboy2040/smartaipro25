@@ -217,7 +217,7 @@ function todayIST() {
   catch { return new Date().toISOString().slice(0, 10); }
 }
 
-function dailyStats(j) {
+function dailyStats(j, venue = 'CRYPTO') {
   const day = todayIST();
   // v6.11: NOTIFIED (alert-only) entries are NOT trades — they must not
   // consume the daily trade budget. REJECTED likewise never counted.
@@ -232,15 +232,24 @@ function dailyStats(j) {
   // daily trade/loss budget, and its P&L reports separately (sim*) —
   // simulated results must never masquerade as (or block) real trading.
   const isSim = (e) => String(e.market || 'CRYPTO') === 'GLOBALFUTURES';
+  // v21.23.15 FIX (cross-venue cap): INDIA (Dhan) trades were counted in
+  // the CoinDCX dailyStats trade/loss budget. Three India agent trades
+  // filled the shared cap of 3 -> every crypto FUTURES entry (INJ 86,
+  // HYPE 82, FIL 83) was rejected with "Daily trade cap (3) hit" even
+  // though the crypto agent's own quota was 0/3. Venue stats are now
+  // partitioned: 'CRYPTO' = FUTURES/CRYPTO/spot (not sim), 'INDIA' =
+  // Dhan only. SIM (GLOBALFUTURES) stays separate on both views.
+  const isIndia = (e) => String(e.market || '') === 'INDIA';
+  const venueMatch = (e) => venue === 'INDIA' ? isIndia(e) : (!isIndia(e) && !isSim(e));
   const realOrder = (e) => e.day === day && e.kind === 'ORDER'
     && e.status !== 'REJECTED' && e.status !== 'NOTIFIED' && e.status !== 'FAILED';
-  const trades = j.entries.filter(e => realOrder(e) && !isSim(e));
+  const trades = j.entries.filter(e => realOrder(e) && venueMatch(e));
   const simTrades = j.entries.filter(e => realOrder(e) && isSim(e));
   // v7.0 PRO TRADER: PARTIAL_TP legs are REALIZED P&L the moment they
   // fill — they count toward the daily loss cap immediately (no
   // double-count: CLOSE entries carry only the final remaining leg).
   const closedToday = j.entries.filter(e => e.day === day && (e.kind === 'CLOSE' || e.kind === 'PARTIAL_TP'));
-  const realized = closedToday.filter(e => !isSim(e)).reduce((a, e) => a + (e.pnlINR || 0), 0);
+  const realized = closedToday.filter(e => venueMatch(e)).reduce((a, e) => a + (e.pnlINR || 0), 0);
   const simRealized = closedToday.filter(e => isSim(e)).reduce((a, e) => a + (e.pnlINR || 0), 0);
   return {
     day, tradesCount: trades.length, realizedPnlINR: r2(realized),
@@ -249,7 +258,7 @@ function dailyStats(j) {
 }
 
 /** v6.11 test hook: daily stats with the NOTIFIED exclusion verified. */
-export function dailyStatsExport(j) { return dailyStats(j); }
+export function dailyStatsExport(j, venue = 'CRYPTO') { return dailyStats(j, venue); }
 
 export function getRiskState() {
   const cfg = loadConfig();
@@ -698,7 +707,10 @@ export async function executeSignal(opts) {
     requireStrong: wantMode === 'live',
     maxAgeMs: wantMode === 'live' ? 90_000 : 600_000,
     maxRiskPct: cfg.maxRiskPct || 5,
-    practice: wantMode !== 'live', // v9.0.2: paper/notify practice — floor relaxed, honesty journaled
+    // v21.23.15 FIX (STRK fresh-degrade): desk clicks keep the relaxed
+    // practice floor, but AUTO-AGENT entries must not execute a signal
+    // that degraded after selection (board ACTION 73 -> fresh WATCH 55).
+    practice: wantMode !== 'live' && source !== 'agent',
   });
   if (!verdict.ok) {
     const hint = (Number(effectiveSignal?.plan?.riskPct) > riskCap)

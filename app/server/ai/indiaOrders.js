@@ -24,6 +24,7 @@ import crypto from 'node:crypto';
 import { isNseOpen } from './data.js';
 import { dhanConnected, dhanPlaceOrder, dhanCancelOrder, dhanOrderStatus, dhanPositions } from './dhan.js';
 import { fetchTVIndiaBatch } from './data.js';
+import { fetchGrowwNseQuote } from './growwQuote.js';
 import { computeTrailSl, evaluateExecutionGate, buildTradePlan, fitPlanToRiskCap } from './ensemble.js';
 import {
   loadConfig, loadJournal, saveJournal, withJournalLock, pushEntry, todayIST, dailyStats,
@@ -210,7 +211,9 @@ export async function executeIndiaSignal(opts) {
     maxAgeMs: wantMode === 'live' ? 90_000 : 600_000,
     maxRiskPct: cfg.maxRiskPct || 5,
     venue: 'INDIA',
-    practice: wantMode !== 'live', // v9.0.2: paper/notify practice — floor relaxed, honesty journaled
+    // v21.23.15: India auto-agent entries must not execute a fresh
+    // WATCH/NEUTRAL downgrade; manual paper clicks keep the relaxed floor.
+    practice: wantMode !== 'live' && source !== 'india-agent',
   });
   if (!verdict.ok) {
     const hint = (Number(effectiveSignal?.plan?.riskPct) > riskCap)
@@ -227,7 +230,7 @@ export async function executeIndiaSignal(opts) {
     const alertPrice = Number(effectiveSignal.ltp) > 0 ? Number(effectiveSignal.ltp) : null;
     return withJournalLock(async () => {
       const j = loadJournal();
-      const stats = dailyStats(j);
+      const stats = dailyStats(j, 'INDIA');
       const plan = effectiveSignal.plan;
       const capsNote = `trades ${stats.tradesCount}/${cfg.dailyMaxTrades} · realized ₹${r2(stats.realizedPnlINR)} · NSE ${isNseOpen() ? 'OPEN' : 'CLOSED'}`;
       const lines = [
@@ -284,7 +287,7 @@ export async function executeIndiaSignal(opts) {
   // --- FINAL MUTATION under the journal lock, FRESH caps re-check ---
   return withJournalLock(async () => {
     const j = loadJournal();
-    const stats = dailyStats(j);
+    const stats = dailyStats(j, 'INDIA');
     if (stats.tradesCount >= cfg.dailyMaxTrades) {
       pushEntry(j, { ...entry, status: 'REJECTED', reason: `Daily trade cap (${cfg.dailyMaxTrades}) hit` });
       saveJournal(j);
@@ -652,9 +655,19 @@ export async function closeIndiaPosition(positionId, opts = {}) {
     if (!p || p.market !== 'INDIA' || (p.status !== 'OPEN' && p.status !== 'UNKNOWN')) {
       return { ok: false, error: 'India position not found / already closed' };
     }
-    const rows = await fetchTVIndiaBatch([p.symbol]).catch(() => ({}));
-    const ltp = Number(rows[p.symbol]?.ltp);
-    const price = Number.isFinite(ltp) && ltp > 0 ? ltp : null;
+    // v21.23.15 FIX (TITAN fill gap): the TV scanner can lag the real tape
+    // by a minute or more. A Groww-triggered T1 (4306.6) was journaled at
+    // the stale TV close (4325.8) - a 19-point paper-fill error. Groww
+    // realtime is now the PRIMARY fill reference; TV is the fallback.
+    const [rows, growwQuote] = await Promise.all([
+      fetchTVIndiaBatch([p.symbol]).catch(() => ({})),
+      fetchGrowwNseQuote(p.symbol).catch(() => null),
+    ]);
+    const gwLtp = Number(growwQuote?.price);
+    const tvLtp = Number(rows[p.symbol]?.ltp);
+    const price = Number.isFinite(gwLtp) && gwLtp > 0
+      ? gwLtp
+      : (Number.isFinite(tvLtp) && tvLtp > 0 ? tvLtp : null);
     // v7.0.2: no live price → HONEST reject (the old `|| p.entryPrice`
     // booked a fake ₹0-P&L close and understated the daily-loss cap).
     if (price == null) {
