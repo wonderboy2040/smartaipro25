@@ -2795,9 +2795,25 @@ export async function updateCoinDcxPositionSl({ positionId, symbol, pair, stopLo
   }
 
   if (jPos) {
-    jPos.sl = sl;
-    if (exchPosId && !jPos.exchangePositionId) jPos.exchangePositionId = exchPosId;
-    saveJournalFresh(j);
+    // Journal mutations must share the same lock as every other writer (the
+    // old direct save here could interleave with an order/close and lose a
+    // freshly adopted position id or SL change).
+    try {
+      await withJournalLock(async () => {
+        const jj = loadJournalFresh();
+        const jp = Array.isArray(jj?.positions)
+          ? jj.positions.find(p =>
+            (p.status === 'OPEN' || p.status === 'UNKNOWN') && (
+              (positionId && (p.id === positionId || p.exchangePositionId === positionId))
+              || (normPair && p.pair === normPair)
+            ))
+          : null;
+        if (!jp) return;
+        jp.sl = sl;
+        if (exchPosId && !jp.exchangePositionId) jp.exchangePositionId = exchPosId;
+        saveJournalFresh(jj);
+      });
+    } catch { /* best-effort journal update */ }
   }
 
   if (exchPosId && loadCredsForOrder()) {
@@ -2813,8 +2829,19 @@ export async function updateCoinDcxPositionSl({ positionId, symbol, pair, stopLo
       if (row?.id && String(row.id) !== String(exchPosId)) {
         const retry = await createFuturesTpsl({ positionId: row.id, stopLoss: sl, takeProfit: tp }).catch(e => ({ ok: false, error: String(e?.message || e) }));
         if (retry?.ok && jPos) {
-          jPos.exchangePositionId = String(row.id);
-          try { saveJournalFresh(j); } catch { /* best-effort id adoption */ }
+          try {
+            await withJournalLock(async () => {
+              const jj = loadJournalFresh();
+              const jp = Array.isArray(jj?.positions)
+                ? jj.positions.find(p =>
+                  (p.status === 'OPEN' || p.status === 'UNKNOWN') && (
+                    (positionId && (p.id === positionId || p.exchangePositionId === positionId))
+                    || (normPair && p.pair === normPair)
+                  ))
+                : null;
+              if (jp) { jp.exchangePositionId = String(row.id); saveJournalFresh(jj); }
+            });
+          } catch { /* best-effort id adoption */ }
         }
         return { ok: Boolean(retry?.ok), positionId: row.id, stopLoss: sl, error: retry?.error || null };
       }

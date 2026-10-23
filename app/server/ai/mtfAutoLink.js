@@ -46,6 +46,10 @@ import { isNseMarketOpen, freshEntriesAllowedFor, dayKeyFor, istDayKey } from '.
 import { dualAutoCandidates } from './mtfDualBoard.js';
 import { SUPER_TIERS } from './superIntel.js';
 import { walletLeverageForEquityINR, feeBreakevenFloor, evaluateFeeAwareReversalExit } from '../exec/sizing.js';
+// v21.23.15 [PHASE-3 PERSISTENCE]: config + state ab encrypted durable
+// mirror par bhi jaate hain — Render spin-down se auto-config (enabled /
+// desk scope / live mode) aur day counters reset nahi hote.
+import { durablePut } from '../mcp/durable.js';
 // v21.23.1: release ab DO authoritative jagah se hota hai: (1) paperTrading.js
 // `_closePart` central close hook (har paper trade close pe immediate, symbol-flat
 // check ke saath), (2) routes.js 60s watcher `reconcileDirectionLocks()` sweep.
@@ -150,6 +154,30 @@ const MODES = new Set(['INTRADAY', 'SWING', 'SCALP']);
 let _cfg = null;
 let _state = null;
 let _mtfAutoTickInFlight = false;
+// v21.23.15 boot provenance — shown honestly in the UI status so "auto is
+// enabled" never silently means "defaults after a wiped disk".
+let _bootedAt = Date.now();
+let _restoredFromDurable = false;
+let _restoredConfigFromDurable = false;
+let _restoredStateFromDurable = false;
+let _cfgSavedAt = null;
+// Durable restore runs BEFORE the port opens, but it is bounded by an 8s
+// race. Any pre-restore writer (or a status poll during a slow restore) must
+// not stamp a newer default config/state over the backup. Direct module
+// consumers/tests start unblocked; server/index calls __beginMtfAutoBoot().
+let _bootPersistenceReady = true;
+let _bootPersistenceTimer = null;
+
+/** Called by server/index immediately before durableBootRestoreAll(). */
+export function __beginMtfAutoBoot() {
+  _bootPersistenceReady = false;
+  if (_bootPersistenceTimer) clearTimeout(_bootPersistenceTimer);
+  _bootPersistenceTimer = setTimeout(() => {
+    _bootPersistenceReady = true;
+    _bootPersistenceTimer = null;
+  }, 15_000);
+  _bootPersistenceTimer.unref?.();
+}
 
 const clampN = (v, lo, hi, dflt) => {
   const n = Number(v);
@@ -157,18 +185,56 @@ const clampN = (v, lo, hi, dflt) => {
 };
 
 function _save(file, obj) {
+  // Boot window: local+durable writes are suppressed until the durable
+  // restore has had its chance. Skipping only local persistence is not
+  // enough — durablePut would itself make this process the newest writer.
+  if (!_bootPersistenceReady) return;
   try {
     fs.mkdirSync(_dataDir(), { recursive: true });
     fs.writeFileSync(file, JSON.stringify(obj, null, 2));
   } catch { /* non-fatal — state stays in memory */ }
+  // v21.23.15: durable mirror is best-effort; basename keeps the backup
+  // namespace identical to the boot-restore file names. Tests that point
+  // MTF_AUTO_DATA_DIR at a tmp dir still write local state only (durable is
+  // disabled unless a backup repo + encryption key are configured).
+  try { durablePut(path.basename(file), obj); } catch { /* durable optional */ }
 }
 
 export function loadMtfAutoConfig() {
   if (_cfg) return _cfg;
   let raw = {};
   try { raw = JSON.parse(fs.readFileSync(CFG_FILE(), 'utf8')); } catch { raw = {}; }
+  _cfgSavedAt = Number(raw.updatedAt) || null;
   _cfg = _sanitizeCfg({ ...MTF_AUTO_DEFAULTS, ...raw, desks: { ...MTF_AUTO_DEFAULTS.desks, ...(raw.desks || {}) } });
   return _cfg;
+}
+
+/** v21.23.15 boot hook — durableBootRestoreAll writes the disk files AFTER
+ * this module captured `_cfg`/`_state` at module-eval; drop both caches so
+ * the next status/tick reads the hydrated files. */
+export function __reloadMtfAutoForBoot(meta = {}) {
+  _cfg = null;
+  _state = null;
+  _bootedAt = Date.now();
+  _restoredFromDurable = meta?.restored === true
+    || meta?.configRestored === true || meta?.stateRestored === true;
+  _restoredConfigFromDurable = meta?.configRestored === true;
+  _restoredStateFromDurable = meta?.stateRestored === true;
+  // Restore attempt is over (success, no-op or not configured) — allow
+  // persistence again even when the 8s boot race timed out and the restore
+  // itself is still finishing in the background.
+  _bootPersistenceReady = true;
+  if (_bootPersistenceTimer) { clearTimeout(_bootPersistenceTimer); _bootPersistenceTimer = null; }
+  const cfg = loadMtfAutoConfig();
+  const state = _loadState();
+  return {
+    config: cfg,
+    stateLoaded: !!state,
+    bootedAt: _bootedAt,
+    restoredFromDurable: _restoredFromDurable,
+    restoredConfigFromDurable: _restoredConfigFromDurable,
+    restoredStateFromDurable: _restoredStateFromDurable,
+  };
 }
 
 /**
@@ -616,7 +682,8 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
 export function updateMtfAutoConfig(patch = {}) {
   const next = _sanitizeCfg({ ...loadMtfAutoConfig(), ...patch, desks: { ...loadMtfAutoConfig().desks, ...(patch.desks || {}) } });
   _cfg = next;
-  _save(CFG_FILE(), next);
+  _cfgSavedAt = Date.now();
+  _save(CFG_FILE(), { ...next, updatedAt: _cfgSavedAt });
   _logEvent('config', `config updated — ${JSON.stringify({ enabled: next.enabled, mode: next.mode, minScore: next.minScore, riskPerTradeINR: next.riskPerTradeINR, maxPositionsINR: next.maxPositionsINR, maxTradesPerDay: next.maxTradesPerDay })}`);
   return next;
 }
@@ -646,10 +713,15 @@ function _loadState() {
     book: Array.isArray(raw.book) ? raw.book.slice(-100) : [],
     events: Array.isArray(raw.events) ? raw.events.slice(-MAX_EVENTS) : [],
     lastTick: raw.lastTick || null,
+    updatedAt: Number(raw.updatedAt) || null,
   };
   return _state;
 }
-function _persistState() { _save(STATE_FILE(), _loadState()); }
+function _persistState() {
+  const st = _loadState();
+  st.updatedAt = Date.now();
+  _save(STATE_FILE(), st);
+}
 
 function _logEvent(kind, text, extra = null) {
   const st = _loadState();
@@ -668,11 +740,15 @@ function _rollDayIfNeeded() {
   const st = _loadState();
   const key = istDayKey();
   if (st.day !== key) {
+    // If there was no previous day stamp we are likely pre-restore/first run.
+    // Do not write a default empty state before durable restore gets a chance
+    // to hydrate the real one; the caller's entry persist will store the day.
+    const hadDay = st.day != null;
     st.day = key;
     st.dayCount = 0;
     st.perSymbolLast = {};
     st.failedLiveAttempts = {}; // v21.23.10: naya din = naya backoff episode
-    _persistState();
+    if (hadDay) _persistState();
   }
   return st;
 }
@@ -858,7 +934,7 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
       ? Number(pos.t2 ?? pos.tp2 ?? pos.tp)
       : +(isLong ? entry + 2.4 * riskUnit : entry - 2.4 * riskUnit).toFixed(6);
 
-    const existing = st.book.find(b => b.status === 'OPEN' && b.symbol === sym);
+    const existing = st.book.find(b => b.status === 'OPEN' && b.symbol === sym && b.market === 'CRYPTO');
     if (existing) {
       existing.executionMode = 'LIVE';
       existing.traded = true;
@@ -1132,11 +1208,13 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
       _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: another trade still open — 1 session = 1 trade lock`);
       return null;
     }
-    // daily quota — hard cap (live session me wahi relaxed 15 headroom)
+    // daily quota — hard cap, counted against each row's own market day so a
+    // UTC crypto session cannot be blocked/shortened by the IST rollover.
     const stq = _rollDayIfNeeded();
-    const flipQuota = priorWasLive ? Math.max(Number(cfg.maxTradesPerDay) || 5, 15) : (Number(cfg.maxTradesPerDay) || 5);
-    if (stq.dayCount >= flipQuota) {
-      _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: daily quota ${stq.dayCount}/${flipQuota} done`);
+    const flipQuota = Number(cfg.maxTradesPerDay) || 5;
+    const flipDayCount = stq.book.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;
+    if (flipDayCount >= flipQuota) {
+      _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: daily quota ${flipDayCount}/${flipQuota} done`);
       return null;
     }
 
@@ -1481,7 +1559,8 @@ export async function mtfAutoTick(p = {}) {
         b.trailedStopLoss = deepEval.trailedStopLoss;
         b.stopLoss = deepEval.trailedStopLoss;
         if (livePaper) livePaper.stopLoss = deepEval.trailedStopLoss;
-        if (b.executionMode === 'LIVE' && typeof p.liveUpdateSl === 'function') {
+        const indiaDeskRow = b.market === 'INDIA' || b.execMarket === 'INDIA';
+        if (!indiaDeskRow && b.executionMode === 'LIVE' && typeof p.liveUpdateSl === 'function') {
           const lastSyncSl = Number(b.lastExchangeSl) || 0;
           const slDeltaPct = lastSyncSl > 0 ? Math.abs(deepEval.trailedStopLoss - lastSyncSl) / lastSyncSl : 1;
           if (slDeltaPct >= 0.0005) {
@@ -1747,11 +1826,17 @@ export async function mtfAutoTick(p = {}) {
     // budget / quota gates (market-wise counters use the SAME day bucket)
     const deskDay = dayKeyFor(market === 'INDIA' ? 'INDIA' : 'CRYPTO');
     const dayCountForDesk = stDay.book.filter(b => b.market === market && b.dayKey === deskDay).length;
+    // The global counter must respect each desk's own session boundary:
+    // INDIA rolls at IST midnight, CRYPTO/FUTURES at UTC midnight. A single
+    // st.dayCount rolled only at IST midnight let crypto reset its desk bucket
+    // at UTC midnight while the global cap stayed stuck for another 5.5h (and
+    // vice versa). Count rows against their own market's current day instead.
+    const dayCountAllDesks = stDay.book.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;
     const openForDesk = _openLinked().filter(b => b.market === market).length;
     const isLiveExecActive = isLiveSession;
     const effectiveMaxOpenPositions = isLiveExecActive ? 1 : cfg.maxOpenPositions;
-    const effectiveMaxTradesPerDay = (isLiveExecActive && openForDesk === 0) ? Math.max(cfg.maxTradesPerDay, 15) : cfg.maxTradesPerDay;
-    if (stDay.dayCount >= effectiveMaxTradesPerDay) { out.skipped.push(`${market}: daily quota ${stDay.dayCount}/${cfg.maxTradesPerDay} done`); continue; }
+    const effectiveMaxTradesPerDay = cfg.maxTradesPerDay;
+    if (dayCountAllDesks >= effectiveMaxTradesPerDay) { out.skipped.push(`${market}: daily quota ${dayCountAllDesks}/${cfg.maxTradesPerDay} done`); continue; }
     if (dayCountForDesk >= effectiveMaxTradesPerDay) { out.skipped.push(`${market}: desk quota done`); continue; }
     if (openForDesk >= effectiveMaxOpenPositions || _openLinked().length >= effectiveMaxOpenPositions) { out.skipped.push(`${market}: max open positions (${openForDesk}/${effectiveMaxOpenPositions})`); continue; }
     if (_openNotionalINR() >= cfg.maxPositionsINR) { out.skipped.push(`${market}: notional budget full (₹${Math.round(_openNotionalINR())}/${cfg.maxPositionsINR})`); continue; }
@@ -1868,7 +1953,7 @@ export async function mtfAutoTick(p = {}) {
     let openedThisDesk = 0;
     for (const row of eligible) { // v21.22.0: strictly 1 trade at a time per session — never open 2 trades simultaneously!
       if (openedThisDesk >= 1 || out.opened.length >= 1) break;
-      if (stDay.dayCount >= effectiveMaxTradesPerDay) break;
+      if (dayCountAllDesks + openedThisDesk >= effectiveMaxTradesPerDay) break;
       if (_openLinked().length >= effectiveMaxOpenPositions) break;
       const sym = normalizeLinkSymbol(row.symbol, market);
       if (!sym || openSymbols.has(sym)) { out.skipped.push(`${sym}: already open`); continue; }
@@ -1970,7 +2055,10 @@ export async function mtfAutoTick(p = {}) {
       const isEliteOrStrong = row.tier === 'ELITE' || row.tier === 'STRONG' || row.tier === 'ACTION' || Number(row.superScore) >= (Number(cfg.minScore) || 75);
       // v21.23.8: EQUITY SIM (GLOBALFUTURES) rows KABHI live order nahi lagati
       // — CoinDCX par US equities listed nahi, SIM/paper-only desk hai.
-      const wantLiveOrder = !isSimRow && (cfg.executionMode === 'live' || Boolean(siteLiveForDesk(p, row.market) && cfg.autoSyncSiteLive !== false)) && isEliteOrStrong;
+      const wantLiveOrder = !isSimRow &&
+        Boolean(siteLiveForDesk(p, row.market)) &&
+        (cfg.executionMode === 'live' || cfg.autoSyncSiteLive !== false) &&
+        isEliteOrStrong;
 
       // In strict live-only mode, only ELITE/STRONG rows auto-place
       if (cfg.executionMode === 'live' && !isEliteOrStrong) {
@@ -2232,6 +2320,14 @@ export function mtfAutoStatus(liveQuotes = {}) {
   const deepMonitor = getActiveAutoTradesDeepMonitor(liveQuotes);
   return {
     ok: true,
+    // Persistence provenance — 'false' means config/state came from defaults
+    // (or the local disk), NOT from a durable restore.
+    bootedAt: _bootedAt,
+    restoredFromDurable: _restoredFromDurable,
+    restoredConfigFromDurable: _restoredConfigFromDurable,
+    restoredStateFromDurable: _restoredStateFromDurable,
+    configSavedAt: _cfgSavedAt,
+    stateSavedAt: st.updatedAt,
     enabled: cfg.enabled,
     mode: cfg.mode,
     holdMin: cfg.holdMin,
@@ -2302,7 +2398,7 @@ export function recordLiveMtfBoardTrade(item = {}) {
   const bookMarket = isSimBook ? 'GLOBALFUTURES' : isUsdBook ? 'CRYPTO' : 'INDIA';
   const execMarket = isSimBook ? 'GLOBALFUTURES' : isUsdBook ? 'FUTURES' : 'INDIA';
   const bookCcy = isSimBook ? 'USDC' : isUsdBook ? 'USDT' : 'INR';
-  const existing = st.book.find(b => b.status === 'OPEN' && b.symbol === sym);
+  const existing = st.book.find(b => b.status === 'OPEN' && b.symbol === sym && b.market === bookMarket);
   if (existing) {
     // v21.23.12 [RE-ANCHOR LIFECYCLE RESET]: existing OPEN row par re-anchor
     // sirf LEVELS (entry/SL/T1/T2/qty) update karta tha — side/peakPrice/
@@ -2460,6 +2556,13 @@ export function __resetMtfAutoForTests(seed = null) {
   _cfg = null;
   _state = null;
   _mtfAutoTickInFlight = false;
+  _bootedAt = Date.now();
+  _restoredFromDurable = false;
+  _restoredConfigFromDurable = false;
+  _restoredStateFromDurable = false;
+  _cfgSavedAt = null;
+  _bootPersistenceReady = true;
+  if (_bootPersistenceTimer) { clearTimeout(_bootPersistenceTimer); _bootPersistenceTimer = null; }
   _lastBoardRowSeenMap.clear(); // v21.23.10: board-rotation snapshot cache bhi module state hai
   __resetDirectionLocksForTests();
   try { fs.unlinkSync(CFG_FILE()); } catch { /* absent */ }

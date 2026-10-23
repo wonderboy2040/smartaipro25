@@ -74,7 +74,7 @@ describe('v20.3 R1 — replay TF votes use only COMPLETED buckets (no lookahead)
 
 // ---- R2: trackRecord flip cooldown ----
 import { recordSignals, getTrackRecord, __reloadTrackRecordForBoot, __resetFlipGuardForTests } from '../server/intraday/trackRecord.js';
-import { saveJSON } from '../server/lib/store.js';
+import { saveJSON, loadJSON } from '../server/lib/store.js';
 
 const sig = (symbol, direction, over = {}) => ({
   symbol, direction, market: 'INDIA', confidence: 75, ltp: 100,
@@ -95,17 +95,23 @@ describe('v20.3 R2 — cross-source direction disagreement no longer flip-churns
   it('board SHORT flips the row ONCE; the scanner re-publishing LONG 1 min later is SUPPRESSED (the churn)', () => {
     recordSignals([sig('SBIN', 'LONG')]);                     // scanner publishes LONG
     vi.setSystemTime(new Date('2026-08-31T05:01:00Z'));
-    const ev1 = recordSignals([sig('SBIN', 'SHORT')]);        // board: first genuine flip goes through
+    const ev1 = recordSignals([sig('SBIN', 'SHORT', { dirScore: 88, qualityScore: 70 })]); // board: first genuine flip goes through
     // (both the close AND the replacement-open journal as FLIP events)
     expect(ev1.filter(e => e.type === 'FLIP')).toHaveLength(2);
     vi.setSystemTime(new Date('2026-08-31T05:02:00Z'));
     // 1 min later the scanner publishes LONG again — the pre-v20.3 code
     // flip-closed + re-opened EVERY cycle (row churned all day)
-    const ev2 = recordSignals([sig('SBIN', 'LONG', { confidence: 55 })]);
+    const ev2 = recordSignals([sig('SBIN', 'LONG', { confidence: 55, dirScore: -12, qualityScore: 12 })]);
     const tr = getTrackRecord(1);
     expect(tr.totalTracked).toBe(2);              // LONG (closed FLIP) + SHORT (open) — no third row
     expect(tr.open[0].direction).toBe('SHORT');   // the board's plan survives the churn
-    expect(tr.open[0].confidence).toBe(55);       // live fields DID refresh
+    expect(tr.open[0].confidence).toBe(55);       // live field DID refresh (legacy contract)
+    // Opposite-direction dirScore/quality telemetry must NOT overwrite the row.
+    vi.advanceTimersByTime(1001); // flush the debounced track-record write
+    const persisted = loadJSON('tracked-signals.json', { signals: [] });
+    const openRec = persisted.signals.find(s => s.status === 'OPEN' && s.market === 'INDIA');
+    expect(openRec.dirScore).toBe(88);
+    expect(openRec.qualityScore).toBe(70);
     expect(ev2).toEqual([]);                      // churn suppressed — no FLIP/OPEN events
   });
 

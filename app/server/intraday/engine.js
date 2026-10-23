@@ -62,6 +62,53 @@ export const HIGH_CONV_RR_FLOOR = 1.5; // grade-A minimum R:R
 export const DEAD_ZONE_START = 14 * 60 + 30; // 14:30 IST
 export const DEAD_ZONE_END = 15 * 60;        // 15:00 IST
 
+// v21.23.15 DIRECTION ACCURACY — an edge-margin gate separates DIRECTION
+// (which side has the directional evidence) from CONVICTION (how much
+// quality/confirmation backs that side). Previously total score picked the
+// side, so volume/VWAP/ADX could outvote the actual tape direction. The gate
+// only suppresses marginal no-edge direction reads; quality scoring and all
+// existing confidence math are unchanged.
+//   off      → legacy behaviour (telemetry only)
+//   shadow   → telemetry only, no confidence cap (default — safe rollout)
+//   enforce  → sub-minimum margin capped below the routes pool floor (70)
+export const INTRADAY_MIN_MARGIN = 12;
+export const INTRADAY_MARGIN_GATE_DEFAULT = 'shadow';
+export const INTRADAY_STALE_GUARD_DEFAULT = 'shadow';
+export const INTRADAY_STALE_MAX_PCT = 1.2;
+// A no-edge read (direction TIE, sub-minimum margin, stale quote) must stay
+// below the routes entry floor (70). The same cap is re-applied after the AI
+// blend in routes.js — otherwise a strong AI verdict can lift a gated engine
+// row back over 70 and defeat the gate.
+export const INTRADAY_NO_EDGE_CAP = 69;
+
+function _gateMode(raw, dflt = 'shadow') {
+  const s = String(raw ?? '').trim().toLowerCase();
+  if (!s) return dflt;
+  if (s === 'off' || s === '0' || s === 'false' || s === 'disabled' || s === 'no') return 'off';
+  if (s === 'enforce' || s === 'on' || s === '1' || s === 'true' || s === 'yes') return 'enforce';
+  if (s === 'shadow' || s === 'warn' || s === 'telemetry') return 'shadow';
+  return dflt;
+}
+
+export function intradayDirectionGateConfig() {
+  // Blank env vars must mean "use the default", not Number('') === 0. A blank
+  // INTRADAY_MIN_MARGIN silently disabled the edge gate (0 always passes).
+  const rawMinStr = String(process.env.INTRADAY_MIN_MARGIN ?? '').trim();
+  const rawMin = rawMinStr === '' ? NaN : Number(rawMinStr);
+  const minMargin = Number.isFinite(rawMin) ? Math.max(0, Math.min(100, rawMin)) : INTRADAY_MIN_MARGIN;
+  const rawStaleStr = String(process.env.INTRADAY_STALE_MAX_PCT ?? '').trim();
+  const rawStalePct = rawStaleStr === '' ? NaN : Number(rawStaleStr);
+  const staleMaxPct = Number.isFinite(rawStalePct) && rawStalePct > 0
+    ? Math.max(0.05, Math.min(25, rawStalePct))
+    : INTRADAY_STALE_MAX_PCT;
+  return {
+    marginGate: _gateMode(process.env.INTRADAY_MARGIN_GATE, INTRADAY_MARGIN_GATE_DEFAULT),
+    minMargin,
+    staleGuard: _gateMode(process.env.INTRADAY_STALE_GUARD, INTRADAY_STALE_GUARD_DEFAULT),
+    staleMaxPct,
+  };
+}
+
 export function inDeadZone(m = istMinutes()) {
   return m >= DEAD_ZONE_START && m < DEAD_ZONE_END;
 }
@@ -398,6 +445,11 @@ async function fetchCryptoIntradayDataBatch(symbols, fetchCoinDcxTickers, fallba
     const px = (v) => (typeof v === 'number' && isFinite(v) && v > 0) ? +(v * scale) : null;
     tvData[sym] = {
       ...tv,
+      // The stale-LTP guard compares CoinDCX INR LTP against tv.last. Leaving
+      // the raw USD `last` on the object made every crypto row look hundreds
+      // of percent divergent (₹ vs $). Normalize it like every other absolute
+      // price field.
+      last: px(tv.last) || cd.price,
       close: px(tv.close) || cd.price,
       open: px(tv.open) || cd.price,
       high: px(tv.high) || cd.high,
@@ -485,6 +537,17 @@ export function analyzeIntradayFromScanner(symbol, tv, groww, opts = {}) {
   const dayRange = high > effectiveLow ? (ltp - effectiveLow) / (high - effectiveLow) : 0.5;
   const vwapDist = vwap > 0 ? ((ltp - vwap) / vwap) * 100 : 0;
 
+  // v21.23.15 STALE-LTP GUARD — Groww/CoinDCX can serve a delayed print while
+  // TradingView has moved on. We cannot know which side is stale, so this is
+  // deliberately opt-in and shadow-by-default: telemetry always records the
+  // divergence; enforce caps conviction below the entry pool floor.
+  const dirGateCfg = intradayDirectionGateConfig();
+  const tvRef = (Number(tv?.last) > 0) ? Number(tv.last) : (Number(tv?.close) > 0 ? Number(tv.close) : null);
+  const ltpTvDivPct = (tvRef != null && ltp > 0)
+    ? +(((ltp - tvRef) / tvRef) * 100).toFixed(3)
+    : null;
+  const staleDetected = ltpTvDivPct != null && Math.abs(ltpTvDivPct) > dirGateCfg.staleMaxPct;
+
   // ---- ORB-15 (Opening Range Breakout, 15-min) ----
   // While 09:15–09:45 IST is FORMING, the day's running high/low IS the
   // opening range. After that window we cannot reconstruct the exact range
@@ -500,81 +563,108 @@ export function analyzeIntradayFromScanner(symbol, tv, groww, opts = {}) {
   const orbLow = inOrbWindow ? effectiveLow : open - 0.55 * atr;
   const orbMode = inOrbWindow ? 'LIVE' : 'PROXY';
 
+  // v21.23.15 DIRECTION/CONVICTION SPLIT — the directional score is built
+  // ONLY from factors that actually point a side (trend stack, RSI, MACD,
+  // pivot/CPR, Supertrend, HTF SMA50, ORB, gap, low-ADX day-range). VWAP,
+  // POC, ADX strength and volume are confirmation/quality — they still add
+  // to the published confidence exactly as before, but they can no longer
+  // choose LONG vs SHORT. Direction therefore follows the tape, not a
+  // volume/VWAP tie-breaker.
   function scoreSide(dir) {
-    let s = 0; const reasons = [];
+    const isLong = dir === 'LONG';
+    let dirScore = 0;
+    let qualityScore = 0;
+    const reasons = [];
+
+    // ---- Directional evidence ----
     // EMA Stack — 20pts
-    if (dir === 'LONG' ? (ltp > ema10 && ema10 > ema20) : (ltp < ema10 && ema10 < ema20)) {
-      s += 20; reasons.push(`EMA10/20 ${dir === 'LONG' ? 'bullish' : 'bearish'} stack`);
-    } else if (dir === 'LONG' ? (ltp > ema10 || ema10 > ema20) : (ltp < ema10 || ema10 < ema20)) { s += 12; }
-    // VWAP Bias — 19pts
-    if (dir === 'LONG' ? vwapDist > 0.05 : vwapDist < -0.05) {
-      s += 19; reasons.push(dir === 'LONG' ? `Above VWAP +${vwapDist.toFixed(1)}%` : `Below VWAP ${vwapDist.toFixed(1)}%`);
-    } else if (Math.abs(vwapDist) <= 0.25) { s += 10; reasons.push('At VWAP control zone'); }
-    // ---- v4: Volume Profile POC premium — 7pts ----
-    // VWAP approximates the session's volume point-of-control; price
-    // hugging it = value-area acceptance (premium entries, both sides).
-    if (Math.abs(vwapDist) <= 0.25) {
-      s += 7; reasons.push('Volume-POC value-area acceptance');
-    }
-    // RSI Sweet Zone — 14pts (v4 TIGHTER: LONG 52-68, SHORT 32-48)
-    if (dir === 'LONG' ? (rsi >= 52 && rsi <= 68) : (rsi >= 32 && rsi <= 48)) {
-      s += 14; reasons.push(`RSI ${Math.round(rsi)} momentum`);
-    } else if (dir === 'LONG' ? (rsi >= 46 && rsi < 52) : (rsi > 48 && rsi <= 54)) { s += 8; }
+    if (isLong ? (ltp > ema10 && ema10 > ema20) : (ltp < ema10 && ema10 < ema20)) {
+      dirScore += 20; reasons.push(`EMA10/20 ${isLong ? 'bullish' : 'bearish'} stack`);
+    } else if (isLong ? (ltp > ema10 || ema10 > ema20) : (ltp < ema10 || ema10 < ema20)) { dirScore += 12; }
+    // RSI Sweet Zone — 14pts (LONG 52-68, SHORT 32-48). Partial momentum
+    // bands are NON-OVERLAPPING: >50..52 votes LONG only, 48..<50 votes
+    // SHORT only. RSI around 50 is genuinely neutral and scores neither side
+    // (the old 46-52/48-54 bands awarded both sides at once).
+    if (isLong ? (rsi >= 52 && rsi <= 68) : (rsi >= 32 && rsi <= 48)) {
+      dirScore += 14; reasons.push(`RSI ${Math.round(rsi)} momentum`);
+    } else if (isLong ? (rsi > 50 && rsi < 52) : (rsi >= 48 && rsi < 50)) { dirScore += 8; }
     // v4: exhaustion penalty DOUBLED — never chase blow-off moves
-    if (dir === 'LONG' && rsi > 78) s -= 12;
-    if (dir === 'SHORT' && rsi < 22) s -= 12;
-    // Relative Volume — 12pts (v4: 1.2x floor already hard-gated above)
-    if (relVolume >= 1.5) { s += 12; reasons.push(`Volume ${relVolume.toFixed(1)}x surge`); }
-    else if (relVolume >= 1.2) { s += 8; reasons.push(`Volume ${relVolume.toFixed(1)}x`); }
-    else if (relVolume >= 0.8) { s += 4; }
+    if (isLong && rsi > 78) dirScore -= 12;
+    if (!isLong && rsi < 22) dirScore -= 12;
     // MACD — 12pts
     if (macdVal != null && macdSig != null) {
-      if (dir === 'LONG' ? macdVal > macdSig : macdVal < macdSig) {
-        s += 12; reasons.push(`MACD ${dir === 'LONG' ? 'bullish' : 'bearish'} cross`);
-      } else if (dir === 'LONG' ? macdVal > 0 : macdVal < 0) { s += 6; }
+      if (isLong ? macdVal > macdSig : macdVal < macdSig) {
+        dirScore += 12; reasons.push(`MACD ${isLong ? 'bullish' : 'bearish'} cross`);
+      } else if (isLong ? macdVal > 0 : macdVal < 0) { dirScore += 6; }
     }
     // Pivot/CPR — 10pts
-    if (dir === 'LONG' ? ltp > pivotR1 : ltp < pivotS1) {
-      s += 10; reasons.push(dir === 'LONG' ? 'Above R1 breakout' : 'Below S1 breakdown');
-    } else if (dir === 'LONG' ? ltp > pivot : ltp < pivot) {
-      s += 6; reasons.push(dir === 'LONG' ? 'Above pivot' : 'Below pivot');
+    if (isLong ? ltp > pivotR1 : ltp < pivotS1) {
+      dirScore += 10; reasons.push(isLong ? 'Above R1 breakout' : 'Below S1 breakdown');
+    } else if (isLong ? ltp > pivot : ltp < pivot) {
+      dirScore += 6; reasons.push(isLong ? 'Above pivot' : 'Below pivot');
     }
-    // ADX Trend Strength — 10pts
-    if (adx > 22) { s += 8; reasons.push(`ADX ${Math.round(adx)} strong trend`); }
-    else if (adx > 16) { s += 4; }
-    if (dir === 'LONG' ? adxPlus > adxMinus : adxMinus > adxPlus) s += 2;
-    // ---- v4: Supertrend(7) alignment — 8pts ----
-    // No intraday candle history on the daily TV snapshot, so the 7-period
-    // Supertrend is approximated as an ATR-trail off EMA20 (honest proxy):
-    // LONG needs price above ema20 - 0.5*ATR (trail line below price);
-    // SHORT needs price below ema20 + 0.5*ATR.
-    const stTrail = dir === 'LONG' ? ema20 - 0.5 * atr : ema20 + 0.5 * atr;
-    if (dir === 'LONG' ? ltp > stTrail : ltp < stTrail) {
-      s += 8; reasons.push('Supertrend(7) aligned (ATR-trail proxy)');
+    // ---- Strict direction-aware Supertrend(7) ATR-trail proxy — 8pts ----
+    // The old test only compared price with ema20 ∓ 0.5*ATR, so a LONG
+    // printed above a RISING trail while the EMA stack was still bearish
+    // (and vice versa) earned full alignment. Strict: the short EMA must
+    // agree with the side AND price must sit on the correct side of it.
+    if (isLong ? (ltp > ema20 && ema10 > ema20) : (ltp < ema20 && ema10 < ema20)) {
+      dirScore += 8; reasons.push('Supertrend(7) aligned (ATR-trail proxy)');
     }
     // ---- v4: Multi-timeframe EMA confluence — 10pts ----
-    // SMA50 (higher timeframe) agreeing with the EMA10/20 intraday stack.
     if (sma50 != null) {
-      if (dir === 'LONG' ? (ltp > sma50 && ema20 > sma50) : (ltp < sma50 && ema20 < sma50)) {
-        s += 10; reasons.push('SMA50 multi-timeframe confluence');
+      if (isLong ? (ltp > sma50 && ema20 > sma50) : (ltp < sma50 && ema20 < sma50)) {
+        dirScore += 10; reasons.push('SMA50 multi-timeframe confluence');
       }
     }
     // ORB-15 — 8pts (breakout side bonus / wrong-side penalty)
-    if (dir === 'LONG' ? ltp > orbHigh + 0.05 * atr : ltp < orbLow - 0.05 * atr) {
-      s += 8; reasons.push(`ORB-15 ${dir === 'LONG' ? 'breakout' : 'breakdown'}${orbMode === 'PROXY' ? ' (proxy)' : ''}`);
-    } else if (dir === 'LONG' ? ltp < orbLow : ltp > orbHigh) { s -= 3; }
-    // Gap Analysis — 7pts (v4: exhaustion threshold 2.5%, was 3.5%)
-    if (dir === 'LONG' ? (gapPct > 0.2 && gapPct < 2.5) : (gapPct < -0.2 && gapPct > -2.5)) {
-      s += 7; reasons.push(`Gap ${gapPct > 0 ? '+' : ''}${gapPct.toFixed(1)}%`);
+    if (isLong ? ltp > orbHigh + 0.05 * atr : ltp < orbLow - 0.05 * atr) {
+      dirScore += 8; reasons.push(`ORB-15 ${isLong ? 'breakout' : 'breakdown'}${orbMode === 'PROXY' ? ' (proxy)' : ''}`);
+    } else if (isLong ? ltp < orbLow : ltp > orbHigh) { dirScore -= 3; }
+    // Gap Analysis — 7pts. CRYPTO 24/7 has no session gap: the prevClose
+    // anchor is a rolling 24h change, so a "gap" there is just momentum and
+    // was double-counting the MACD/EMA read. Disabled entirely for crypto.
+    if (!isCrypto) {
+      if (isLong ? (gapPct > 0.2 && gapPct < 2.5) : (gapPct < -0.2 && gapPct > -2.5)) {
+        dirScore += 7; reasons.push(`Gap ${gapPct > 0 ? '+' : ''}${gapPct.toFixed(1)}%`);
+      }
+      // v4: gap-exhaustion penalty HEAVY at ±2.5%+ (was -4 at ±3.5%)
+      if (isLong && gapPct > 2.5) dirScore -= 8;
+      if (!isLong && gapPct < -2.5) dirScore -= 8;
     }
-    // v4: gap-exhaustion penalty HEAVY at ±2.5%+ (was -4 at ±3.5%)
-    if (dir === 'LONG' && gapPct > 2.5) s -= 8;
-    if (dir === 'SHORT' && gapPct < -2.5) s -= 8;
-    // Day Range Position — 7pts
-    if (dir === 'LONG' ? dayRange < 0.45 : dayRange > 0.55) {
-      s += 7; reasons.push(dir === 'LONG' ? 'Near day low entry' : 'Near day high short');
-    } else if (dir === 'LONG' ? dayRange < 0.6 : dayRange > 0.4) { s += 4; }
-    return { score: Math.round(Math.max(0, Math.min(100, s))), reasons };
+    // Day Range Position — 7pts, ONLY in low-ADX mean-reversion regimes.
+    // In a real trend, "near day low" is weakness (and "near day high" is
+    // strength), so the old always-on mean-reversion vote fought the tape.
+    if (adx < 18) {
+      if (isLong ? dayRange < 0.45 : dayRange > 0.55) {
+        dirScore += 7; reasons.push(isLong ? 'Near day low entry' : 'Near day high short');
+      } else if (isLong ? dayRange < 0.6 : dayRange > 0.4) { dirScore += 4; }
+    }
+
+    // ---- Confirmation / quality evidence (never picks the side) ----
+    // VWAP Bias — 19pts
+    if (isLong ? vwapDist > 0.05 : vwapDist < -0.05) {
+      qualityScore += 19; reasons.push(isLong ? `Above VWAP +${vwapDist.toFixed(1)}%` : `Below VWAP ${vwapDist.toFixed(1)}%`);
+    } else if (Math.abs(vwapDist) <= 0.25) { qualityScore += 10; reasons.push('At VWAP control zone'); }
+    // Volume Profile POC premium — 7pts (VWAP ≈ session POC)
+    if (Math.abs(vwapDist) <= 0.25) {
+      qualityScore += 7; reasons.push('Volume-POC value-area acceptance');
+    }
+    // Relative Volume — 12pts (1.2x floor already hard-gated above)
+    if (relVolume >= 1.5) { qualityScore += 12; reasons.push(`Volume ${relVolume.toFixed(1)}x surge`); }
+    else if (relVolume >= 1.2) { qualityScore += 8; reasons.push(`Volume ${relVolume.toFixed(1)}x`); }
+    else if (relVolume >= 0.8) { qualityScore += 4; }
+    // ADX Trend Strength — 10pts (strength + DI agreement = confirmation)
+    if (adx > 22) { qualityScore += 8; reasons.push(`ADX ${Math.round(adx)} strong trend`); }
+    else if (adx > 16) { qualityScore += 4; }
+    if (isLong ? adxPlus > adxMinus : adxMinus > adxPlus) qualityScore += 2;
+
+    return {
+      dirScore,
+      qualityScore,
+      score: Math.round(Math.max(0, Math.min(100, dirScore + qualityScore))),
+      reasons,
+    };
   }
 
   const longR = scoreSide('LONG'), shortR = scoreSide('SHORT');
@@ -583,13 +673,20 @@ export function analyzeIntradayFromScanner(symbol, tv, groww, opts = {}) {
   // a coin-flip setup). A tie is a NO-EDGE read: keep the deterministic
   // LONG/SHORT shape downstream contracts expect, but demote below the
   // routes pool floor (70) so the tie can never become an entry.
-  const _tieScore = longR.score === shortR.score;
-  const direction = longR.score >= shortR.score ? 'LONG' : 'SHORT';
-  let quantConfidence = Math.max(longR.score, shortR.score);
-  const reasons = direction === 'LONG' ? longR.reasons : shortR.reasons;
+  const edgeMargin = Math.abs(longR.dirScore - shortR.dirScore);
+  const marginPass = edgeMargin >= dirGateCfg.minMargin;
+  const _tieScore = longR.dirScore === shortR.dirScore;
+  const direction = longR.dirScore >= shortR.dirScore ? 'LONG' : 'SHORT';
+  // Confidence belongs to the CHOSEN side: taking max(long, short) after the
+  // direction/quality split could publish the OPPOSITE side's total (e.g.
+  // LONG wins on direction but SHORT carries more quality points), inflating
+  // a weak-quality LONG with the other side's confirmation score.
+  const chosenScore = direction === 'LONG' ? longR : shortR;
+  let quantConfidence = chosenScore.score;
+  const reasons = chosenScore.reasons;
   if (_tieScore) {
-    quantConfidence = Math.min(quantConfidence, 69);
-    reasons.push('⚖️ TIE — dono sides barabar score, koi directional edge nahi');
+    quantConfidence = Math.min(quantConfidence, INTRADAY_NO_EDGE_CAP);
+    reasons.push('⚖️ TIE — dono sides barabar directional score, koi edge nahi');
   }
 
   // ---------- MARKET REGIME PENALTY (NIFTY/VIX gating) ----------
@@ -660,6 +757,27 @@ export function analyzeIntradayFromScanner(symbol, tv, groww, opts = {}) {
     }
     quantConfidence = Math.max(0, Math.min(100, quantConfidence));
   }
+
+  // ---------- v21.23.15 DIRECTION-EDGE GATE ----------
+  // Shadow (default) records the would-block telemetry without changing the
+  // published confidence. Enforce caps a marginal direction read below the
+  // routes entry floor (70) so it can never become a trade. A directional
+  // TIE was already capped by the B5 guard above.
+  let marginGateCapped = false;
+  if (!_tieScore && dirGateCfg.marginGate === 'enforce' && !marginPass) {
+    quantConfidence = Math.min(quantConfidence, INTRADAY_NO_EDGE_CAP);
+    marginGateCapped = true;
+    reasons.push(`🧭 DIRECTION EDGE ${edgeMargin} < ${dirGateCfg.minMargin} — ${direction} suppressed (no clear side)`);
+  }
+  // Stale LTP vs TV: enforce is opt-in; shadow never punishes an otherwise
+  // valid setup (delayed TV is common on the NSE feed, so we only report).
+  let staleGuardCapped = false;
+  if (staleDetected && dirGateCfg.staleGuard === 'enforce') {
+    quantConfidence = Math.min(quantConfidence, INTRADAY_NO_EDGE_CAP);
+    staleGuardCapped = true;
+    reasons.push(`🕒 STALE QUOTE — LTP vs TV ${ltpTvDivPct > 0 ? '+' : ''}${ltpTvDivPct}% divergence; entry suppressed`);
+  }
+  quantConfidence = Math.max(0, Math.min(100, quantConfidence));
 
   // ---------- PRO-DESK RISK ARCHITECTURE ----------
   const entry = ltp;
@@ -735,6 +853,27 @@ export function analyzeIntradayFromScanner(symbol, tv, groww, opts = {}) {
   return {
     symbol, ltp: +ltp.toFixed(2), changePct: +changePct.toFixed(2),
     direction, quantConfidence: phase === 'early' ? Math.min(quantConfidence, 88) : quantConfidence,
+    // v21.23.15 direction telemetry — persisted by trackRecord so the
+    // direction report can bucket real hit-rates by edge margin.
+    dirScore: Math.round(chosenScore.dirScore),
+    directionScore: Math.round(chosenScore.dirScore),
+    qualityScore: Math.round(chosenScore.qualityScore),
+    edgeMargin: Math.round(edgeMargin),
+    marginGate: {
+      mode: dirGateCfg.marginGate,
+      min: dirGateCfg.minMargin,
+      pass: marginPass,
+      wouldBlock: !marginPass,
+      capped: marginGateCapped,
+    },
+    staleGuard: {
+      mode: dirGateCfg.staleGuard,
+      maxPct: dirGateCfg.staleMaxPct,
+      detected: staleDetected,
+      ltpTvDivPct,
+      capped: staleGuardCapped,
+    },
+    directionalTie: _tieScore,
     market: isCrypto ? 'CRYPTO' : 'INDIA',
     exchange: isCrypto ? (tv?.exchange || 'BINANCE') : (tv?.exchange || 'NSE'),
     entry: +entry.toFixed(2), stopLoss,

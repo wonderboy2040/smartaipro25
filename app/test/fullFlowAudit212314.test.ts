@@ -115,7 +115,11 @@ describe('v21.23.14 full-flow audit pins', () => {
     expect(ai).toContain('siteLiveForDesk(p, row.market)');
     expect(ai).toContain("siteLiveForDesk(p, 'INDIA')");
     expect(routes).toContain('siteLiveByDesk');
-    expect(routes).toContain('india: Boolean(autoLinkLive || tcfg.indiaMode === \'live\')');
+    // v21.23.15 recheck: the old `autoLinkLive ||` in the India branch armed
+    // India whenever the global MTF executionMode was live. India must stay
+    // governed only by its separate typed-LIVE arming.
+    expect(routes).toContain("india: Boolean(desks.india && !killSwitch && tcfg.indiaMode === 'live')");
+    expect(routes).not.toContain("india: Boolean(autoLinkLive || tcfg.indiaMode === 'live')");
   });
 
   it('LIVE close P&L is marked estimated when exchange does not report it', () => {

@@ -99,6 +99,33 @@ const YF_TICKER_MINI = {
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const num = (v) => (Number.isFinite(v) ? v : null);
 
+/**
+ * Pure direction decision for the MTF vote — exported for regression tests.
+ * `score` is the pre-ADX vote; `activeDump`/`activePump` are the confirmed
+ * structure-aware reversal flags. In v2 a confirmed reversal keeps its
+ * direction even when a low ADX dilutes the amplitude below the 1.4
+ * threshold (strength still reflects the low conviction).
+ */
+export function __decideVoteDirection({ score = 0, adx = null, v2 = true, activeDump = false, activePump = false } = {}) {
+  const adxV = num(adx);
+  const trendAmp = adxV != null ? clamp(0.6 + adxV / 50, 0.6, 1.6) : 1.0;
+  const scaled = clamp(Number(score) * trendAmp, -4.5, 4.5);
+  const dirThreshold = v2 ? 1.4 : 0.9;
+  let dir = scaled >= dirThreshold ? 1 : scaled <= -dirThreshold ? -1 : 0;
+  if (v2 && activeDump) dir = -1;
+  else if (v2 && activePump) dir = 1;
+  return { dir, scaled, trendAmp };
+}
+
+// v21.23.15 MTF VOTE V2 flag — default ON (direction-accuracy fixes are the
+// shipped behaviour); set MTF_VOTE_V2=0 to restore the legacy vote instantly.
+export function mtfVoteV2Enabled() { return _mtfVoteV2Enabled(); }
+function _mtfVoteV2Enabled() {
+  const raw = String(process.env.MTF_VOTE_V2 ?? '').trim().toLowerCase();
+  if (!raw) return true;
+  return !['0', 'false', 'off', 'no', 'disabled', 'legacy'].includes(raw);
+}
+
 // ------------------------------------------------------------
 // Candle sources
 // ------------------------------------------------------------
@@ -297,13 +324,27 @@ function _tfVote(candles, tf) {
   if (ema50 != null) score += close > ema50 ? 0.5 : close < ema50 ? -0.5 : 0;
   const rsiV = num(li.rsi);
   if (rsiV != null) score += rsiV > 55 ? 0.8 : rsiV < 45 ? -0.8 : 0;
+  const v2 = _mtfVoteV2Enabled();
   const mac = li.macd && typeof li.macd === 'object' ? li.macd : null;
   const macSlope = mac && num(mac.histSlope) != null ? num(mac.histSlope) : 0;
   if (mac && num(mac.macd) != null && num(mac.signal) != null) {
+    // Equal MACD/signal is genuinely neutral in v2 — the old `macd > signal ?
+    // bull : bear` branch voted BEAR on a flat tape (0 > 0 === false).
+    // MTF_VOTE_V2=0 is documented as an exact legacy escape hatch, so keep the
+    // old flat-tape behaviour there instead of silently changing legacy too.
     const macBull = mac.macd > mac.signal;
-    const slopeAligned = (macBull && macSlope >= 0) || (!macBull && macSlope <= 0);
-    const macW = slopeAligned ? 1.0 : 0.35;
-    score += macBull ? macW : -macW;
+    const macBear = mac.macd < mac.signal;
+    if (v2) {
+      if (macBull || macBear) {
+        const slopeAligned = (macBull && macSlope >= 0) || (macBear && macSlope <= 0);
+        const macW = slopeAligned ? 1.0 : 0.35;
+        score += macBull ? macW : -macW;
+      }
+    } else {
+      const slopeAligned = (macBull && macSlope >= 0) || (macBear && macSlope <= 0);
+      const macW = slopeAligned ? 1.0 : 0.35;
+      score += macBull ? macW : -macW; // legacy: equality fell to the bear branch
+    }
   }
   const sup = li.supertrend && typeof li.supertrend === 'object' ? li.supertrend : null;
   if (sup && Number.isFinite(sup.direction)) score += sup.direction * 0.7;
@@ -313,32 +354,96 @@ function _tfVote(candles, tf) {
   const roc3 = n >= 4 && Number(candles[n - 4]?.close) > 0
     ? ((close - Number(candles[n - 4].close)) / Number(candles[n - 4].close)) * 100
     : 0;
-  if (roc3 > 0.08) score += 0.7;
-  else if (roc3 < -0.08) score -= 0.7;
-  // v21.19.0 LIVE REVERSAL GUARD: if price has broken both EMA10 & EMA20 with
-  // active 3-bar momentum and decelerating/opposing MACD, override lagging
-  // Supertrend/EMA50 so an active dump never votes +1 (and an active pump never votes -1).
-  const activeDump = ema10 != null && ema20 != null && close < ema10 && close < ema20 && roc3 < -0.08 && ((mac && num(mac.hist) < 0) || macSlope < 0);
-  const activePump = ema10 != null && ema20 != null && close > ema10 && close > ema20 && roc3 > 0.08 && ((mac && num(mac.hist) > 0) || macSlope > 0);
-  if (activeDump && score > -1.2) score = -1.6;
-  if (activePump && score < 1.2) score = 1.6;
+
+  // ---- v21.23.15 MTF VOTE V2 -------------------------------------------
+  // Direction accuracy fixes (behind MTF_VOTE_V2, default ON):
+  //  1. 3-bar momentum is ATR-NORMALIZED (mom3Atr = price move / ATR), so a
+  //     "big" 0.08% move on a quiet 1m chart no longer counts the same as an
+  //     equally-sized move on a volatile 1d chart.
+  //  2. 2-bar CONTEXT HYSTERESIS: a single-bar spike that disagrees with the
+  //     prior bar gets no momentum vote (chop guard), instead of flipping the
+  //     whole timeframe.
+  //  3. Reversal guard is STRUCTURE-AWARE: it needs a swing break, aligned
+  //     2-bar context and material ATR momentum — not just two EMA crosses.
+  //  4. Direction threshold 1.4 (was 0.9) and strength capped at 60 when the
+  //     vote fights the EMA20/50 + Supertrend structure.
+  const atrV = num(li.atr);
+  const mom3Base = n >= 4 ? Number(candles[n - 4]?.close) : NaN;
+  const mom3Atr = (v2 && atrV > 0 && Number.isFinite(mom3Base)) ? (close - mom3Base) / atrV : null;
+  const prevClose = n >= 2 ? Number(candles[n - 2]?.close) : null;
+  const prev2Close = n >= 3 ? Number(candles[n - 3]?.close) : null;
+  const context2 = (v2 && prevClose > 0 && prev2Close > 0)
+    ? (close > prevClose && prevClose > prev2Close ? 1 : close < prevClose && prevClose < prev2Close ? -1 : 0)
+    : 0;
+  if (v2 && mom3Atr != null) {
+    const momW = clamp(mom3Atr * 0.55, -1.3, 1.3);
+    if (context2 === 0) score += momW * 0.5;                  // ambiguous tape → half vote
+    else if ((momW > 0) === (context2 > 0)) score += momW;    // 2-bar + 3-bar agree
+    // conflicting context → single-bar spike: no momentum vote
+  } else if (!v2) {
+    if (roc3 > 0.08) score += 0.7;
+    else if (roc3 < -0.08) score -= 0.7;
+  }
+
+  // Structure reference used by both the reversal guard and the cap.
+  const recent = v2 ? candles.slice(-13, -1) : [];
+  const swingLow = recent.length ? Math.min(...recent.map(c => Number(c.low)).filter(Number.isFinite)) : null;
+  const swingHigh = recent.length ? Math.max(...recent.map(c => Number(c.high)).filter(Number.isFinite)) : null;
+  const brokeLow = swingLow != null && Number.isFinite(swingLow) && close < swingLow;
+  const brokeHigh = swingHigh != null && Number.isFinite(swingHigh) && close > swingHigh;
+  const macOpposesDump = (mac && num(mac.hist) < 0) || macSlope < 0;
+  const macSupportsPump = (mac && num(mac.hist) > 0) || macSlope > 0;
+
+  // v21.19.0 LIVE REVERSAL GUARD (v2: structure-aware) — an active dump must
+  // never vote +1 just because lagging EMA50/Supertrend still point up.
+  const activeDump = v2
+    ? (ema10 != null && ema20 != null && close < ema10 && close < ema20
+        && brokeLow && context2 < 0 && mom3Atr != null && mom3Atr <= -0.35 && macOpposesDump)
+    : (ema10 != null && ema20 != null && close < ema10 && close < ema20 && roc3 < -0.08 && macOpposesDump);
+  const activePump = v2
+    ? (ema10 != null && ema20 != null && close > ema10 && close > ema20
+        && brokeHigh && context2 > 0 && mom3Atr != null && mom3Atr >= 0.35 && macSupportsPump)
+    : (ema10 != null && ema20 != null && close > ema10 && close > ema20 && roc3 > 0.08 && macSupportsPump);
+  if (activeDump && score > -1.4) score = -1.8;
+  if (activePump && score < 1.4) score = 1.8;
+
   const adxObj = li.adx && typeof li.adx === 'object' ? num(li.adx.adx) : null;
   const adxV = adxObj != null ? adxObj : num(li.adx);
-  const trendAmp = adxV != null ? clamp(0.6 + adxV / 50, 0.6, 1.6) : 1.0; // strong trend scales the vote
-  const scaled = clamp(score * trendAmp, -4.5, 4.5);
-  const dir = scaled >= 0.9 ? 1 : scaled <= -0.9 ? -1 : 0;
-  const strength = Math.round(clamp(Math.abs(scaled) / 4.5, 0, 1) * 100);
+  const { dir, scaled } = __decideVoteDirection({ score, adx: adxV, v2, activeDump, activePump });
+
+  // Structure: EMA20/50 stack primary, Supertrend fallback. A vote against
+  // structure is allowed (reversals trade) but its strength is capped at 60
+  // so the board/weighting never treats it as a full-conviction trend read.
+  const supDir = sup && Number.isFinite(sup.direction) ? Math.sign(sup.direction) : 0;
+  const structureDir = (ema20 != null && ema50 != null)
+    ? (ema20 > ema50 ? 1 : ema20 < ema50 ? -1 : 0)
+    : supDir;
+  const structureConflict = v2 && dir !== 0 && structureDir !== 0 && dir !== structureDir;
+  const rawStrength = Math.round(clamp(Math.abs(scaled) / 4.5, 0, 1) * 100);
+  const strength = structureConflict ? Math.min(rawStrength, 60) : rawStrength;
   const noteBits = [];
   if (ema20 != null && ema50 != null) noteBits.push(close >= ema20 && ema20 > ema50 ? 'EMA bull' : close <= ema20 && ema20 < ema50 ? 'EMA bear' : close >= ema20 ? 'EMA reclaim' : 'EMA break');
   if (rsiV != null) noteBits.push(`RSI ${Math.round(rsiV)}`);
   if (adxV != null) noteBits.push(`ADX ${Math.round(adxV)}`);
   if (mac && num(mac.hist) != null) noteBits.push(mac.hist > 0 ? 'MACD+' : 'MACD-');
+  if (v2 && structureConflict) noteBits.push('counter-structure');
   return {
     tf, dir, strength, conf: Math.max(20, strength),
     rsi: rsiV != null ? Math.round(rsiV * 10) / 10 : null,
     adx: adxV != null ? Math.round(adxV * 10) / 10 : null,
     ltp: close,
     note: noteBits.join(' · '),
+    // v21.23.15 telemetry (additive; legacy consumers ignore it)
+    voteEngine: v2 ? 'v2' : 'legacy',
+    mom3Atr: mom3Atr != null ? Math.round(mom3Atr * 100) / 100 : null,
+    context2: v2 ? context2 : null,
+    structureDir: v2 ? structureDir : null,
+    structureConflict,
+    rawStrength,
+    // Additive telemetry: pre-ADX score + confirmed reversal side. Tests use
+    // them to prove the force path and the legacy escape hatch.
+    score: Math.round(score * 100) / 100,
+    reversal: activeDump ? 'dump' : activePump ? 'pump' : null,
   };
 }
 

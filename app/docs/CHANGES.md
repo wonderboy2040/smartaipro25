@@ -3391,3 +3391,98 @@ Do parallel read-only audits (SAPTA/agent/order-flow + MTF board/manual/auto-flo
 - Targeted agent/MTF/SAPTA/reconciler/UI/direction-lock suites: **215 passed**; version/site/launcher pins: **123 passed**.
 - `tsc 0`, `lint 0`, `check:version OK (21.23.14)`, `check:routes PASS`, `dist 21.23.14`.
 - Full suite excluding 5 known environment-dependent files: **222 files / 4230 tests PASS**. Unfiltered run's 6 failures (`v69-core` network timeout, `cryptoAgent`/`llmValidator`/`council` key/mock timing, `signalRecheck` ordering) reproduced independently of this change set (no regression in affected suites).
+
+## v21.23.15 — DIRECTION ACCURACY + AUTO-TRADE READINESS FIX
+
+**User ask: Intraday (NSE) aur Crypto (CoinDCX) me LONG/SHORT direction ki accuracy badhao; Auto Trade live button ke bawajood trade na lagne ki readiness/execution problem fix karo.**
+
+Direction ka root cause: intraday confidence VWAP/POC/volume/ADX ko directional vote ki tarah count karti thi, isliye quality points kabhi tape ke against side pick kar sakte the. MTF vote me 3-bar momentum absolute % tha (har timeframe par same threshold), flat MACD tie BEAR vote karta tha, aur single-bar spike poora timeframe flip kar sakta tha. Auto-trade side: MTF auto config/state sirf ephemeral disk par thi (Render spin-down = auto silently OFF), UI `deskReady` ko ignore karke green badge dikha sakti thi, aur client-side fallback readiness ko overstate karta tha.
+
+### 1) Intraday — DIRECTION vs CONVICTION split (server/intraday/engine.js)
+- **Directional score** ab sirf side-pointing evidence se banta hai: EMA stack, RSI, MACD, pivot/CPR, strict Supertrend proxy, HTF SMA50, ORB, gap (India only), low-ADX day-range.
+- **Quality score** (VWAP, POC, volume, ADX strength/DI agreement) published confidence me pehle jaisa add hota hai, magar side **choose nahi** karta.
+- Confidence ab **chosen side** ka `dirScore + qualityScore` hai — pehle `max(long, short)` opposite side ke quality points se weak side ko inflate kar sakta tha.
+- RSI partial bands non-overlapping (`>50..52` LONG only, `48..<50` SHORT only); 50 ke aas-paas genuinely neutral. Crypto gap vote disabled (24/7 rolling 24h change momentum tha, double-count). Supertrend proxy ab EMA10/20 agreement demand karta hai. Day-range mean-reversion vote sirf `ADX < 18` regime me.
+- Direction TIE ab bhi 69 par capped — koi entry nahi.
+
+### 2) Intraday — edge-margin + stale-quote gates (feature-flagged, shadow default)
+- `INTRADAY_MARGIN_GATE=off|shadow|enforce` (default **shadow**), `INTRADAY_MIN_MARGIN=12`.
+  - `shadow`: telemetry only (`wouldBlock`, `edgeMargin`), confidence unchanged.
+  - `enforce`: sub-minimum margin `conf ≤ 69` (routes pool floor 70 se neeche) + honest reason.
+- `INTRADAY_STALE_GUARD=off|shadow|enforce` (default **shadow**), `INTRADAY_STALE_MAX_PCT=1.2`: LTP vs TV divergence detect hota hai; enforce me stale entry suppressed.
+- Payload telemetry additive: `dirScore`, `directionScore`, `qualityScore`, `edgeMargin`, `marginGate`, `staleGuard`, `directionalTie`.
+
+### 3) MTF vote v2 (server/ai/mtf.js, `MTF_VOTE_V2` default ON)
+- 3-bar momentum ab **ATR-normalized** (`mom3Atr`) — quiet aur volatile timeframe par same absolute % vote nahi.
+- **2-bar context hysteresis**: single-bar spike jo prior bar se disagree kare, momentum vote nahi deta; ambiguous tape par half vote.
+- Reversal guard **structure-aware**: swing break + aligned 2-bar context + material ATR move + MACD agreement.
+- Direction threshold `1.4` (legacy `0.9`); structure (EMA20/50, Supertrend fallback) ke against vote ki strength `60` par capped.
+- Flat tape MACD equality ab neutral (pehle `0 > 0 === false` → BEAR).
+- Telemetry: `voteEngine`, `mom3Atr`, `context2`, `structureDir`, `structureConflict`, `rawStrength`. `MTF_VOTE_V2=0` se legacy vote instant restore.
+
+### 4) Direction report + persistence (trackRecord.js, routes.js)
+- Naya `GET /api/ai/direction-report?days=&tab=` — full tracked state se LONG/SHORT hit-rate, avg confidence, edge-margin buckets, margin/stale gate counts; MFE/MAE honestly `null` (tracked nahi).
+- `_openRow` ab direction telemetry persist karta hai; live refresh bhi update karta hai. Days clamp + null handling fixed.
+
+### 5) AUTO TRADE readiness honesty (MTFDualBoardPanel.tsx, useAITrading.ts, routes.js)
+- Green LIVE badge ab sirf `deskReady === true` par; warna exact amber blocker reason (desk-scoped).
+- Client-side `topStrongVerified` fallback removed — server readiness authoritative.
+- “Why no trade” blockers: top near-miss blocker frequency + honest status line.
+- Idle poll 10s; `deskReady` per desk (`india` / `crypto`).
+
+### 6) AUTO config/state durable restore (mtfAutoLink.js, durable.js)
+- Config (enabled / desks / live mode / risk) aur state (day counters / book / events) ab `durablePut` encrypted mirror par; `updatedAt` newest-wins restore ke liye.
+- `durableBootRestoreAll()` dono files restore karta hai + `__reloadMtfAutoForBoot()` module caches drop karke hydrated files reload karta hai.
+- Status ab honest provenance: `bootedAt`, `restoredFromDurable`, `configSavedAt`, `stateSavedAt`.
+- POST config response authoritative; `/status` best-effort overlay.
+
+### Tests / gate
+- Naye: `test/directionReport.test.ts`, `test/mtfVoteV2.test.ts`; extended `mtfAutoLink`, `durable`, `siteRecheck212313`, `mtf6`/engine suites.
+- `tsc 0`, `lint 0`, `check:version OK (21.23.15)`, `check:routes PASS`, `dist 21.23.15`.
+- Rollout safe: margin/stale gates shadow default; `MTF_VOTE_V2=0` emergency legacy vote; `INTRADAY_MARGIN_GATE=enforce` / `INTRADAY_STALE_GUARD=enforce` explicit opt-in.
+
+## v21.23.16 — POST-SHIP FULL-SITE RECHECK (2026-10-24)
+
+**User ask: v21.23.15 ke baad poori site ka deep recheck — jo issues confirm hon unhe fix karo, contracts/tests preserve rahen, dist rebuild + version bump.**
+
+Recheck me auto-trade readiness, India live lifecycle, boot persistence, quota day-boundaries, suppressed-flip telemetry, MTF vote compatibility aur UI arm state ke real defects mile. Sab additive / feature-flagged / shadow-safe fixes hain; India LIVE arming shortcut bypass nahi kiya gaya.
+
+### 1) Auto-trade readiness desk-scoped (mtfAutoLink.js, routes.js, useAITrading.ts, MTFDualBoardPanel.tsx)
+- `mtfAutoReadiness()` ab `deskReady` + `deskArmable` per desk deta hai: crypto = CoinDCX creds + crypto site-live + kill switch off; India = `indiaMode === 'live'` + India desk on. Pehle ek desk ka live status doosre desk ko arm kar sakta tha.
+- UI green LIVE badge sirf `deskReady === true` par; stale `/status` response par green off (`autoFresh`). LIVE arm click se pehle `deskArmable` pre-flight — bina creds / bina India typed-LIVE button disabled amber reason ke saath.
+- `/config` / `/status` / `/toggle` config hydration + `autoSyncSiteLive:false` UI-LIVE compatibility retained: explicit `executionMode==='live'` live orders allow karta hai, sirf site flag par depend nahi.
+- `onAutoLiveExecute` CoinDCX creds pre-flight ab sirf crypto desk par; India LIVE Dhan desk CoinDCX keys ke bina bhi valid typed-LIVE arming par arm hota hai (pehle India button galti se CoinDCX creds maangta tha).
+- Header/rows ab actual desk label dikhate hain (`LIVE DHAN` India rows, `LIVE COINDCX` crypto rows), hardcoded COINDCX nahi.
+
+### 2) Boot persistence + India live lifecycle (server/index.js, mcp/durable.js, mtfAutoLink.js, routes.js, futures.js)
+- Durable restore se pehle MTF config/state ka default write suppress (`__beginMtfAutoBoot` / `__reloadMtfAutoForBoot`): Render restart par restored book/config ko pre-restore cache overwrite nahi karta. 15s failsafe timer + unconditional boot reload.
+- India deep-monitor close ab `closeIndiaPosition(positionId)` route karta hai (pehle crypto `liveClose` path India position ko miss karta tha). Manual India live record me journal `positionId` store hota hai.
+- CoinDCX SL update journal lock ke andar (concurrent deep-monitor / reconciler write race close).
+- India LIVE arming still separate: `tcfg.indiaMode === 'live'` mandatory; MTF `executionMode` se India arm nahi hota.
+
+### 3) Intraday direction accuracy + honest no-edge cap (engine.js, routes.js, trackRecord.js)
+- `INTRADAY_NO_EDGE_CAP = 69`: TIE / sub-minimum edge margin / stale quote entry floor (70) cross nahi kar sakte. AI blend ke BAAD bhi re-cap hota hai, aur `edgeSuppressed` rows choppy-market fallback pool me wapas nahi aate.
+- Blank env values (`INTRADAY_MIN_MARGIN`, `INTRADAY_STALE_MAX_PCT`) ab documented defaults par fallback — `Number('') === 0` se gate silently off nahi hota.
+- Crypto TV `last` INR-domain normalization before direction scoring; opposite-domain price se fake LONG/SHORT bias nahi.
+- `trackRecord` telemetry: whitespace-safe number parsing, null-preserving merge, `avgConfidence`, tab-scoped report counters, honest `mfe` / `mae:null`. Suppressed opposite-direction flip ab sirf live confidence + last price refresh karta hai; `dirScore` / `qualityScore` / `edgeMargin` / direction telemetry frozen rehte hain (mixed-side report corruption fix).
+
+### 4) MTF vote v2 + reversal guard (mtf.js)
+- Default ON: threshold `1.4`, ATR-normalized 3-bar momentum, aligned 2-bar context, 2-bar hysteresis, structure-conflict strength cap 60.
+- Structure-aware active pump/dump forced reversal direction; legacy flat-MACD equality neutral. `MTF_VOTE_V2=0/false/off` se instant legacy vote.
+- Telemetry: `voteEngine`, `mom3Atr`, `context2`, `structureDir`, `structureConflict`, `rawStrength`, `score`, `reversal`.
+
+### 5) Daily quota / day-boundary honesty (mtfAutoLink.js, routes.js)
+- Daily quota ab har book row ko uske apne market ke current day ke against count karta hai: INDIA IST midnight, CRYPTO/FUTURES UTC midnight. Single IST `dayCount` se crypto UTC reset 5.5h block/short ho raha tha.
+- `maxTradesPerDay -> 15` inflation hataya (normal + UC flip-reverse quota dono).
+- `POST /api/ai/mtf-auto/config` with `executionMode:'paper'` ab `autoSyncSiteLive:false` default karta hai (explicit override still honoured) — paper-test se real CoinDCX/India order ka API footgun band. UI paper button pehle se false set karta tha.
+
+### Known scoped follow-ups (deliberate, documented)
+- UI arm ek global `executionMode` likhta hai; cross-desk arm ab readiness se block hota hai but per-desk independent arm config future feature hai.
+- LIVE + flat mode me per-symbol cooldown bypass intentional hai ("LIVE Auto click always fires"); post-success profit cooldown + 1-session-1-trade lock still enforced.
+- `siteLiveForDesk()` legacy global `siteLiveActive` fallback retained for old callers/tests; routes always pass per-desk maps.
+
+### Tests / gate
+- New `test/recheck212315.test.ts` (boot guard, desk scope, India lifecycle, quota boundary, paper autoSync, no-edge cap). Extended `v203DeepAudit` suppressed-flip telemetry lock, `directionReport`, `mtfVoteV2`, `fullFlowAudit212314`, `siteRecheck212313`, `launcherAutoBuild`.
+- Targeted recheck/UI/MTF batches PASS: 18 files / 413 tests (initial recheck batch), final UI/recheck batch 144, version/direction batch 138, `ucFlipReverse21238 + v2122NinePointSuperUpgrade` 43.
+- `tsc 0`, `lint 0`, `check:version OK (21.23.16)`, `check:routes PASS`, `dist 21.23.16`.
+- Full suite: 226 files / 4346 tests PASS; remaining 5 failures across 4 files (`v69-core` network timeout, `cryptoAgent` x2 5s timeout, `council`/`llmValidator` key/mock calls) are environment-dependent and reproduce independently of this change set.

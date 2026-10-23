@@ -1113,7 +1113,7 @@ export function dualAutoCandidates(rows, cfg = {}, ctx = {}) {
   for (const row of rows || []) {
     const reasons = [];
     if (!row?.ok) reasons.push('plan unavailable');
-    if (!(row?.superScore >= minScore)) reasons.push(`score ${row?.superScore ?? '�?"'} < ${minScore}`);
+    if (!(row?.superScore >= minScore)) reasons.push(`score ${row?.superScore ?? '—'} < ${minScore}`);
     if (row?.ensembleSignalAvailable === false) reasons.push('main AI-BOARD ensemble signal unavailable');
     if (row?.autoBlockers?.length) reasons.push(...row.autoBlockers);
     if (openSymbols.has(String(row?.symbol || '').toUpperCase())) reasons.push('already open');

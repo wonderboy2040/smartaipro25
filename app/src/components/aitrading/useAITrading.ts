@@ -1103,7 +1103,25 @@ export interface MtfAutoStatus {
   autoSyncSiteLive?: boolean;
   siteLiveActive?: boolean;
   siteLiveByDesk?: { crypto: boolean; india: boolean };
+  /** A3: server-computed per-desk live readiness + the exact blocking reason. */
+  deskReady?: {
+    crypto?: { ready: boolean; why: string | null };
+    india?: { ready: boolean; why: string | null };
+  };
+  /** UI arm prerequisite (creds/desk enabled/India typed-LIVE) — distinct from ready. */
+  deskArmable?: {
+    crypto?: { armable: boolean; why: string | null };
+    india?: { armable: boolean; why: string | null };
+  };
+  killSwitch?: boolean;
   coindcxConnected?: boolean;
+  /** Phase-3 persistence provenance (status endpoint). */
+  bootedAt?: number;
+  restoredFromDurable?: boolean;
+  restoredConfigFromDurable?: boolean;
+  restoredStateFromDurable?: boolean;
+  configSavedAt?: number | null;
+  stateSavedAt?: number | null;
   walletAmountINR?: number;
   walletDeployPct?: number;
   wallet95Deployment?: {
@@ -1131,6 +1149,7 @@ export interface MtfAutoStatus {
     trades: Array<{
       symbol: string | null;
       market: string;
+      execMarket?: string;
       ccy: string;
       side: string;
       entry: number;
@@ -1193,7 +1212,12 @@ export async function updateMtfAutoConfigApi(patch: Record<string, unknown>): Pr
       body: JSON.stringify(patch), signal: AbortSignal.timeout(15000),
     });
     const j = await r.json().catch(() => null);
-    return j?.config ? await fetchMtfAutoStatus() : null;
+    if (!r.ok || !j?.ok) return null;
+    // A1 FIX: config save is authoritative — POST response is the source of truth.
+    // Status fetch is best-effort overlay; a slow/failed /status must NOT cause
+    // "config save NAHI hua" when the config was already saved server-side.
+    const status = await fetchMtfAutoStatus().catch(() => null);
+    return status ?? ({ ok: true, config: j.config, coindcxConnected: j.coindcxConnected } as unknown as MtfAutoStatus);
   } catch { return null; }
 }
 

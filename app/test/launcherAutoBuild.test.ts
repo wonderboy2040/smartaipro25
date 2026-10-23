@@ -415,12 +415,13 @@ describe('v20.8.3 frontend stale-build visibility', () => {
     const m = VERSION_TS.match(/APP_VERSION = '([^']+)'/);
     expect(m).toBeTruthy();
     expect(m![1]).toBe(PKG.version);
-    expect(PKG.version).toBe('21.23.14'); // v21.23.14 bump (AUTO-TRADE LIVE cure — neutral-tape freshTapeAbsent hole, engine boardSigs parity, paper-quota poisoning, honest arm/creds pre-flight/idle-reason transparency; CRYPTO PAPER DESK routing — desk-scoped journal+summary+history, CoinDcxTab Paper Desk panel, SL-trail hint domain; DIRECTION HARDENING — side-strict spot/margin/browser/restore, openPaperTrade side-honest, Yahoo local sorts, cdc-official cert chain)
+    expect(PKG.version).toBe('21.23.16'); // v21.23.16 bump (post-ship recheck: readiness desk scope, UTC/IST quota, suppressed-flip telemetry, boot persistence guard; v21.23.15 AUTO-TRADE LIVE cure retained)
   });
 
-  it('Watchdog bat: v21.23.14 stamps + auto-build line + NO stale version stamps', () => {
+  it('Watchdog bat: v21.23.16 stamps + auto-build line + NO stale version stamps', () => {
     const bat = readFileSync(path.join(APP_ROOT, 'Start-SmartAI-Watchdog.bat'), 'utf8');
-    expect(bat).toContain('v21.23.14');
+    expect(bat).toContain('v21.23.16');
+    expect(bat).not.toContain('v21.23.14');
     // v21.23.12 [D3]: title/REM lines me STALE stamps chhupe the (banner hi
     // bumped hota tha) — console window title purana version dikhata tha.
     expect(bat).not.toContain('v21.23.12');

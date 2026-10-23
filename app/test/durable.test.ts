@@ -17,6 +17,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // that shipped inside the v20.2 zip). Ride the shared temp dir the test
 // setup assigns (SMARTAI_DATA_DIR) so the module and the test agree.
 const DATA = process.env.SMARTAI_DATA_DIR || path.join(__dirname, '..', 'server', 'data');
+// durableBootRestoreAll now hydrates MTF auto config/state too; point the
+// module at the SAME hermetic dir so its post-restore reload sees them.
+process.env.MTF_AUTO_DATA_DIR = DATA;
 
 // ---- mock the GitHub backup layer BEFORE durable.js loads ----
 const pushMock = vi.fn();
@@ -46,6 +49,8 @@ const AGST_PATH = path.join(DATA, 'ai-agent-state.json');
 const INDST_PATH = path.join(DATA, 'india-agent-state.json');
 const TRACKED_PATH = path.join(DATA, 'tracked-signals.json');
 const TJOURNAL_PATH = path.join(DATA, 'trade-journal.json');
+const MTF_CFG_PATH = path.join(DATA, 'mtf-auto-config.json');
+const MTF_STATE_PATH = path.join(DATA, 'mtf-auto-state.json');
 
 function setDurableEnv() {
   process.env.GITHUB_BACKUP_TOKEN = 'ghp_testtoken';
@@ -57,7 +62,8 @@ beforeEach(() => {
   __resetDurableForTests();
   setDurableEnv();
   for (const p of [CREDS_PATH, INDM_PATH, SNAP_PATH, SYM_PATH, BASIS_PATH, SETTINGS_PATH,
-    JOURNAL_PATH, TCFG_PATH, AGST_PATH, INDST_PATH, TRACKED_PATH, TJOURNAL_PATH]) {
+    JOURNAL_PATH, TCFG_PATH, AGST_PATH, INDST_PATH, TRACKED_PATH, TJOURNAL_PATH,
+    MTF_CFG_PATH, MTF_STATE_PATH]) {
     try { fs.rmSync(p, { force: true }); } catch { /* ignore */ }
   }
 });
@@ -333,5 +339,35 @@ describe('v10.3.1 trading-state boot restore (positions survive restarts)', () =
     const files = restoreMock.mock.calls.map((c) => c[0]);
     expect(files.indexOf('ai-trading-journal.json')).toBeLessThan(files.indexOf('mcp-indmoney.json'));
     expect(files.indexOf('ai-trading-journal.json')).toBe(0);
+  });
+
+  it('v21.23.15: restores MTF auto config + state and reloads the boot caches', async () => {
+    restoreMock.mockImplementation(async (file) => {
+      if (file === 'mtf-auto-config.json') {
+        return encryptJSON({ enabled: true, minScore: 80, executionMode: 'live', updatedAt: 6000 });
+      }
+      if (file === 'mtf-auto-state.json') {
+        return encryptJSON({
+          day: '2026-10-23', dayCount: 2,
+          book: [{ symbol: 'BTC', market: 'CRYPTO', side: 'LONG', status: 'OPEN', openedAt: 6000 }],
+          events: [], updatedAt: 6000,
+        });
+      }
+      return null;
+    });
+
+    const restored = await durableBootRestoreAll();
+    expect(restored).toMatchObject({ mtfAutoConfig: true, mtfAutoState: true });
+    expect(JSON.parse(fs.readFileSync(MTF_CFG_PATH, 'utf8')).minScore).toBe(80);
+    expect(JSON.parse(fs.readFileSync(MTF_STATE_PATH, 'utf8')).dayCount).toBe(2);
+
+    // Post-restore hook re-reads the hydrated files (module-eval capture drop).
+    const mod = await import('../server/ai/mtfAutoLink.js');
+    const status = mod.mtfAutoStatus();
+    expect(status.enabled).toBe(true);
+    expect(status.minScore).toBe(80);
+    expect(status.executionMode).toBe('live');
+    expect(status.dayCount).toBe(2);
+    expect(status.restoredFromDurable).toBe(true);
   });
 });

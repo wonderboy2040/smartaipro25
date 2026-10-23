@@ -3333,6 +3333,13 @@ app.use((err, _req, res, _next) => {
 // from the local (empty) disk exactly as before in that case.
 // ------------------------------------------------------------
 try {
+  // Block MTF config/state persistence until the restore attempt finishes.
+  // A slow/dead durable backend must not let a boot-time writer stamp a
+  // newer default empty state over the backup.
+  try {
+    const mtfBoot = await import('./ai/mtfAutoLink.js');
+    mtfBoot.__beginMtfAutoBoot?.();
+  } catch { /* best-effort */ }
   await Promise.race([
     durableBootRestoreAll(),
     new Promise(resolve => { const t = setTimeout(resolve, 8000); if (typeof t.unref === 'function') t.unref(); }),

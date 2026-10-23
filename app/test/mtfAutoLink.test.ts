@@ -20,11 +20,15 @@ import path from 'node:path';
 // v21.16.0: suite kabhi REAL server/data/ na chhue — apna tmp dir.
 const TMP_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'mtf-auto-test-'));
 process.env.MTF_AUTO_DATA_DIR = TMP_DATA;
+import { durablePut } from '../server/mcp/durable.js';
 import {
   mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig,
   setMtfAutoEnabled, normalizeLinkSymbol, recordPaperMtfBoardTrade,
-  __resetMtfAutoForTests, MTF_AUTO_DEFAULTS,
+  __resetMtfAutoForTests, __reloadMtfAutoForBoot, MTF_AUTO_DEFAULTS,
 } from '../server/ai/mtfAutoLink.js';
+
+// Phase-3 persistence is asserted without any GitHub/network calls.
+vi.mock('../server/mcp/durable.js', () => ({ durablePut: vi.fn() }));
 
 /** Injected paper engine fake — records every call. */
 function fakePaper(over = {}) {
@@ -255,5 +259,65 @@ describe('mtfAutoLink — time-stop', () => {
     expect(setMtfAutoEnabled(true).enabled).toBe(true);
     expect(mtfAutoStatus().enabled).toBe(true);
     expect(setMtfAutoEnabled(false).enabled).toBe(false);
+  });
+});
+
+describe('mtfAutoLink — durable persistence + boot reload', () => {
+  beforeEach(() => {
+    __resetMtfAutoForTests();
+    vi.mocked(durablePut).mockClear();
+  });
+
+  it('mirrors config + state to durable under their boot-restore basenames', () => {
+    updateMtfAutoConfig({ enabled: true, minScore: 80 });
+    const cfgCall = vi.mocked(durablePut).mock.calls.find(([f]) => f === 'mtf-auto-config.json');
+    expect(cfgCall).toBeTruthy();
+    expect((cfgCall![1] as { enabled?: boolean }).enabled).toBe(true);
+    expect(typeof (cfgCall![1] as { updatedAt?: number }).updatedAt).toBe('number');
+
+    recordPaperMtfBoardTrade({
+      symbol: 'BTC', market: 'CRYPTO', side: 'LONG',
+      entry: 100, stopLoss: 98, t1: 103, t2: 106, qty: 1,
+    });
+    const stateCall = vi.mocked(durablePut).mock.calls.find(([f]) => f === 'mtf-auto-state.json');
+    expect(stateCall).toBeTruthy();
+    expect(typeof (stateCall![1] as { updatedAt?: number }).updatedAt).toBe('number');
+
+    const st = mtfAutoStatus();
+    expect(st.bootedAt).toBeGreaterThan(0);
+    expect(st.configSavedAt).toBeGreaterThan(0);
+    expect(st.stateSavedAt).toBeGreaterThan(0);
+  });
+
+  it('reload hook rehydrates config + book after module-eval capture', () => {
+    updateMtfAutoConfig({ enabled: true, minScore: 82, executionMode: 'live' });
+    recordPaperMtfBoardTrade({
+      symbol: 'ETH', market: 'CRYPTO', side: 'SHORT',
+      entry: 200, stopLoss: 205, t1: 190, t2: 180, qty: 1,
+    });
+    const before = mtfAutoStatus();
+    expect(before.book.length).toBe(1);
+
+    const out = __reloadMtfAutoForBoot({ restored: true });
+    expect(out.restoredFromDurable).toBe(true);
+    const after = mtfAutoStatus();
+    expect(after.enabled).toBe(true);
+    expect(after.minScore).toBe(82);
+    expect(after.executionMode).toBe('live');
+    expect(after.book.length).toBe(1);
+    expect(after.restoredFromDurable).toBe(true);
+    expect(after.bootedAt).toBeGreaterThanOrEqual(before.bootedAt);
+  });
+
+  it('missing disk files reload as honest defaults (not silent stale state)', () => {
+    updateMtfAutoConfig({ enabled: true, minScore: 88 });
+    try { fs.unlinkSync(path.join(TMP_DATA, 'mtf-auto-config.json')); } catch { /* absent */ }
+    try { fs.unlinkSync(path.join(TMP_DATA, 'mtf-auto-state.json')); } catch { /* absent */ }
+    const out = __reloadMtfAutoForBoot({ restored: false });
+    expect(out.restoredFromDurable).toBe(false);
+    const st = mtfAutoStatus();
+    expect(st.enabled).toBe(false);
+    expect(st.minScore).toBe(MTF_AUTO_DEFAULTS.minScore);
+    expect(st.restoredFromDurable).toBe(false);
   });
 });

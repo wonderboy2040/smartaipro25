@@ -36,6 +36,7 @@ import { getSignals, getDeepSignal, getFreshSignalForExec, getFreshFuturesSignal
 // symbol happened to be a paper position (setScanSymbols existed but was
 // only ever called by /api/intraday-scanner, which no frontend polls).
 import { setScanSymbols as intradaySetScanSymbols, getLatestQuotes } from '../intraday/stream.js';
+import { getDirectionReport } from '../intraday/trackRecord.js';
 import { openPaperTrade as openPaperTradeExec, closePaperTrade as closePaperTradeExec, voidPaperTrade as voidPaperTradeExec, getPaperSummary as getPaperSummaryExec, updatePaperTradeStopLoss, updatePaperTradeT1ClosePct, evaluatePaper } from '../intraday/paperTrading.js';
 // v20.2 ACCOUNTABILITY: the board's ACTIONABLE signals (STRONG + ACTION
 // with a plan) feed the signal Track Record — the panel's "har published
@@ -427,6 +428,22 @@ export function registerAITradingRoutes(app, deps) {
       res.status(r.pass ? 200 : 503).json(r);
     } catch (e) {
       jsonError(res, 500, 'direction live certificate failed', e);
+    }
+  });
+
+  // ---------------- v21.23.15: DIRECTION ACCURACY REPORT ----------------
+  // Full tracked-signals aggregation (not the UI's 40-row history): hit-rate
+  // by desk, side, confidence bucket and directional edge margin. Board rows
+  // without engine scores are tolerated and reported as `missingDirScore`.
+  app.get('/api/ai/direction-report', (req, res) => {
+    try {
+      // One clamp lives in getDirectionReport. Parsing here with parseInt()
+      // made the route disagree with the aggregation for floats/blank values.
+      const tab = String(req.query.tab || req.query.market || 'ALL').trim().toUpperCase();
+      res.set('Cache-Control', 'no-store');
+      res.json(getDirectionReport(req.query.days, tab));
+    } catch (e) {
+      jsonError(res, 500, 'direction report failed', e);
     }
   });
 
@@ -1224,6 +1241,10 @@ export function registerAITradingRoutes(app, deps) {
       const iFilled = outIndia.filled || {};
       recordLiveMtfBoardTrade({
         orderId: outIndia.orderId ?? null,
+        // v21.23.15 recheck: without the India journal position id the
+        // deep-monitor close path cannot find the Dhan position (it used to
+        // fall through to the CoinDCX close handler).
+        positionId: outIndia.position?.id ?? outIndia.positionId ?? outIndia.orderId ?? null,
         symbol: baseSym,
         market: 'INDIA',
         side,
@@ -1253,18 +1274,59 @@ export function registerAITradingRoutes(app, deps) {
   // register hota hai — same tick function chalata hai.
   // v21.20.0: Direct CoinDCX Futures Live Order execution via executeMtfDualLiveOrder
   // using .env COINDCX_API_KEY + COINDCX_SECRET + wallet-tier leverage (10x / 5x).
-  const mtfAutoLiveCtx = async (cfg) => {
+  /**
+   * Single source of truth for MTF live readiness. `siteLiveByDesk` is the
+   * exchange/legacy-desk live state; `deskReady` says the desk can actually
+   * execute right now; `deskArmable` says the prerequisites for the UI's LIVE
+   * button are met (India still needs its typed-LIVE arming).
+   */
+  const mtfAutoReadiness = (cfg) => {
     const tcfg = (() => { try { return loadConfig() || {}; } catch { return {}; } })();
-    const hasEnvOrSavedCreds = Boolean(loadCredsForOrder());
+    const hasCreds = Boolean(loadCredsForOrder());
+    const killSwitch = tcfg.killSwitch === true;
+    const desks = {
+      crypto: cfg?.desks?.crypto !== false,
+      india: cfg?.desks?.india !== false,
+    };
+    const siteLiveByDesk = {
+      crypto: Boolean(desks.crypto && !killSwitch && tcfg.mode === 'live' && (tcfg.allowAuto || hasCreds)),
+      // India live is NEVER inferred from the crypto/site mode or the MTF
+      // executionMode. It requires the separate typed-LIVE India arming.
+      india: Boolean(desks.india && !killSwitch && tcfg.indiaMode === 'live'),
+    };
+    const siteLiveActive = siteLiveByDesk.crypto || siteLiveByDesk.india;
+    const cryptoWhy = !desks.crypto ? 'Crypto desk is OFF in Auto Trade config'
+      : killSwitch ? 'Global kill switch is ON — trading disabled'
+      : !hasCreds ? 'CoinDCX API keys not connected — add COINDCX_API_KEY + COINDCX_SECRET in .env or connect in Portfolio tab'
+      : tcfg.mode !== 'live' ? 'Crypto site live is not armed — arm crypto LIVE (or click LIVE here)'
+      : null;
+    const indiaWhy = !desks.india ? 'India desk is OFF in Auto Trade config'
+      : killSwitch ? 'Global kill switch is ON — trading disabled'
+      : tcfg.indiaMode !== 'live' ? 'India LIVE mode is not armed — type LIVE in the India console first (separate from crypto)'
+      : null;
+    return {
+      tcfg,
+      hasCreds,
+      killSwitch,
+      desks,
+      siteLiveByDesk,
+      siteLiveActive,
+      deskReady: {
+        crypto: { ready: hasCreds && siteLiveByDesk.crypto, why: cryptoWhy },
+        india: { ready: siteLiveByDesk.india, why: indiaWhy },
+      },
+      deskArmable: {
+        crypto: { armable: !killSwitch && desks.crypto && hasCreds, why: cryptoWhy },
+        india: { armable: !killSwitch && desks.india && tcfg.indiaMode === 'live', why: indiaWhy },
+      },
+    };
+  };
+
+  const mtfAutoLiveCtx = async (cfg) => {
+    const { tcfg, hasCreds: hasEnvOrSavedCreds, siteLiveByDesk, siteLiveActive, killSwitch, desks } = mtfAutoReadiness(cfg);
     // v21.23.14 [DESK SCOPE]: crypto and India live are independent sessions.
     // Keep the boolean for old consumers, but the engine must receive the
     // per-desk map - India-live must never arm CRYPTO live auto (or reverse).
-    const autoLinkLive = cfg?.executionMode === 'live';
-    const siteLiveByDesk = {
-      crypto: Boolean(autoLinkLive || (tcfg.mode === 'live' && (tcfg.allowAuto || hasEnvOrSavedCreds))),
-      india: Boolean(autoLinkLive || tcfg.indiaMode === 'live'),
-    };
-    const siteLiveActive = siteLiveByDesk.crypto || siteLiveByDesk.india;
     let walletEquityINR = Number(cfg?.walletAmountINR) || 10000;
     try {
       const w = await Promise.race([
@@ -1275,9 +1337,10 @@ export function registerAITradingRoutes(app, deps) {
       const futDeployableINR = Math.round((Number(w?.deployableFuturesUSDT) || 0) * fx + (Number(w?.deployableFuturesINR) || 0));
       if (futDeployableINR > 0) walletEquityINR = futDeployableINR;
       else if (Number(w?.equityINR) > 0) walletEquityINR = Number(w.equityINR);
-      if (walletEquityINR > 0 && Math.abs(walletEquityINR - Number(cfg?.walletAmountINR || 0)) >= 1) {
-        try { updateMtfAutoConfig({ walletAmountINR: walletEquityINR }); } catch { /* non-fatal */ }
-      }
+      // NOTE: do NOT write the wallet snapshot back into MTF config here. This
+      // context is built on every tick/status poll; the write used to run
+      // before durable boot restore and could stamp a newer default config
+      // over the restored one. Sizing already gets walletEquityINR directly.
     } catch { /* fallback to cfg.walletAmountINR */ }
     const syncLivePositions = async () => {
       try {
@@ -1344,6 +1407,12 @@ export function registerAITradingRoutes(app, deps) {
       return { ok: false, error: 'unsupported live market' };
     };
     const liveUpdateSl = async (trade) => {
+      // India SL is protective at the broker; modifying it through the
+      // CoinDCX handler would send a malformed request at the wrong exchange.
+      const mkt = String(trade?.execMarket || trade?.market || '').toUpperCase();
+      if (mkt === 'INDIA') {
+        return { ok: false, skipped: true, reason: 'India SL is broker-managed — software monitor closes via the India desk' };
+      }
       return updateCoinDcxPositionSl({
         positionId: trade?.livePositionId,
         symbol: trade?.symbol,
@@ -1353,6 +1422,14 @@ export function registerAITradingRoutes(app, deps) {
       }).catch(() => null);
     };
     const liveClose = async (trade) => {
+      // Route the close to the desk that owns the position. The old
+      // unconditional CoinDCX close sent India rows to the wrong exchange.
+      const mkt = String(trade?.execMarket || trade?.market || '').toUpperCase();
+      if (mkt === 'INDIA') {
+        const id = trade?.livePositionId || trade?.liveOrderId || trade?.positionId;
+        if (!id) return { ok: false, error: 'India live position id missing' };
+        return closeIndiaPosition(String(id), { reason: 'MTF auto deep-monitor close' }).catch(() => null);
+      }
       return closeCoinDcxActivePosition({
         positionId: trade?.livePositionId,
         symbol: trade?.symbol,
@@ -1363,6 +1440,8 @@ export function registerAITradingRoutes(app, deps) {
       siteLiveActive,
       siteLiveByDesk,
       walletEquityINR,
+      killSwitch,
+      desks,
       syncLivePositions,
       liveExecute,
       liveUpdateSl,
@@ -1371,15 +1450,28 @@ export function registerAITradingRoutes(app, deps) {
     };
   };
 
+  // A2 FIX: throttle exchange sync in /status — single-flighted + 10s TTL.
+  // Background tick (lines 3296/3483) already syncs; /status polls (2-5s) don't
+  // need fresh sync every time. Prevents CoinDCX rate-limit/timeouts that cascade
+  // into A1 (config save "failed" because /status timed out).
+  let _statusSyncAt = 0, _statusSyncP = null;
+  async function syncLiveThrottled(liveCtx, ttlMs = 10_000) {
+    if (_statusSyncP) return _statusSyncP;
+    if (Date.now() - _statusSyncAt < ttlMs) return;
+    _statusSyncP = liveCtx.syncLivePositions()
+      .catch(() => {})
+      .finally(() => { _statusSyncAt = Date.now(); _statusSyncP = null; });
+    return _statusSyncP;
+  }
+
   app.get('/api/ai/mtf-auto/status', async (_req, res) => {
     try {
-      const tcfg = (() => { try { return loadConfig() || {}; } catch { return {}; } })();
       const cfg = loadMtfAutoConfig();
       const hasCreds = Boolean(loadCredsForOrder());
       if (hasCreds) {
         try {
           const liveCtx = await mtfAutoLiveCtx(cfg);
-          await liveCtx.syncLivePositions();
+          await syncLiveThrottled(liveCtx);  // A2: throttled instead of direct
         } catch { /* non-fatal */ }
       }
       const combinedQuotes = { ...(getLatestQuotes().data || {}) };
@@ -1399,14 +1491,18 @@ export function registerAITradingRoutes(app, deps) {
         }
       } catch { /* non-fatal */ }
       const st = mtfAutoStatus(combinedQuotes);
-      const autoLinkLive = st?.config?.executionMode === 'live' || st?.executionMode === 'live';
-      const siteLiveByDesk = {
-        crypto: Boolean(autoLinkLive || (tcfg.mode === 'live' && (tcfg.allowAuto || hasCreds))),
-        india: Boolean(autoLinkLive || tcfg.indiaMode === 'live'),
-      };
-      const siteLiveActive = siteLiveByDesk.crypto || siteLiveByDesk.india;
+      const routeCfg = loadMtfAutoConfig();
+      const ready = mtfAutoReadiness(routeCfg);
       res.set('Cache-Control', 'no-store');
-      res.json({ ...st, siteLiveActive, siteLiveByDesk, coindcxConnected: hasCreds });
+      res.json({
+        ...st,
+        siteLiveActive: ready.siteLiveActive,
+        siteLiveByDesk: ready.siteLiveByDesk,
+        deskReady: ready.deskReady,
+        deskArmable: ready.deskArmable,
+        killSwitch: ready.killSwitch,
+        coindcxConnected: ready.hasCreds,
+      });
     } catch (e) {
       jsonError(res, 500, 'mtf auto status failed', e);
     }
@@ -1414,7 +1510,15 @@ export function registerAITradingRoutes(app, deps) {
 
   app.post('/api/ai/mtf-auto/config', (req, res) => {
     try {
-      const body = req.body || {};
+      const body = { ...(req.body || {}) };
+      // Switching MTF auto to paper must not inherit the legacy site-live
+      // auto-sync flag. Before this, POST {executionMode:'paper'} with the
+      // default autoSyncSiteLive:true still executed REAL orders on a live
+      // site (the UI paper button already forces false). An explicit
+      // autoSyncSiteLive in the same request is still honoured.
+      if (body.executionMode === 'paper' && body.autoSyncSiteLive === undefined) {
+        body.autoSyncSiteLive = false;
+      }
       const cfg = updateMtfAutoConfig(body);
       // v21.20.0 + v21.22.0: When user activates LIVE mode on the MTF Dual Board,
       // sync live mode but keep legacy spot allowAuto=false so only the MTF single-trade engine executes
@@ -1426,7 +1530,17 @@ export function registerAITradingRoutes(app, deps) {
           }
         } catch { /* best-effort */ }
       }
-      res.json({ ok: true, config: cfg, coindcxConnected: Boolean(loadCredsForOrder()) });
+      const ready = mtfAutoReadiness(cfg);
+      res.json({
+        ok: true,
+        config: cfg,
+        coindcxConnected: ready.hasCreds,
+        siteLiveActive: ready.siteLiveActive,
+        siteLiveByDesk: ready.siteLiveByDesk,
+        deskReady: ready.deskReady,
+        deskArmable: ready.deskArmable,
+        killSwitch: ready.killSwitch,
+      });
     } catch (e) {
       jsonError(res, 400, 'mtf auto config failed', e);
     }
@@ -1436,7 +1550,16 @@ export function registerAITradingRoutes(app, deps) {
     try {
       const enabled = Boolean((req.body || {}).enabled);
       setMtfAutoEnabled(enabled);
-      res.json({ ...mtfAutoStatus(), coindcxConnected: Boolean(loadCredsForOrder()) });
+      const ready = mtfAutoReadiness(loadMtfAutoConfig());
+      res.json({
+        ...mtfAutoStatus(),
+        coindcxConnected: ready.hasCreds,
+        siteLiveActive: ready.siteLiveActive,
+        siteLiveByDesk: ready.siteLiveByDesk,
+        deskReady: ready.deskReady,
+        deskArmable: ready.deskArmable,
+        killSwitch: ready.killSwitch,
+      });
     } catch (e) {
       jsonError(res, 400, 'mtf auto toggle failed', e);
     }
@@ -1453,7 +1576,7 @@ export function registerAITradingRoutes(app, deps) {
         const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
         if (!on) continue;
         if (market === 'INDIA' && !isNseOpen()) continue;
-        const base = await getSignals(market, { ...deps, warmOnly: true }).catch(() => null);
+        const base = await getSignals(market === 'CRYPTO' ? 'FUTURES' : market, deps, { warmOnly: true }).catch(() => null);
         boards[market] = await getDualMtfBoard({
           market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore,
           boardSigs: base?.signals || [], fx: await mtfLiveFx(),
@@ -3325,6 +3448,7 @@ export function registerAITradingRoutes(app, deps) {
         buildDualRow,
         paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
         quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
+        killSwitch: (() => { try { return !!loadConfig()?.killSwitch; } catch { return false; } })(),
         fx: fxLive,
         usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
         siteLiveActive: liveCtx.siteLiveActive,
@@ -3510,6 +3634,7 @@ export function registerAITradingRoutes(app, deps) {
           // shift pe paper trade ka TP1 partial % refresh karta hai (volTrail).
           paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
           quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
+          killSwitch: (() => { try { return !!loadConfig()?.killSwitch; } catch { return false; } })(),
           fx: fxLive,
           usdtQuotes: cfg.desks.crypto ? await mtfUsdtQuoteMap() : null,
           siteLiveActive: liveCtx.siteLiveActive,

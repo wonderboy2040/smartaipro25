@@ -951,10 +951,13 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       path.join(process.cwd(), 'src/components/aitrading/MTFDualBoardPanel.tsx'),
       'utf8',
     );
-    // MTFDualBoardPanel must set maxOpenPositions: 1 and slice fallback candidates to .slice(0, 1)
+    // MTFDualBoardPanel must set maxOpenPositions: 1. v21.23.15 A5: the
+    // UI-side fallback pool (topStrongVerified + direct live call) was
+    // removed — only the auto engine may place orders, so its gates
+    // (cooldown / day quota / desk scope / fresh quote) can never be bypassed.
     expect(mtfPanelSrc).toMatch(/maxOpenPositions:\s*1/);
-    expect(mtfPanelSrc).toMatch(/\.slice\(0,\s*1\)/);
-    expect(mtfPanelSrc).toMatch(/x\.tier === 'STRONG' \|\| x\.tier === 'ELITE'/);
+    expect(mtfPanelSrc).not.toContain('topStrongVerified');
+    expect(mtfPanelSrc).toContain('client-side fallback entry disabled');
 
     const origFetch = global.fetch;
     const origKey = process.env.COINDCX_KEY;

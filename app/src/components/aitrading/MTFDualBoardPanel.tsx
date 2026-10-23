@@ -91,6 +91,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   const [board, setBoard] = useState<MtfDualBoardView | null>(null);
   const [boardBusy, setBoardBusy] = useState(false);
   const [auto, setAuto] = useState<MtfAutoStatus | null>(null);
+  const [autoFresh, setAutoFresh] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showLog, setShowLog] = useState(false);
@@ -100,6 +101,8 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const reqRef = useRef(0);
   const boardInflightRef = useRef(false);
+  const hydratedRef = useRef(false);
+  const userTouchedRef = useRef(false);
 
   // debounced fetch inputs (typing/slider storm se bachne ke liye)
   const [debounced, setDebounced] = useState({ mode, holdMin, minScore, limit: 6 });
@@ -124,7 +127,25 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
 
   const loadAuto = useCallback(async () => {
     const a = await fetchMtfAutoStatus();
-    if (a) setAuto(a);
+    if (a) {
+      setAuto(a);
+      setAutoFresh(true);
+      // Hydrate the editor from the server ONCE. Before this the panel always
+      // showed INTRADAY/45/75 even when the saved config was SWING/30/80 —
+      // pressing LIVE would then silently overwrite the saved values.
+      if (!hydratedRef.current) {
+        hydratedRef.current = true;
+        if (!userTouchedRef.current) {
+          if (a.mode && MODES.some(x => x.id === a.mode)) setMode(a.mode);
+          if (Number(a.holdMin) > 0) setHoldMin(Number(a.holdMin));
+          if (Number(a.minScore) >= 65 && Number(a.minScore) <= 95) setMinScore(Number(a.minScore));
+        }
+      }
+    } else {
+      // A failed poll must turn the green LIVE badge off; keeping the last
+      // successful status painted a healthy LIVE while the server was gone.
+      setAutoFresh(false);
+    }
     return a;
   }, []);
 
@@ -133,7 +154,9 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     void loadAuto();
     // v21.23.13 ULTRA-FAST REALTIME SL TRAIL & DIRECTION FOLLOW-THROUGH POLL:
     // Poll every 2 seconds when any trade is active so SL trailing & direction verification update in real time!
-    const cadenceMs = (auto?.openCount ?? 0) > 0 || (auto?.deepMonitor?.activeCount ?? 0) > 0 ? 2_000 : 5_000;
+    // A7: idle poll 10s (was 5s) — status math (deep monitor + quotes) is
+    // heavy and nothing changes between auto ticks; active trades stay 2s.
+    const cadenceMs = (auto?.openCount ?? 0) > 0 || (auto?.deepMonitor?.activeCount ?? 0) > 0 ? 2_000 : 10_000;
     const t = window.setInterval(() => { if (!document.hidden) void loadAuto(); }, cadenceMs);
     return () => window.clearInterval(t);
   }, [loadAuto, auto?.openCount, auto?.deepMonitor?.activeCount]);
@@ -150,6 +173,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
 
   const pickMode = useCallback((m: TradePlanModeId) => {
     const h = MODES.find(x => x.id === m)?.hold ?? 45;
+    userTouchedRef.current = true;
     setMode(m);
     setHoldMin(h);
     void updateMtfAutoConfigApi({ mode: m, holdMin: h });
@@ -205,11 +229,57 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   // escalating backoff (5m→4h) khata rehta, user ko kabhi reason nahi
   // dikhta tha. Ab DONO branches canLive demand karti hain — button green
   // = LIVE truly armed AND executable (creds + site live dono confirm).
-  const isLiveAuto = Boolean(armed && canLive && (auto?.executionMode === 'live' || auto?.autoSyncSiteLive !== false));
+  // A3 [DESK-READY HONESTY]: green LIVE badge sirf tab jab server is DESK ke
+  // liye ready:true bole (creds + live arming + executionMode). Pehle
+  // executionMode='live' alone green kar deta tha jabki India arming alag
+  // hoti hai — button ON par order reject hota rehta tha, reason invisible.
+  const deskKey: 'india' | 'crypto' = market === 'INDIA' ? 'india' : 'crypto';
+  const deskReadiness = auto?.deskReady?.[deskKey] || null;
+  const deskArmable = auto?.deskArmable?.[deskKey] || null;
+  const canArmLive = canLive && (!auto?.deskArmable || deskArmable?.armable === true);
+  const isLiveAuto = Boolean(
+    armed && canLive && autoFresh && auto?.executionMode === 'live' && deskReadiness?.ready === true,
+  );
+  const liveBlockWhy = (armed && !isLiveAuto)
+    ? (!auto
+        ? 'Auto status loading — readiness unknown'
+        : !autoFresh
+          ? 'Auto status stale — server se last status nahi aaya'
+          : !canLive
+            ? 'LIVE execution is not enabled for this desk/tab'
+            : auto.executionMode !== 'live'
+              ? 'Auto mode is PAPER — switch to LIVE to place real orders'
+              : deskReadiness && !deskReadiness.ready
+                ? (deskReadiness.why || 'Desk not ready (server)')
+                : 'Server desk readiness unknown — waiting for status')
+    : null;
+  const armBlockWhy = !isLiveAuto && deskArmable?.armable === false
+    ? (deskArmable.why || 'LIVE prerequisites are not met')
+    : null;
   const activeTradedRows = useMemo(
     () => (auto?.deepMonitor?.trades || []).filter(t => t.traded !== false),
     [auto?.deepMonitor?.trades],
   );
+  const liveDeskLabel = market === 'INDIA' ? 'DHAN' : 'COINDCX';
+
+  // A7 [WHY NO TRADE]: aggregate the most frequent auto-pick blockers across
+  // rows that cleared the score bar — the UI now shows WHY the engine is
+  // idle instead of leaving the user to inspect each expanded card.
+  const topNearMissBlockers = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const r of [...rows, ...metalsRows, ...equitySimRows]) {
+      if (Number(r.superScore) < minScore || !Array.isArray(r.autoBlockers)) continue;
+      for (const b of r.autoBlockers) {
+        if (!b) continue;
+        counts.set(b, (counts.get(b) || 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([text, n]) => `${text} ×${n}`)
+      .join(' · ');
+  }, [rows, metalsRows, equitySimRows, minScore]);
 
   /** 🧪 PAPER TEST ORDER — opens a Paper Trade directly for this MTF Dual Board card and registers it in the Deep Monitor so the user can test and verify whether price genuinely follows the LONG/SHORT signal direction + 3s Auto SL Trail! */
   const onPaperOrder = useCallback(async (row: MtfDualRow) => {
@@ -304,6 +374,16 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
 
   /** ⚡ SINGLE LIVE BUTTON — turns ON Auto-Trade Intelligence, fetches CoinDCX Wallet, deploys 100% of wallet on strictly 1 Verified Strong Trade per session, and takes Full Control! */
   const onAutoLiveExecute = useCallback(async () => {
+    if (!canLive) {
+      notify(false, '⛔ LIVE execution is not enabled for this desk/tab — arm it in the desk console first.');
+      return;
+    }
+    const status = auto ?? await loadAuto();
+    const arm = status?.deskArmable?.[deskKey];
+    if (status?.deskArmable && arm?.armable === false) {
+      notify(false, `⛔ LIVE arm blocked — ${arm.why || 'LIVE prerequisites are not met'}`);
+      return;
+    }
     setBusy(true);
     try {
       const cfgPatch: Record<string, unknown> = {
@@ -336,7 +416,11 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       // din bhar ka silent no-op ('button ON par trade nahi lagta' ka seedha
       // vector). Button green dikhana jhootha hota — honest abort + clear
       // next-step (keys Execution Console / Settings me connect karo).
-      if (stArm?.coindcxConnected === false) {
+      // v21.23.16: only the crypto desk depends on CoinDCX creds. India LIVE
+      // uses Dhan and is gated by the separate typed-LIVE arming; the old
+      // unconditional check blocked a correctly armed India panel whenever
+      // CoinDCX keys were absent.
+      if (deskKey === 'crypto' && stArm?.coindcxConnected === false) {
         notify(false, '⛔ CoinDCX API keys CONNECTED NAHI hain — LIVE auto-trade order execute nahi hoga. Pehle CoinDCX API keys connect karo, phir ⚡ LIVE dabao. (Engine armed hai par live entry creds ke bina reject hogi.)');
         await loadAuto();
         setBusy(false); return;
@@ -369,57 +453,20 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
         notify(true, `🟢 LIVE AUTO-TRADE INTELLIGENCE ON — ${alreadyActiveCount || 1} Active Position under Full Deep Monitor Control (100% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} @ ${activeLeverage}x · Dynamic SL Trail + Reversal Profit Book)`);
         return;
       }
-      // If 0 trades are active and auto-tick was waiting on micro trigger bar, pick ONLY 1 top Verified STRONG/ELITE signal!
-      const preferCoinDcx = liveFutWalletINR > 0 && market === 'INDIA' && !canLive;
-      const allPool = preferCoinDcx ? [...metalsRows, ...rows] : [...rows, ...metalsRows];
-      const topStrongVerified = allPool
-        .filter(x =>
-          x.ok
-          && (x.side === 'LONG' || x.side === 'SHORT')
-          && x.directionVerified === true
-          && x.triggerFired === true
-          && !x.reversalRisk
-          && !x.trigger?.reversalRisk
-          && !x.trigger?.opposingFlow
-          && (x.ollamaTrio?.approvedCount == null || x.ollamaTrio.approvedCount >= 2)
-          && (x.tier === 'STRONG' || x.tier === 'ELITE' || Number(x.superScore) >= 80)
-          && Number(x.superScore) >= 75
-          && x.plan?.entry
-          && x.plan?.stopLoss
-          && !x.trapVeto
-          && !x.zoneWallVeto
-          && !x.counterTrend,
-        )
-        .sort((a, b) => (Number(b.superScore) || 0) - (Number(a.superScore) || 0))
-        .slice(0, 1);
-
-      if (topStrongVerified.length === 1) {
-        const cand = topStrongVerified[0];
-        const candMkt = (cand.assetClass === 'METALS' ? 'METALS' : cand.assetClass === 'EQUITY_SIM' ? 'GLOBALFUTURES' : cand.market === 'INDIA' ? 'INDIA' : market) as MarketKind;
-        const directRes = await openMtfBoardLive(cand.symbol, candMkt, cand.side as 'LONG' | 'SHORT', mode, cand.holdMin ?? holdMin, activeLeverage);
-        if (directRes?.ok) {
-          const f = directRes.filled;
-          const actualDeployINR = Number((f as { walletDeployINR?: number } | undefined)?.walletDeployINR) > 0
-            ? Math.round(Number((f as { walletDeployINR?: number }).walletDeployINR))
-            : deployed95WalletINR;
-          notify(
-            true,
-            `🟢 LIVE AUTO-TRADE INTELLIGENCE ON — ${cand.symbol} ${cand.side} (${cand.tier} ${cand.superScore}) · ${f?.leverage ?? activeLeverage}x · 100% Wallet ₹${actualDeployINR.toLocaleString('en-IN')} · qty ${f?.qty ?? '—'} @ ${candMkt === 'INDIA' ? '₹' : '$'}${fmt(f?.price ?? cand.plan?.entry)} (1 Session = 1 Trade Lock Active)`,
-          );
-          onPaperOpened?.(cand.symbol, candMkt);
-          await loadAuto();
-          return;
-        }
-        const lastErr = `${cand.symbol}: ${directRes?.error || directRes?.reason || 'order failed'}`;
-        notify(true, `🟢 LIVE AUTO-TRADE INTELLIGENCE ON (100% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} @ ${activeLeverage}x · Deep Monitor Watching — ${lastErr})`);
-      } else {
-        notify(true, `🟢 LIVE AUTO-TRADE INTELLIGENCE ON — Watching 24×7 for Verified STRONG (PAKKA LONG/SHORT) Signal · 1 Session = 1 Full-Wallet Trade (₹${deployed95WalletINR.toLocaleString('en-IN')} @ ${activeLeverage}x)`);
-      }
+      // A5 [NO CLIENT-SIDE FALLBACK ENTRY]: pehle yahan UI board rows se apna
+      // verified pool banata tha aur seedha live order bhej deta tha
+      // — auto engine ke gates (cooldown / day quota / backoff / desk scope /
+      // fresh quote) bypass ho jaate the. Ab sirf engine hi order karta hai;
+      // UI arm karke honest "watching" state dikhata hai.
+      notify(
+        true,
+        `🟢 LIVE AUTO-TRADE INTELLIGENCE ON — Watching 24×7 for engine-verified STRONG (PAKKA LONG/SHORT) Signal · 1 Session = 1 Full-Wallet Trade (₹${deployed95WalletINR.toLocaleString('en-IN')} @ ${activeLeverage}x) · client-side fallback entry disabled`,
+      );
       await loadAuto();
     } finally {
       setBusy(false);
     }
-  }, [rows, metalsRows, market, mode, holdMin, minScore, activeLeverage, effectiveWalletINR, deployed95WalletINR, liveFutWalletINR, liveFutMarginCcy, canLive, activeTradedRows, notify, onPaperOpened, loadAuto]);
+  }, [mode, holdMin, minScore, activeLeverage, effectiveWalletINR, deployed95WalletINR, liveFutMarginCcy, activeTradedRows, auto, canLive, deskKey, notify, loadAuto]);
 
   const statusLine = useMemo(() => {
     if (!auto) return 'status loading…';
@@ -431,8 +478,15 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     const skipWhy = Array.isArray(auto.lastTick?.skipped) && auto.lastTick.skipped.length > 0
       ? ` · ⏳ last-tick skip: ${auto.lastTick.skipped.slice(0, 2).join(' | ')}`
       : '';
-    return `${isLiveAuto ? '🟢 LIVE AUTO-TRADE INTELLIGENCE ON' : '⏸ AUTO-TRADE STANDBY'} · 100% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} / ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')} @ ${activeLeverage}x (Buying Power ₹${buyingPower95INR.toLocaleString('en-IN')}) · Active Traded: ${activeTradedRows.length} · day ${auto.day ?? '—'} · trades ${auto.dayCount}/${auto.maxTradesPerDay}${isLiveAuto && auto.coindcxConnected === false ? ' · ⚠ CoinDCX keys NOT connected — live order reject hoga' : ''}${skipWhy}`;
-  }, [auto, isLiveAuto, activeLeverage, effectiveWalletINR, deployed95WalletINR, buyingPower95INR, activeTradedRows.length]);
+    const blockWhy = liveBlockWhy ? ` · ⛔ ${liveBlockWhy}` : '';
+    const credsWarn = auto.executionMode === 'live' && auto.coindcxConnected === false
+      ? ' · ⚠ CoinDCX keys NOT connected — live order reject hoga'
+      : '';
+    const nearMiss = !activeTradedRows.length && topNearMissBlockers
+      ? ` · 🚧 top blockers: ${topNearMissBlockers}`
+      : '';
+    return `${isLiveAuto ? '🟢 LIVE AUTO-TRADE INTELLIGENCE ON' : '⏸ AUTO-TRADE STANDBY'} · 100% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} / ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')} @ ${activeLeverage}x (Buying Power ₹${buyingPower95INR.toLocaleString('en-IN')}) · Active Traded: ${activeTradedRows.length} · day ${auto.day ?? '—'} · trades ${auto.dayCount}/${auto.maxTradesPerDay}${blockWhy}${credsWarn}${nearMiss}${skipWhy}`;
+  }, [auto, isLiveAuto, liveBlockWhy, topNearMissBlockers, activeLeverage, effectiveWalletINR, deployed95WalletINR, buyingPower95INR, activeTradedRows.length]);
 
   return (
     <div className="mt-3" aria-label="mtf dual timeframe signals board">
@@ -559,7 +613,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             <button
               type="button"
               data-testid="mtf-single-live-auto-btn"
-              disabled={busy}
+              disabled={busy || (!isLiveAuto && auto != null && autoFresh && !canArmLive)}
               onClick={() => {
                 if (isLiveAuto) {
                   void onToggle(false);
@@ -572,7 +626,13 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                   ? 'border-emerald-400 bg-emerald-500/25 text-emerald-100 hover:bg-emerald-500/35 shadow-emerald-500/20'
                   : 'border-amber-400/80 bg-gradient-to-r from-amber-500/30 to-rose-500/30 text-amber-100 hover:from-amber-500/45 hover:to-rose-500/45 shadow-amber-500/15'
               } disabled:opacity-50`}
-              title="Click karne par Auto Trade Intelligence ON hoga — CoinDCX Wallet fetch karke 100% wallet amount + Leverage ke saath trade lagega, Active Positions ko Full Control pe lega aur TP1/TP2 tak Deep Monitor + Trailing SL + Reversal Profit Book chalega">
+              title={isLiveAuto
+                ? 'LIVE auto-trade armed — engine-verified STRONG signal par 100% wallet + leverage order, TP1/TP2 Deep Monitor + Trailing SL active'
+                : armBlockWhy
+                  ? `LIVE arm blocked: ${armBlockWhy}`
+                  : liveBlockWhy
+                    ? `LIVE blocked: ${liveBlockWhy}`
+                    : 'Click karne par Auto Trade Intelligence ON hoga — CoinDCX Wallet fetch karke 100% wallet amount + Leverage ke saath trade lagega, Active Positions ko Full Control pe lega aur TP1/TP2 tak Deep Monitor + Trailing SL + Reversal Profit Book chalega'}>
               <Power size={13} className={isLiveAuto ? 'text-emerald-300 animate-pulse' : 'text-amber-300'} />
               {busy
                 ? '⏳ ACTIVATING LIVE AI…'
@@ -588,7 +648,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
           <div className="mt-2.5 pt-2.5 border-t border-emerald-500/30">
             <div className="flex items-center justify-between gap-2 flex-wrap mb-1.5">
               <div className="flex items-center gap-2 flex-wrap text-[10px] font-black text-emerald-300">
-                <span>🔬 ACTIVE AUTO-TRADE DEEP MONITOR — REALTIME TP1 / TP2 & REVERSAL PROFIT GUARD · FULL COINDCX POSITION CONTROL (SIRF ACTIVE TRADES)</span>
+                <span>🔬 ACTIVE AUTO-TRADE DEEP MONITOR — REALTIME TP1 / TP2 & REVERSAL PROFIT GUARD · FULL {liveDeskLabel} POSITION CONTROL (SIRF ACTIVE TRADES)</span>
                 <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[9px]">
                   {activeTradedRows.length} Active Traded · {auto?.deepMonitor?.trailingActiveCount ?? 0} SL Trailed · {auto?.deepMonitor?.tp1LockedCount ?? 0} TP1 Hit
                 </span>
@@ -602,13 +662,14 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                 const isLong = t.side === 'LONG'; // v21.23.12: `!== 'SHORT'` unknown/undefined side ko green LONG styling de deta tha — honest strict check
                 const ccySym = t.ccy === 'INR' ? '₹' : '$';
                 const isPaperRow = String(t.executionMode || '').toUpperCase() === 'PAPER';
+                const isIndiaRow = String(t.market || t.execMarket || '').toUpperCase() === 'INDIA';
                 return (
                   <div key={`${t.symbol}-${i}`} className="rounded-xl bg-black/45 border border-emerald-500/35 p-2.5 text-[10px] font-mono">
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="text-xs font-black text-white">{t.symbol}</span>
                         <span className={`px-1.5 py-0.5 rounded text-[9px] font-black ${isPaperRow ? 'bg-cyan-500/25 text-cyan-200 border border-cyan-400/50' : 'bg-amber-500/25 text-amber-200 border border-amber-400/50'}`}>
-                          {isPaperRow ? '🧪 PAPER TEST' : '⚡ LIVE COINDCX'}
+                          {isPaperRow ? '🧪 PAPER TEST' : isIndiaRow ? '⚡ LIVE DHAN' : '⚡ LIVE COINDCX'}
                         </span>
                         <span className={`px-1.5 py-0.5 rounded text-[9px] font-black ${isLong ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
                           {t.side} · {t.leverage || activeLeverage}x · {t.walletDeployPct || 100}% Wallet

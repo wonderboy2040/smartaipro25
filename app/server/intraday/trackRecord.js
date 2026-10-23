@@ -184,14 +184,18 @@ export function recordSignals(signals) {
           _closeRow(existing, sig.ltp, 'FLIP', events);
           _openRow(sig, sigDay, events, true);
         } else {
-          existing.confidence = sig.confidence;
-          existing.lastPrice = sig.ltp;
+          // Flip suppressed (30m churn guard). The existing row is still the
+          // OLD direction — copying the opposite signal's dirScore/quality/
+          // edge telemetry onto it would label a LONG row with SHORT scores.
+          // Confidence is a live field (the legacy contract refreshes it), but
+          // direction telemetry waits for an actual flip.
+          if (sig.confidence != null) existing.confidence = sig.confidence;
+          if (Number(sig.ltp) > 0) existing.lastPrice = sig.ltp;
         }
       } else if (existing.status === 'PARTIAL') {
         // T1 already booked against the OLD levels — refreshing entry/target1
-        // would rewrite booked P&L retroactively. Confidence/last-price only.
-        existing.confidence = sig.confidence;
-        existing.lastPrice = sig.ltp;
+        // would rewrite booked P&L retroactively. Live fields only.
+        _refreshRowTelemetry(existing, sig);
       } else {
         // v18.9 LEVEL FREEZE — an OPEN row's entry/SL/targets were set at
         // publish time; refreshing them mid-life rewrote the P&L basis AFTER
@@ -199,8 +203,7 @@ export function recordSignals(signals) {
         // price made the very next tick book an SL_HIT that never happened
         // at the original plan — win-rate/avgR measured the LAST refresh,
         // not the published signal). Only live fields refresh now.
-        existing.confidence = sig.confidence;
-        existing.lastPrice = sig.ltp;
+        _refreshRowTelemetry(existing, sig);
         existing.qtyPerLakh = sig.qtyPerLakh ?? existing.qtyPerLakh;
       }
     } else {
@@ -216,6 +219,61 @@ export function recordSignals(signals) {
   }
   _persist();
   return events; // [{type:'OPEN'|'FLIP', ...}] for stream broadcast
+}
+
+// ------------------------------------------------------------
+// v21.23.15 DIRECTION REPORT — score telemetry + hit-rate buckets.
+// Engine payloads carry dirScore (directional evidence), qualityScore
+// (confirmation), edgeMargin (|LONG-SHORT| dirScore) and the gate modes.
+// Board-accountability rows (ensemble, not engine) legitimately lack these
+// fields, so every consumer below tolerates missing metadata instead of
+// dropping the row.
+// ------------------------------------------------------------
+function _numOrNull(x) {
+  // IMPORTANT: Number(null) === 0 — a missing score/PnL must stay null, not
+  // silently become a real zero (it would count open rows as breakeven and
+  // missing margins as "<12"). Number('   ') is also 0, so trim strings first.
+  if (x == null) return null;
+  if (typeof x === 'string' && x.trim() === '') return null;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Engine payload → persisted row fields. Nested `marginGate`/`staleGuard`
+// objects are flattened so old reports stay queryable with plain JSON.
+function _directionTelemetry(sig) {
+  const mg = sig?.marginGate && typeof sig.marginGate === 'object' ? sig.marginGate : {};
+  const sg = sig?.staleGuard && typeof sig.staleGuard === 'object' ? sig.staleGuard : {};
+  return {
+    dirScore: _numOrNull(sig?.dirScore ?? sig?.directionScore),
+    qualityScore: _numOrNull(sig?.qualityScore),
+    edgeMargin: _numOrNull(sig?.edgeMargin),
+    marginGateMode: mg.mode || null,
+    marginMin: _numOrNull(mg.min),
+    marginPass: typeof mg.pass === 'boolean' ? mg.pass : null,
+    marginWouldBlock: typeof mg.wouldBlock === 'boolean' ? mg.wouldBlock : null,
+    marginCapped: typeof mg.capped === 'boolean' ? mg.capped : null,
+    staleGuardMode: sg.mode || null,
+    staleMaxPct: _numOrNull(sg.maxPct),
+    staleDetected: typeof sg.detected === 'boolean' ? sg.detected : null,
+    ltpTvDivPct: _numOrNull(sg.ltpTvDivPct),
+    staleCapped: typeof sg.capped === 'boolean' ? sg.capped : null,
+    // null = the source did not carry a tie flag (board row). A false default
+    // here would overwrite engine telemetry on a same-direction board refresh.
+    directionalTie: typeof sig?.directionalTie === 'boolean' ? sig.directionalTie : null,
+  };
+}
+
+// Live refreshes (same-direction scans) keep the ORIGINAL entry plan frozen
+// but should keep confidence + direction telemetry current. Board-accountability
+// rows do not carry engine scores — merging only PRESENT values prevents a
+// board refresh from wiping the engine telemetry captured at open time.
+function _refreshRowTelemetry(row, sig) {
+  if (sig?.confidence != null) row.confidence = sig.confidence;
+  if (Number(sig?.ltp) > 0) row.lastPrice = sig.ltp;
+  for (const [key, value] of Object.entries(_directionTelemetry(sig))) {
+    if (value != null) row[key] = value;
+  }
 }
 
 function _openRow(sig, today, events, isFlip) {
@@ -240,6 +298,7 @@ function _openRow(sig, today, events, isFlip) {
     qtyPerLakh: sig.qtyPerLakh || 0,
     risk: _pxRound(Math.abs(sig.entry - sig.stopLoss)) ?? 0, // v21.4.1 [B5]: sub-cent safe
     confidence: sig.confidence, quantConfidence: sig.quantConfidence,
+    ..._directionTelemetry(sig),
     aiModel: sig.aiModel || '', aiNote: sig.aiNote || '',
     counterTrend: !!sig.counterTrend,
     trendStrength: sig.trendStrength || '',
@@ -444,6 +503,178 @@ export function getTrackRecord(days = 30) {
       pnl: s.disciplinedPnlPerLakh, rMultiple: s.rMultiple,
       openedAt: s.openedAt, closedAt: s.closedAt,
     })),
+  };
+}
+
+// ------------------------------------------------------------
+// v21.23.15 DIRECTION REPORT — full-state aggregation (NOT the trimmed
+// 40-row history). Answers "is the DIRECTION read actually right, per
+// desk / side / confidence / edge margin?" Rows are the same settled
+// ledger as getTrackRecord (FLIP churn excluded); open rows count in `n`
+// but never in win-rate denominators.
+// MFE/MAE are not stored on tracked rows, so excursion stats are omitted
+// rather than invented — add forward MFE/MAE tracking before reporting them.
+// ------------------------------------------------------------
+const _REPORT_MARKETS = ['INDIA', 'CRYPTO', 'FUTURES', 'GLOBALFUTURES'];
+const _CONF_BUCKETS = [
+  { label: 'missing', test: (c) => c == null },
+  { label: '<60', test: (c) => c != null && c < 60 },
+  { label: '60-69', test: (c) => c != null && c >= 60 && c < 70 },
+  { label: '70-79', test: (c) => c != null && c >= 70 && c < 80 },
+  { label: '80-89', test: (c) => c != null && c >= 80 && c < 90 },
+  { label: '90+', test: (c) => c != null && c >= 90 },
+];
+const _MARGIN_BUCKETS = [
+  { label: 'n/a', test: (m) => m == null },
+  { label: '<12', test: (m) => m != null && m < 12 },
+  { label: '12-19', test: (m) => m != null && m >= 12 && m < 20 },
+  { label: '20-29', test: (m) => m != null && m >= 20 && m < 30 },
+  { label: '30+', test: (m) => m != null && m >= 30 },
+];
+
+const _confOf = (r) => _numOrNull(r?.confidence) ?? _numOrNull(r?.quantConfidence);
+const _dirScoreOf = (r) => _numOrNull(r?.dirScore) ?? _numOrNull(r?.directionScore);
+
+function _directionStats(rows) {
+  let wins = 0, losses = 0, breakeven = 0, open = 0;
+  let rSum = 0, rCount = 0, pnlSum = 0;
+  let dirSum = 0, dirCount = 0, qSum = 0, qCount = 0, marginSum = 0, marginCount = 0;
+  let confSum = 0, confCount = 0;
+  for (const r of rows) {
+    if (r.status === 'OPEN' || r.status === 'PARTIAL') open++;
+    const pnl = _numOrNull(r.disciplinedPnlPerLakh);
+    if (pnl != null) {
+      pnlSum += pnl;
+      if (pnl > 0) wins++;
+      else if (pnl < 0) losses++;
+      else breakeven++;
+    }
+    if (r.rMultiple != null && Number.isFinite(Number(r.rMultiple))) {
+      rSum += Number(r.rMultiple); rCount++;
+    }
+    const ds = _dirScoreOf(r);
+    if (ds != null) { dirSum += ds; dirCount++; }
+    const qs = _numOrNull(r.qualityScore);
+    if (qs != null) { qSum += qs; qCount++; }
+    const em = _numOrNull(r.edgeMargin);
+    if (em != null) { marginSum += em; marginCount++; }
+    const conf = _confOf(r);
+    if (conf != null) { confSum += conf; confCount++; }
+  }
+  const resolved = wins + losses;
+  return {
+    n: rows.length,
+    open,
+    resolved,
+    wins, losses, breakeven,
+    winRate: resolved > 0 ? +((wins / resolved) * 100).toFixed(1) : null,
+    avgR: rCount > 0 ? +(rSum / rCount).toFixed(2) : null,
+    disciplinedPnlPerLakh: +pnlSum.toFixed(2),
+    avgConfidence: confCount > 0 ? +(confSum / confCount).toFixed(1) : null,
+    avgDirScore: dirCount > 0 ? +(dirSum / dirCount).toFixed(1) : null,
+    avgQualityScore: qCount > 0 ? +(qSum / qCount).toFixed(1) : null,
+    avgEdgeMargin: marginCount > 0 ? +(marginSum / marginCount).toFixed(1) : null,
+    // Tracked rows do not store excursions today. Null is honest — never 0.
+    mfe: null,
+    mae: null,
+  };
+}
+
+/**
+ * Direction-accuracy report over the FULL tracked-signals state.
+ * @param {number} days lookback (1..365, default 30)
+ * @param {string} tab  ALL | INDIA | CRYPTO | FUTURES | GLOBALFUTURES
+ */
+export function getDirectionReport(days = 30, tab = 'ALL') {
+  const rawDays = Number(days);
+  const windowDays = Number.isFinite(rawDays) ? Math.max(1, Math.min(365, rawDays)) : 30;
+  const cutoff = Date.now() - windowDays * 24 * 60 * 60 * 1000;
+  const tabNorm = String(tab || 'ALL').trim().toUpperCase();
+  const wantMarket = _REPORT_MARKETS.includes(tabNorm) ? tabNorm : 'ALL';
+
+  const allRowsAll = _state.signals.filter(s => !s.excluded && s.status !== 'FLIP');
+  // Tab-scoped provenance: a CRYPTO tab must not report INDIA's all-time /
+  // outside-window / excluded counts as its own.
+  const allRows = wantMarket === 'ALL'
+    ? allRowsAll
+    : allRowsAll.filter(s => _marketOf(s) === wantMarket);
+  const windowRows = allRows.filter(s => (s.openedAt || 0) >= cutoff);
+  const rows = windowRows;
+  const excludedCount = _state.signals.filter(s =>
+    s.excluded && (wantMarket === 'ALL' || _marketOf(s) === wantMarket)
+  ).length;
+
+  const byStatus = { OPEN: 0, PARTIAL: 0, T2_HIT: 0, BE_TRAIL_EXIT: 0, SL_HIT: 0, EOD_EXIT: 0 };
+  for (const r of rows) byStatus[r.status] = (byStatus[r.status] || 0) + 1;
+
+  const byMarket = _REPORT_MARKETS
+    .map(market => {
+      const mr = rows.filter(s => _marketOf(s) === market);
+      if (!mr.length) return null;
+      return {
+        market,
+        ..._directionStats(mr),
+        LONG: _directionStats(mr.filter(s => s.direction === 'LONG')),
+        SHORT: _directionStats(mr.filter(s => s.direction === 'SHORT')),
+      };
+    })
+    .filter(Boolean);
+
+  const sideStats = (side) => _directionStats(rows.filter(s => s.direction === side));
+
+  const confidenceBuckets = _CONF_BUCKETS.map(({ label, test }) => {
+    const br = rows.filter(s => test(_confOf(s)));
+    return { bucket: label, ..._directionStats(br) };
+  });
+  const marginBuckets = _MARGIN_BUCKETS.map(({ label, test }) => {
+    const br = rows.filter(s => test(_numOrNull(s.edgeMargin)));
+    return { bucket: label, ..._directionStats(br) };
+  });
+
+  // Direction telemetry coverage — board rows legitimately lack engine
+  // scores; the report must show how much of the sample is engine-tagged.
+  let withDirScore = 0, withEdgeMargin = 0, directionalTies = 0;
+  let marginWouldBlock = 0, marginCapped = 0, staleDetected = 0, staleCapped = 0;
+  const marginGateModes = { off: 0, shadow: 0, enforce: 0, missing: 0 };
+  for (const r of rows) {
+    if (_dirScoreOf(r) != null) withDirScore++;
+    if (_numOrNull(r.edgeMargin) != null) withEdgeMargin++;
+    if (r.directionalTie === true) directionalTies++;
+    const mg = String(r.marginGateMode || '').toLowerCase();
+    marginGateModes[mg === 'off' || mg === 'shadow' || mg === 'enforce' ? mg : 'missing']++;
+    if (r.marginWouldBlock === true) marginWouldBlock++;
+    if (r.marginCapped === true) marginCapped++;
+    if (r.staleDetected === true) staleDetected++;
+    if (r.staleCapped === true) staleCapped++;
+  }
+
+  return {
+    ok: true,
+    days: windowDays,
+    tab: wantMarket,
+    generatedAt: Date.now(),
+    note: 'Win-rate = settled outcomes only (pnl>0 vs pnl<0). FLIP churn and excluded rows are absent. MFE/MAE are not tracked, so their fields are null (never invented).',
+    totals: {
+      ..._directionStats(rows),
+      trackedAllTime: allRows.length,
+      outsideWindow: allRows.length - windowRows.length,
+      excludedCount,
+    },
+    byStatus,
+    byMarket,
+    bySide: { LONG: sideStats('LONG'), SHORT: sideStats('SHORT') },
+    confidenceBuckets,
+    marginBuckets,
+    telemetry: {
+      withDirScore,
+      missingDirScore: rows.length - withDirScore,
+      withEdgeMargin,
+      directionalTies,
+      marginGateModes,
+      marginWouldBlock,
+      marginCapped,
+      staleGuard: { detected: staleDetected, capped: staleCapped },
+    },
   };
 }
 

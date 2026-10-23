@@ -88,9 +88,11 @@ describe('v21.23.13 T1 — neutral-tape freshTapeAbsent cure', () => {
 // T2 — ENGINE-vs-UI BOARDSIGS PARITY (crypto desk)
 // ============================================================
 describe('v21.23.13 T2 — engine boardSigs parity (CRYPTO→FUTURES like UI route)', () => {
-  it('all 4 CRYPTO-desk boardSigs sites use the UI-route mapping (UI + 60s sweep + 15s deep tick + /run)', () => {
+  it('all 5 CRYPTO-desk boardSigs sites use the UI-route mapping (UI + 60s sweep + 15s deep tick + /run + preview)', () => {
     const src = read('server/ai/routes.js');
-    expect((src.match(/getSignals\(market === 'CRYPTO' \? 'FUTURES' : market/g) || []).length).toBe(4);
+    // v21.23.15 [A6]: /mtf-auto/preview is the 5th site — a raw-CRYPTO
+    // preview disagreed with the FUTURES board the engine actually trades.
+    expect((src.match(/getSignals\(market === 'CRYPTO' \? 'FUTURES' : market/g) || []).length).toBe(5);
     // engine loops raw-CRYPTO boardSigs (the divergence) must not exist
     expect(src.includes('const base = await getSignals(market, deps, { warmOnly: true })')).toBe(false);
     expect(src.includes('const base = await getSignals(market, depsForSignals(), { warmOnly: true })')).toBe(false);
@@ -130,9 +132,11 @@ describe('v21.23.13 T3 — paper clicks do not eat the auto engine quota', () =>
 // T4 — HONEST LIVE BUTTON (UI source locks)
 // ============================================================
 describe('v21.23.13 T4 — honest LIVE badge + arm + idle transparency (UI locks)', () => {
-  it('isLiveAuto requires canLive on BOTH branches (no fake green without creds)', () => {
+  it('isLiveAuto requires canLive + executionMode live + fresh server deskReady (A3)', () => {
     const src = read('src/components/aitrading/MTFDualBoardPanel.tsx');
-    expect(src.includes('armed && canLive && (auto?.executionMode === \'live\'')).toBe(true);
+    expect(src.includes('armed && canLive && autoFresh && auto?.executionMode === \'live\'')).toBe(true);
+    expect(src.includes('deskReadiness?.ready === true')).toBe(true);
+    expect(src.includes('setAutoFresh(false)')).toBe(true);
   });
   it('onAutoLiveExecute: honest abort on config/toggle fail + creds pre-flight + skip-reason status', () => {
     const src = read('src/components/aitrading/MTFDualBoardPanel.tsx');
@@ -353,7 +357,7 @@ describe('v21.23.13 D5 — directionLiveCert cdc-official chain', () => {
   it('skipNetwork payload is honest (version stamp current)', async () => {
     const cert = await runLiveDirectionCertificate({ skipNetwork: true });
     expect(cert.pass).toBe(true);
-    expect(cert.version).toBe('v21.23.14'); // was v21.23.13
+    expect(cert.version).toBe('v21.23.16'); // was v21.23.15
     expect(cert.chains).toEqual([]);
   });
 
@@ -367,13 +371,14 @@ describe('v21.23.13 D5 — directionLiveCert cdc-official chain', () => {
 // ============================================================
 // D6 — VERSION + STAMP AGREEMENT (release gate)
 // ============================================================
-describe('v21.23.14 D6 — version stamps', () => {
-  it('package.json === src/version.ts === 21.23.14; watchdog bat stamped, no stale versions', () => {
+describe('v21.23.16 D6 — version stamps', () => {
+  it('package.json === src/version.ts === 21.23.16; watchdog bat stamped, no stale versions', () => {
     const pkg = JSON.parse(read('package.json'));
-    expect(pkg.version).toBe('21.23.14');
-    expect(read('src/version.ts')).toContain("APP_VERSION = '21.23.14'");
+    expect(pkg.version).toBe('21.23.16');
+    expect(read('src/version.ts')).toContain("APP_VERSION = '21.23.16'");
     const bat = read('Start-SmartAI-Watchdog.bat');
-    expect(bat).toContain('v21.23.14');
+    expect(bat).toContain('v21.23.16');
+    expect(bat).not.toContain('v21.23.14');
     expect(bat).not.toContain('v21.23.12');
     expect(bat).not.toContain('v21.23.11');
   });

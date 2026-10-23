@@ -22,7 +22,7 @@
 //                                     tools, Gemini→Groq→Cerebras chain)
 // ============================================================
 import {
-  BASE_UNIVERSE, CRYPTO_UNIVERSE, INTRADAY_MIN_CONFIDENCE, INTRADAY_TOP_N, gradeSignal, inDeadZone,
+  BASE_UNIVERSE, CRYPTO_UNIVERSE, INTRADAY_MIN_CONFIDENCE, INTRADAY_TOP_N, INTRADAY_NO_EDGE_CAP, gradeSignal, inDeadZone,
   fetchIntradayDataBatch, analyzeIntradayFromScanner, aiVerifySignals, registerCryptoBases,
   isCryptoSymbolBase,
 } from './engine.js';
@@ -667,11 +667,21 @@ export function registerIntradayRoutes(app, deps) {
             }
             aiModel = (v.models || []).join('+') || (ai.models || []).join('+');
           }
-          const confidence = aiConfidence != null ? Math.max(0, Math.min(100, aiConfidence)) : (c._rrOk ? c.quantConfidence : c.quantConfidence - 12);
+          const blended = aiConfidence != null ? Math.max(0, Math.min(100, aiConfidence)) : (c._rrOk ? c.quantConfidence : c.quantConfidence - 12);
+          // v21.23.15 recheck: the engine caps a TIE / sub-minimum-margin /
+          // stale-quote read at 69. The AI blend above could lift it back
+          // over the 70 entry floor. Re-cap after the blend, and mark the
+          // row so the choppy-market fallback pool cannot resurrect it.
+          const edgeSuppressed = Boolean(
+            c.directionalTie === true
+            || c.marginGate?.capped === true
+            || c.staleGuard?.capped === true
+          );
+          const confidence = edgeSuppressed ? Math.min(blended, INTRADAY_NO_EDGE_CAP) : blended;
           const { _rrOk, _momentumPct, _deadZone, ...clean } = c;
           const v2 = ai?.verdicts?.[c.symbol];
           return {
-            ...clean, aiConfidence, aiModel, aiNote, confidence,
+            ...clean, aiConfidence, aiModel, aiNote, confidence, edgeSuppressed,
             // v4 dual-expert fields
             tradeType: v2?.tradeType || null,
             entryQuality: v2?.entryQuality ?? null,
@@ -694,10 +704,13 @@ export function registerIntradayRoutes(app, deps) {
           .filter(s => s.confidence >= minConf)
           .sort((a, b) => b.confidence - a.confidence);
 
-        // If market is choppy and rigid filter yields 0, pick top best setups (confidence >= 65)
+        // If market is choppy and rigid filter yields 0, pick top best setups (confidence >= 65).
+        // v21.23.15 recheck: gated no-edge rows must never re-enter through
+        // this relaxed pool — they were capped specifically so they cannot
+        // become a trade.
         if (filteredSignals.length === 0 && signals.length > 0) {
           filteredSignals = signals
-            .filter(s => s.confidence >= 65)
+            .filter(s => s.confidence >= 65 && s.edgeSuppressed !== true)
             .sort((a, b) => b.confidence - a.confidence);
         }
 

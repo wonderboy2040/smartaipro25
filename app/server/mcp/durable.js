@@ -170,6 +170,14 @@ export async function durableBootRestoreAll() {
     _log(!backupConfigured()
       ? 'NOT configured — set GITHUB_BACKUP_TOKEN + GITHUB_BACKUP_REPO (optionally DURABLE_KEY) to make credentials restart-safe'
       : 'backup repo configured but no encryption key (DURABLE_KEY or APP_PIN+API_TOKEN) — disabled');
+    // The MTF module may have been imported before this point. Unblock its
+    // persistence and drop any pre-restore cache even when durable is off.
+    try {
+      const mod = await import('../ai/mtfAutoLink.js');
+      if (typeof mod.__reloadMtfAutoForBoot === 'function') {
+        mod.__reloadMtfAutoForBoot({ restored: false, configRestored: false, stateRestored: false, disabled: true });
+      }
+    } catch { /* best-effort */ }
     return {};
   }
   const restored = {};
@@ -238,6 +246,41 @@ export async function durableBootRestoreAll() {
     });
     if (st) restored[key] = true;
   }
+  // v21.23.15 MTF AUTO-LINK — config (enabled / desks / live mode / risk)
+  // aur state (day counters / linked book / events) pehle sirf ephemeral
+  // disk par the. Render spin-down = auto silently OFF + day quota reset.
+  // updatedAt (config/state saves stamp it) drives newest-wins restore.
+  const mtfStateTs = (s) => Math.max(
+    Number(s?.updatedAt) || 0,
+    maxTs(s?.book),
+    Array.isArray(s?.events) ? s.events.reduce((m, e) => Math.max(m, Number(e?.at) || 0), 0) : 0,
+    Number(s?.lastTick?.at) || 0,
+  );
+  let mtfRestored = false;
+  const mtfCfg = await durableBootRestore('mtf-auto-config.json', {
+    isUsable: (s) => !!(s && typeof s === 'object' && Object.keys(s).length > 0),
+    localTs: (s) => Number(s?.updatedAt) || 0,
+    remoteTs: (s) => Number(s?.updatedAt) || 0,
+  });
+  if (mtfCfg) { restored.mtfAutoConfig = true; mtfRestored = true; }
+  const mtfState = await durableBootRestore('mtf-auto-state.json', {
+    isUsable: (s) => !!(s && typeof s === 'object' && Object.keys(s).length > 0),
+    localTs: mtfStateTs,
+    remoteTs: mtfStateTs,
+  });
+  if (mtfState) { restored.mtfAutoState = true; mtfRestored = true; }
+  // Always reload after the restore attempt: if nothing was restored this
+  // simply drops a pre-restore cache; if a file was restored it hydrates it.
+  try {
+    const mod = await import('../ai/mtfAutoLink.js');
+    if (typeof mod.__reloadMtfAutoForBoot === 'function') {
+      mod.__reloadMtfAutoForBoot({
+        restored: mtfRestored,
+        configRestored: !!mtfCfg,
+        stateRestored: !!mtfState,
+      });
+    }
+  } catch { /* best-effort */ }
   // v10.3.1: the agent/accountability modules captured their state at
   // MODULE-EVAL time — before this restore wrote the disk files. Drop
   // those in-memory copies so the next read sees the hydrated disk
