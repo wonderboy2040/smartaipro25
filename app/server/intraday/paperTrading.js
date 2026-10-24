@@ -782,6 +782,35 @@ export function updatePaperTradeT1ClosePct(id, pct) {
   return { ok: true, t1ClosePct: t.t1ClosePct, trade: t };
 }
 
+/** v21.24.0 SMART TRAIL v2 — ROLLING TP2 sync: pushes an open paper trade's
+ *  target2 FURTHER in the trade direction only (LONG: higher, SHORT: lower).
+ *  Never moves it back toward entry, never touches a closed trade. */
+export function updatePaperTradeTarget2(idOrSymbol, newTarget2, marketHint = null) {
+  const t2 = Number(newTarget2);
+  if (!(t2 > 0)) return { ok: false, error: 'Invalid target2' };
+  const symUp = String(idOrSymbol || '').trim().toUpperCase();
+  const wantMkt = marketHint != null ? String(marketHint).toUpperCase() : null;
+  const t = _state.trades.find(x => {
+    if (x.status === 'CLOSED') return false;
+    if (x.id === idOrSymbol || String(x.id) === String(idOrSymbol)) return true;
+    if (String(x.symbol || '').toUpperCase() !== symUp) return false;
+    return wantMkt == null || String(x.market || '').toUpperCase() === wantMkt;
+  });
+  if (!t) return { ok: false, error: 'Open paper trade not found' };
+  const isLong = t.direction === 'LONG';
+  const cur = Number(t.target2) || 0;
+  const rounded = _roundForTrade(t2, t);
+  const further = !(cur > 0) || (isLong ? rounded > cur : rounded < cur);
+  if (further) {
+    if (t.initialTarget2 == null) t.initialTarget2 = cur || null;
+    t.target2 = rounded;
+    t.t2ExtendedAt = Date.now();
+    t.t2Extensions = (Number(t.t2Extensions) || 0) + 1;
+    _persist();
+  }
+  return { ok: true, updated: further, target2: t.target2, trade: t };
+}
+
 // 2026-09 multi-market: watch set classified per market so the watcher
 // routes INDIA → Groww and CRYPTO → CoinDCX quotes.
 export function paperSymbolsByMarket() {

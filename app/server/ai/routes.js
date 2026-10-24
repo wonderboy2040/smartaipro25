@@ -37,7 +37,7 @@ import { getSignals, getDeepSignal, getFreshSignalForExec, getFreshFuturesSignal
 // only ever called by /api/intraday-scanner, which no frontend polls).
 import { setScanSymbols as intradaySetScanSymbols, getLatestQuotes } from '../intraday/stream.js';
 import { getDirectionReport } from '../intraday/trackRecord.js';
-import { openPaperTrade as openPaperTradeExec, closePaperTrade as closePaperTradeExec, voidPaperTrade as voidPaperTradeExec, getPaperSummary as getPaperSummaryExec, updatePaperTradeStopLoss, updatePaperTradeT1ClosePct, evaluatePaper } from '../intraday/paperTrading.js';
+import { openPaperTrade as openPaperTradeExec, closePaperTrade as closePaperTradeExec, voidPaperTrade as voidPaperTradeExec, getPaperSummary as getPaperSummaryExec, updatePaperTradeStopLoss, updatePaperTradeT1ClosePct, updatePaperTradeTarget2, evaluatePaper } from '../intraday/paperTrading.js';
 // v20.2 ACCOUNTABILITY: the board's ACTIONABLE signals (STRONG + ACTION
 // with a plan) feed the signal Track Record — the panel's "har published
 // signal track hota hai" promise is finally true for the board the user
@@ -214,7 +214,7 @@ import { dhanConnect, dhanDisconnect, dhanConnected, dhanProfile, scripMasterSta
 import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 // v21.16.0 + v21.20.0 MTF SIGNALS BOARD (Dual-Timeframe) + AUTO-LINK engine
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, mtfProEntryGate, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
-import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isGenuinelyTradedEntry, isLiveAttemptBackoffActive } from './mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced } from './mtfAutoLink.js';
 // v21.23.1: cross-engine direction-lock release-on-close sweeper (directionLock.js)
 import { acquireDirectionLock, checkDirectionLock, reconcileDirectionLocks } from './directionLock.js';
 // v21.23.4: runtime direction certificate (user demand: "accurately fix
@@ -1610,7 +1610,7 @@ export function registerAITradingRoutes(app, deps) {
       const deps = depsForSignals();
       const boards = {};
       const fxLive = await mtfLiveFx();
-      const hasOpenIndia = (mtfAutoStatus()?.book || []).some(b => b.status === 'OPEN' && b.market === 'INDIA');
+      const hasOpenIndia = mtfAutoOpenCount('INDIA') > 0;
       for (const market of ['INDIA', 'CRYPTO']) {
         const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
         if (!on) continue;
@@ -1626,7 +1626,7 @@ export function registerAITradingRoutes(app, deps) {
       const out = await mtfAutoTick({
         boards,
         buildDualRow,
-        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
+        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct, updatePaperTradeTarget2 },
         quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
         killSwitch,
         fx: fxLive,
@@ -3308,8 +3308,8 @@ export function registerAITradingRoutes(app, deps) {
     try {
       const openNow = [];
       for (const t of (getPaperSummaryExec()?.open || [])) openNow.push(String(t.symbol || '').toUpperCase());
-      for (const b of (mtfAutoStatus()?.book || [])) {
-        if (b?.status === 'OPEN' && isGenuinelyTradedEntry(b)) openNow.push(String(b.symbol || '').toUpperCase());
+      for (const b of mtfAutoOpenRows()) {
+        openNow.push(String(b.symbol || '').toUpperCase());
       }
       for (const p of (loadJournal()?.positions || [])) {
         const st = String(p?.status || '').toUpperCase();
@@ -3417,14 +3417,14 @@ export function registerAITradingRoutes(app, deps) {
       const cfg = loadMtfAutoConfig();
       const liveCtx = await mtfAutoLiveCtx(cfg);
       await liveCtx.syncLivePositions();
-      const hasOpenLinked = (mtfAutoStatus()?.openCount || 0) > 0;
+      const hasOpenLinked = mtfAutoOpenCount() > 0;
       if (!mtfAutoEnabled() && !hasOpenLinked) return;
       const killSwitch = (() => { try { return !!loadConfig()?.killSwitch; } catch { return false; } })();
       if (killSwitch) return;
       const deps = depsForSignals();
       const boards = {};
       const fxLive = await mtfLiveFx();
-      const hasOpenIndia = (mtfAutoStatus()?.book || []).some(b => b.status === 'OPEN' && b.market === 'INDIA');
+      const hasOpenIndia = mtfAutoOpenCount('INDIA') > 0;
       for (const market of ['INDIA', 'CRYPTO']) {
         const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
         if (!on) continue;
@@ -3446,7 +3446,7 @@ export function registerAITradingRoutes(app, deps) {
       await mtfAutoTick({
         boards,
         buildDualRow,
-        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
+        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct, updatePaperTradeTarget2 },
         quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
         killSwitch: (() => { try { return !!loadConfig()?.killSwitch; } catch { return false; } })(),
         fx: fxLive,
@@ -3474,8 +3474,10 @@ export function registerAITradingRoutes(app, deps) {
     if (_fastSlTrailBusy) return;
     _fastSlTrailBusy = true;
     try {
-      const baseSt = mtfAutoStatus();
-      if (!baseSt || !(baseSt.openCount > 0)) return;
+      // Lightweight check — mtfAutoStatus() would run the deep monitor with a
+      // stale book LTP and could persist a TP2 extension before the fresh-quote
+      // pass below had a chance to act on it.
+      if (mtfAutoOpenCount() <= 0) return;
       const combinedQuotes = { ...(getLatestQuotes()?.data || {}) };
       // v21.23.8: EQUITY SIM overlay — 3s fast loop ka evaluatePaper is qualified
       // GLOBALFUTURES|SYM quotes se EQUITY SIM paper trades ke SL/T1/T2 evaluate karta hai.
@@ -3502,12 +3504,20 @@ export function registerAITradingRoutes(app, deps) {
           // Ab execMarket (paper journal ka actual domain) pehle.
           try { updatePaperTradeStopLoss(tr.paperId ?? tr.symbol, tr.trailedStopLoss, tr.execMarket || tr.market || null); } catch { /* non-fatal */ }
         }
-        if (!tr.slTrailed || !(tr.trailedStopLoss > 0)) continue;
+        // v21.24.0 ROLLING TP2: paper mirror must converge to the book target
+        // even when the SL itself did not move. The call is monotonic + a cheap
+        // no-op when already in sync, so run it every pass (not only on the
+        // exact tick an extension was first observed — a status/preview call
+        // may have consumed that flag earlier).
+        if (tr.t2 > 0 && (tr.executionMode === 'PAPER' || tr.paperId != null)) {
+          try { updatePaperTradeTarget2(tr.paperId ?? tr.symbol, tr.t2, tr.execMarket || tr.market || null); } catch { /* non-fatal */ }
+        }
+        if ((!tr.slTrailed && !tr.t2Extended && !tr.tpSyncPending) || !(tr.trailedStopLoss > 0)) continue;
         if (tr.executionMode === 'LIVE' && loadCredsForOrder()) {
           const lastSync = _lastCoinDcxSlSyncAt.get(tr.symbol) || 0;
           if (Date.now() - lastSync >= 4500) {
             _lastCoinDcxSlSyncAt.set(tr.symbol, Date.now());
-            await updateCoinDcxPositionSl({
+            const syncRes = await updateCoinDcxPositionSl({
               symbol: tr.symbol,
               positionId: tr.livePositionId,
               // v21.23.9: pehle `newStopLoss:` pass hota tha jabki signature
@@ -3526,6 +3536,12 @@ export function registerAITradingRoutes(app, deps) {
               // deep tick (b.t2) dono pehle se TP2 — ab teeno aligned.
               takeProfit: tr.t2,
             }).catch(() => null);
+            // Only clear the pending flag on an explicit exchange OK. A failed
+            // call must retry on the next 4.5s window, not silently leave the
+            // native TP stranded at the old target.
+            if (syncRes?.ok) {
+              markAutoTradeTpSynced({ symbol: tr.symbol, paperId: tr.paperId, t2: tr.t2, exchange: true });
+            }
           }
         }
       }
@@ -3605,11 +3621,11 @@ export function registerAITradingRoutes(app, deps) {
         const cfg = loadMtfAutoConfig();
         const liveCtx = await mtfAutoLiveCtx(cfg);
         await liveCtx.syncLivePositions();
-        const hasOpenLinked = (mtfAutoStatus()?.openCount || 0) > 0;
+        const hasOpenLinked = mtfAutoOpenCount() > 0;
         if (!mtfAutoEnabled() && !hasOpenLinked) return;
         const fxLive = await mtfLiveFx();
         const boards = {};
-        const hasOpenIndia = (mtfAutoStatus()?.book || []).some(b => b.status === 'OPEN' && b.market === 'INDIA');
+        const hasOpenIndia = mtfAutoOpenCount('INDIA') > 0;
         for (const market of ['INDIA', 'CRYPTO']) {
           const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
           if (!on) continue;
@@ -3632,7 +3648,7 @@ export function registerAITradingRoutes(app, deps) {
           buildDualRow,
           // v21.23.7: updatePaperTradeT1ClosePct — deep monitor LIVE vol-class
           // shift pe paper trade ka TP1 partial % refresh karta hai (volTrail).
-          paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct },
+          paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct, updatePaperTradeTarget2 },
           quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
           killSwitch: (() => { try { return !!loadConfig()?.killSwitch; } catch { return false; } })(),
           fx: fxLive,
@@ -3696,9 +3712,9 @@ export function registerAITradingRoutes(app, deps) {
       if (!mtfAutoEnabled()) return;
       const cfg = loadMtfAutoConfig();
       if (!(cfg?.desks?.india || cfg?.desks?.crypto)) return;
-      const st = mtfAutoStatus();
-      const openCount = st?.openCount || 0;
-      const isLiveSession = cfg.executionMode === 'live' || st?.executionMode === 'live' || st?.siteLiveActive === true;
+      const openRows = mtfAutoOpenRows();
+      const openCount = openRows.length;
+      const isLiveSession = cfg.executionMode === 'live';
       // 1-session-1-trade lock (LIVE) / max positions (paper) — full tick
       // inhe re-check karta hai; ye sirf FREE zero-cost bail-out hai.
       if (isLiveSession && openCount >= 1) return;
@@ -3707,8 +3723,7 @@ export function registerAITradingRoutes(app, deps) {
       const warm = peekDualMtfBoards(8_000);
       if (!Array.isArray(warm) || warm.length === 0) return;
       const minScore = Math.max(75, Number(cfg.minScore) || 75);
-      const openSyms = new Set((st?.book || [])
-        .filter(b => b.status === 'OPEN')
+      const openSyms = new Set(openRows
         .map(b => String(normalizeLinkSymbol(b.symbol, b.market)).toUpperCase()));
       // v21.23.10 [PROBE-PARITY]: probe sirf bd.rows scan karta tha —
       // metalsRows (XAU/XAG) + equitySimRows 10s ultra-fast path se bahar

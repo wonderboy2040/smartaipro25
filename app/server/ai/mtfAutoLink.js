@@ -70,6 +70,8 @@ import {
   trailProfileResolved, tp1ClosePctFor, classifyVolatility,
   VOL_CLASS, MOMENTUM,
 } from './volTrail.js';
+// v21.24.0 SMART TRAIL v2: noise-aware ratchet + rolling TP2 (shadow default; SMART_TRAIL_V2=enforce to act).
+import { smartTrailMode, smartTrailConfig, smartTrailPlan, smartExtendTarget } from './smartTrail.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
@@ -436,7 +438,7 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const initialSl = Number(trade.initialStopLoss ?? trade.stopLoss ?? trade.sl) || 0;
   const currentSl = Number(trade.trailedStopLoss ?? trade.stopLoss ?? trade.sl) || initialSl;
   const t1 = Number(trade.t1 ?? trade.target1 ?? trade.tp) || 0;
-  const t2 = Number(trade.t2 ?? trade.target2 ?? trade.tp2) || 0;
+  const t2Base = Number(trade.t2 ?? trade.target2 ?? trade.tp2) || 0;
   const ltp = Number(liveCtx.ltp ?? trade.ltp ?? entry) || entry;
   const qty = Number(trade.qty) || 1;
   const market = String(trade.execMarket || trade.market || 'FUTURES').toUpperCase();
@@ -457,7 +459,6 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const peakCoveredFee = isLong ? peakPrice > feeFloor : peakPrice < feeFloor;
 
   const tp1Touched = Boolean(trade.t1Hit || trade.tp1Hit || (t1 > 0 && (isLong ? peakPrice >= t1 : peakPrice <= t1)));
-  const tp2Touched = Boolean(t2 > 0 && (isLong ? ltp >= t2 : ltp <= t2));
 
   // v21.23.7 VOLATILITY-ADAPTIVE TRAIL PROFILE — LIVE ATR% (board context)
   // > entry-stamp (trade.atrPct) > 15s-tick stamp (trade.volClass) > NORMAL.
@@ -474,6 +475,43 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   });
   const volClass = profile.volClass;
   const momentumState = profile.momentumState || MOMENTUM.UNKNOWN;
+
+  // v21.24.0 SMART TRAIL v2 (SMART_TRAIL_V2 = off | shadow(default) | enforce).
+  // shadow: computed + exposed as telemetry, v1 decides. enforce: v2 decides.
+  const _row0 = liveCtx.boardRow || null;
+  const _hint0 = Boolean(_row0 && (
+    _row0.reversalRisk === true || _row0.trigger?.reversalRisk === true
+    || _row0.context?.exhausted === true || _row0.trigger?.opposingFlow === true
+  ));
+  const smartMode = smartTrailMode();
+  const smartCfg = smartMode === 'off' ? null : smartTrailConfig();
+  const smartEnforce = smartMode === 'enforce';
+  // A caller that only has a stale book LTP (toggle/preview/lock checks) must
+  // never move a live target. They can still read the would-extend telemetry.
+  const allowTpExtension = liveCtx.allowTpExtension !== false;
+  const smartExt = smartCfg
+    ? smartExtendTarget({
+      isLong, entry, risk, ltp, t1, t2: t2Base, t2Extensions: Number(trade.t2Extensions) || 0,
+      momentum: momentumState, reversalRiskHint: _hint0, tp1Touched, peakR,
+    }, smartCfg)
+    : null;
+  // Rolling TP2: only ENFORCE moves the target; shadow just reports "wouldExtend".
+  // Never extend once price has already reached/passed the OLD target — in LIVE
+  // the exchange-native TP is filling there; moving it now would be too late.
+  const smartExtBeforeTarget = Boolean(
+    smartExt && t2Base > 0 && (isLong ? ltp < t2Base : ltp > t2Base),
+  );
+  const t2 = (smartEnforce && allowTpExtension && smartExtBeforeTarget) ? smartExt.newT2 : t2Base;
+  const t2Extended = Boolean(smartEnforce && allowTpExtension && smartExtBeforeTarget);
+  const tp2Touched = Boolean(t2 > 0 && (isLong ? ltp >= t2 : ltp <= t2));
+  const smartPlan = smartCfg
+    ? smartTrailPlan({
+      isLong, entry, risk, peakPrice, ltp, atrPct: profile.atrPct, momentum: momentumState,
+      feeFloor, peakCoveredFee, tp1Touched, t1, reversalRiskHint: _hint0,
+    }, smartCfg)
+    : null;
+  // v2 takes over the profit-locking stages (3/4/5) only when enforced AND active.
+  const smartTakesOver = Boolean(smartEnforce && smartPlan?.active);
 
   // Multi-Stage Dynamic Trailing SL computation
   let stageCode = 'STAGE_0_INITIAL_GUARD';
@@ -499,19 +537,42 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     // 0.50R pullback ROUTINE noise hai tha (TP2 se theek pehle SL hit).
     // Floor TP1 (>= +1.0R) pe hai hi.
     const chandelierTrail = isLong ? peakPrice - profile.stage5ChandelierR * risk : peakPrice + profile.stage5ChandelierR * risk;
-    candidateSl = tightenSl(candidateSl, tightenSl(t1 > 0 ? t1 : priceAtR(1.0), chandelierTrail));
+    if (smartTakesOver) {
+      candidateSl = tightenSl(candidateSl, smartPlan.slPrice);
+      stageLabel = `Stage 5 · ${smartPlan.label}`;
+    } else {
+      candidateSl = tightenSl(candidateSl, tightenSl(t1 > 0 ? t1 : priceAtR(1.0), chandelierTrail));
+    }
   } else if (tp1Touched || peakR >= 1.0) {
     stageCode = 'STAGE_4_TP1_LOCKED';
     // v21.23.7: giveback room ab vol-adaptive (LOW 0.40 / NORMAL 0.45 /
     // HIGH 0.55 / EXTREME 0.65) — floor +0.65R as-is.
     const lockR = Math.max(0.65, +(peakR - profile.stage4GivebackR).toFixed(2));
-    stageLabel = `Stage 4 · TP1 Hit (${Math.round(profile.tp1ClosePct * 100)}% Booked) · SL Auto-Trailed +${lockR}R`;
-    candidateSl = tightenSl(candidateSl, priceAtR(lockR));
+    // v21.24.0 LABEL HONESTY: the old text always said "TP1 Hit (50% Booked)" even
+    // when only peakR>=1.0 triggered the stage; on LIVE the exchange TP/SL closes the
+    // FULL position (no partial exists), so "% Booked" was never true there.
+    const _isLiveRow = String(trade.executionMode || '').toUpperCase() === 'LIVE';
+    const _tp1Txt = tp1Touched
+      ? (_isLiveRow ? 'TP1 Hit (live: full position, no partial)' : `TP1 Hit (${Math.round(profile.tp1ClosePct * 100)}% Booked)`)
+      : 'TP1 pending';
+    if (smartTakesOver) {
+      stageLabel = `Stage 4 · ${_tp1Txt} · ${smartPlan.label}`;
+      candidateSl = tightenSl(candidateSl, smartPlan.slPrice);
+    } else {
+      stageLabel = `Stage 4 · ${_tp1Txt} · SL Auto-Trailed +${lockR}R`;
+      candidateSl = tightenSl(candidateSl, priceAtR(lockR));
+    }
   } else if (peakR >= profile.stage3R) {
     stageCode = 'STAGE_3_PROFIT_RATCHET';
     // v21.23.7: pre-TP1 ratchet giveback bhi vol-scaled (stage3 ≤ stage4 har class me).
-    const lockR = Math.max(0.45, +(peakR - profile.stage3GivebackR).toFixed(2));
-    stageLabel = `Stage 3 · Pre-TP1 Profit Ratchet (+${lockR}R Locked)`;
+    // v21.24.0: ENFORCE -> pre-activation ratchet keeps the stage-2 fee-protected curve
+    // (v1 jumped to >= +0.45R at only +0.85R peak = inside one ATR of noise).
+    const lockR = smartEnforce
+      ? Math.max(0.15, +((peakR - 0.35) * 0.65).toFixed(2))
+      : Math.max(0.45, +(peakR - profile.stage3GivebackR).toFixed(2));
+    stageLabel = smartEnforce
+      ? `Stage 3 · Pre-activation Fee-Protected Trail (+${lockR}R)`
+      : `Stage 3 · Pre-TP1 Profit Ratchet (+${lockR}R Locked)`;
     candidateSl = tightenSl(candidateSl, priceAtR(lockR));
   } else if (peakR >= profile.stage2R) {
     stageCode = 'STAGE_2_BREAKEVEN_PLUS';
@@ -570,7 +631,9 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   // / HIGH 55 / EXTREME 65) AND absolute >= profile.givebackAbsFloorR
   // (LOW 0.25 / NORMAL 0.28 / HIGH 0.38 / EXTREME 0.50R) DONO chahiye.
   // HIGH/EXTREME me ek-candle 45% noise-giveback ab book NAHI karta.
-  const peakPullbackReversal = peakR >= 0.50 && peakGivebackRatio >= (profile.givebackRatioPct / 100) && givebackR >= profile.givebackAbsFloorR && feeCovered;
+  // v21.24.0: when v2 owns the trail, the noise-aware trailed SL handles pullbacks;
+  // the ratio-based "book on 45% giveback" exit was inside the noise band.
+  const peakPullbackReversal = !smartTakesOver && peakR >= 0.50 && peakGivebackRatio >= (profile.givebackRatioPct / 100) && givebackR >= profile.givebackAbsFloorR && feeCovered;
   const trailedSlHit = candidateSl > 0 && (isLong ? ltp <= candidateSl : ltp >= candidateSl);
   const slImproved = candidateSl > 0 && currentSl > 0 && Math.abs(candidateSl - currentSl) > 1e-7 && (isLong ? candidateSl > currentSl : candidateSl < currentSl);
 
@@ -587,7 +650,7 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   // isliye lock ko wide rakhna padta hai) pe lock karo (min +0.15R) —
   // giveback protection WITHOUT closing a potentially-still-strong trend.
   // tightenSl monotonic hai — stage locks isse loose nahi hote.
-  if (reversalRiskHint && feeCovered && peakR >= 0.45) {
+  if (!smartTakesOver && reversalRiskHint && feeCovered && peakR >= 0.45) {
     const hintLockR = Math.max(0.15, +(peakR - profile.hintGivebackR).toFixed(2));
     candidateSl = tightenSl(candidateSl, priceAtR(hintLockR));
     stageLabel = `${stageLabel} · Reversal-Risk Profit-Lock`;
@@ -675,6 +738,24 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     momentumState,
     atrPct: profile.atrPct ?? (Number(trade.atrPct) > 0 ? Number(trade.atrPct) : null),
     t1ClosePct: profile.tp1ClosePct,
+    // v21.24.0 SMART TRAIL v2 telemetry (shadow = report only, enforce = acted on)
+    trailEngine: smartTakesOver ? 'v2' : 'v1',
+    t2Extended,
+    t2Extensions: (Number(trade.t2Extensions) || 0) + (t2Extended ? 1 : 0),
+    smartTrail: smartCfg ? {
+      mode: smartMode,
+      active: Boolean(smartPlan?.active),
+      slPrice: smartPlan?.slPrice ?? null,
+      lockR: smartPlan?.lockR ?? null,
+      noiseR: smartPlan?.noiseR ?? null,
+      tierFrac: smartPlan?.tierFrac ?? null,
+      engineSl: +candidateSl.toFixed(6),
+      // Honest comparison field: only meaningful when v1 actually decided
+      // (off/shadow). In enforce the engine SL is the v2 SL — never label it v1.
+      v1Sl: smartEnforce ? null : +candidateSl.toFixed(6),
+      wouldExtendT2: smartExt ? smartExt.newT2 : null,
+      wouldExtendBeforeTarget: smartExtBeforeTarget,
+    } : null,
     checkedAt: Date.now(),
   };
 }
@@ -864,6 +945,60 @@ function _openLinked() {
   const cfg = loadMtfAutoConfig();
   return _loadState().book.filter(b => isGenuinelyTradedEntry(b, cfg));
 }
+/**
+ * Lightweight open-count used by background loops. Deliberately does NOT run
+ * the deep monitor: the old `mtfAutoStatus()?.openCount` call evaluated every
+ * position with a stale book LTP and could persist a rolling-TP2 extension
+ * before the fresh-quote pass had a chance to act on it.
+ */
+export function mtfAutoOpenCount(market = null) {
+  const open = _openLinked();
+  if (market == null) return open.length;
+  const m = String(market).toUpperCase();
+  return open.filter(b => String(b.market || b.execMarket || '').toUpperCase() === m).length;
+}
+
+/**
+ * Lightweight open-book projection for background loops that only need
+ * symbol/market (direction-lock sweep, fast entry probe). Runs the same
+ * genuine-entry filter as mtfAutoOpenCount, but never the deep monitor.
+ */
+export function mtfAutoOpenRows() {
+  return _openLinked().map(b => ({
+    symbol: b.symbol,
+    market: b.market,
+    execMarket: b.execMarket,
+    side: b.side,
+    status: b.status,
+  }));
+}
+
+/**
+ * Acknowledge that the current target2 is now live on the exchange. Only
+ * clears `tpSyncPending`; a stale acknowledgement (target moved meanwhile)
+ * is refused so a failed exchange call can never mask a newer target.
+ */
+export function markAutoTradeTpSynced({ symbol = null, paperId = null, t2 = null, exchange = false } = {}) {
+  const st = _loadState();
+  const wantT2 = Number(t2);
+  const sym = String(symbol || '').toUpperCase();
+  const b = st.book.find((x) => {
+    if (x.status !== 'OPEN') return false;
+    if (paperId != null && x.paperId != null && String(x.paperId) === String(paperId)) return true;
+    return Boolean(sym) && String(x.symbol || '').toUpperCase() === sym;
+  });
+  if (!b) return { ok: false, error: 'open trade not found' };
+  const currentT2 = Number(b.t2);
+  if (wantT2 > 0 && currentT2 > 0 && Math.abs(currentT2 - wantT2) > 1e-9) {
+    return { ok: false, error: 'target moved since sync request', target2: currentT2 };
+  }
+  if (exchange) b.lastExchangeTp = wantT2 > 0 ? wantT2 : (currentT2 > 0 ? currentT2 : null);
+  b.tpSyncPending = false;
+  b.lastTpSyncAt = Date.now();
+  _persistState();
+  return { ok: true, trade: b };
+}
+
 function _openNotionalINR() {
   return _openLinked().reduce((a, b) => a + (Number(b.notional) || 0), 0);
 }
@@ -1015,6 +1150,8 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
       peakPrice: isLong ? Math.max(entry, ltp) : Math.min(entry, ltp),
       t1,
       t2,
+      lastExchangeTp: null,   // adopted position: exchange TP not verified
+      tpSyncPending: false,
       qty,
       leverage,
       walletINR: Math.round(wDeploy.walletTotalINR),
@@ -1335,6 +1472,8 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
       mode: b.mode || cfg.mode || 'INTRADAY', holdMin: b.holdMin || cfg.holdMin || null,
       entry: finalEntry, stopLoss: finalSl, initialStopLoss: finalSl, trailedStopLoss: finalSl, peakPrice: finalEntry,
       t1: finalT1, t2: finalT2, qty: finalQty,
+      lastExchangeTp: liveOrderResult?.ok ? finalT2 : null,
+      tpSyncPending: false,
       leverage, walletINR: Math.round(effectiveWalletINR),
       walletDeployPct: w95.walletDeployPct,
       deployedWalletINR: w95.deployedWalletINR,
@@ -1566,11 +1705,55 @@ export async function mtfAutoTick(p = {}) {
           if (slDeltaPct >= 0.0005) {
             try {
               const slRes = await p.liveUpdateSl({ ...b, stopLoss: deepEval.trailedStopLoss, takeProfit: b.t2 });
-              if (slRes?.ok) b.lastExchangeSl = deepEval.trailedStopLoss;
+              if (slRes?.ok) {
+                b.lastExchangeSl = deepEval.trailedStopLoss;
+                // This call carried takeProfit too — the target is now armed.
+                if (Number(b.t2) > 0) b.lastExchangeTp = b.t2;
+                b.tpSyncPending = false;
+              }
             } catch { /* non-fatal */ }
           }
         }
         _logEvent('sl-trail', `🛡️ DEEP MONITOR SL TRAILED ${b.symbol} (${b.side}): SL ${prevSl} → ${deepEval.trailedStopLoss} [${deepEval.stageLabel}] @ LTP ${rawQuote} (${deepEval.currentR >= 0 ? '+' : ''}${deepEval.currentR}R)`);
+      }
+
+      // v21.24.0 SMART TRAIL v2 telemetry + ROLLING TP2 (enforce only moves the target).
+      b.smartTrail = deepEval.smartTrail || null;
+      const isLiveTpRow = b.executionMode === 'LIVE' && !(b.market === 'INDIA' || b.execMarket === 'INDIA');
+      if (deepEval.t2Extended && Number(deepEval.t2) > 0) {
+        const prevT2 = b.t2;
+        b.t2 = deepEval.t2;
+        b.t2Extensions = deepEval.t2Extensions;
+        b.lastTpExtendAt = now;
+        if (isLiveTpRow) b.tpSyncPending = true;
+        if (livePaper?.id != null && typeof paper.updatePaperTradeTarget2 === 'function') {
+          try { paper.updatePaperTradeTarget2(livePaper.id, deepEval.t2); } catch { /* non-fatal */ }
+        }
+        if (isLiveTpRow && typeof p.liveUpdateSl === 'function') {
+          try {
+            const tpRes = await p.liveUpdateSl({ ...b, stopLoss: b.trailedStopLoss ?? b.stopLoss, takeProfit: b.t2 });
+            if (tpRes?.ok) {
+              b.lastExchangeTp = b.t2;
+              b.tpSyncPending = false;
+              // The same call also re-armed the SL — record it so the next tick
+              // does not issue a redundant SL sync.
+              if (Number(b.trailedStopLoss ?? b.stopLoss) > 0) b.lastExchangeSl = b.trailedStopLoss ?? b.stopLoss;
+            }
+          } catch { /* non-fatal — pending retry below / 3s loop re-pushes TP */ }
+        }
+        _logEvent('tp-extend', `🎯 SMART TRAIL v2 ROLLING TP2 ${b.symbol} (${b.side}): T2 ${prevT2} → ${b.t2} [#${b.t2Extensions}] @ LTP ${rawQuote} (${deepEval.currentR >= 0 ? '+' : ''}${deepEval.currentR}R · SL ${b.trailedStopLoss ?? b.stopLoss} locked)`);
+      } else if (b.tpSyncPending && isLiveTpRow && typeof p.liveUpdateSl === 'function') {
+        // A previous extension failed (or the 3s loop was unavailable). Retry
+        // until the exchange confirms — never leave a stale native TP armed.
+        try {
+          const tpRes = await p.liveUpdateSl({ ...b, stopLoss: b.trailedStopLoss ?? b.stopLoss, takeProfit: b.t2 });
+          if (tpRes?.ok) {
+            b.lastExchangeTp = b.t2;
+            b.tpSyncPending = false;
+            if (Number(b.trailedStopLoss ?? b.stopLoss) > 0) b.lastExchangeSl = b.trailedStopLoss ?? b.stopLoss;
+            _logEvent('tp-sync', `🎯 SMART TRAIL v2 TP SYNC RECOVERED ${b.symbol} (${b.side}): exchange TP re-armed at ${b.t2} [#${b.t2Extensions || 0}]`);
+          }
+        } catch { /* non-fatal — next tick retries */ }
       }
 
       const revEval = revByRow ? evaluateFeeAwareReversalExit({
@@ -2180,6 +2363,10 @@ export async function mtfAutoTick(p = {}) {
         score: row.superScore, tier: row.tier, mode: row.mode, holdMin: row.holdMin,
         entry: finalEntry, stopLoss: finalSl, initialStopLoss: finalSl, trailedStopLoss: finalSl, peakPrice: finalEntry,
         t1: finalT1, t2: finalT2, qty: finalQty,
+        // Entry-armed exchange TP (createFuturesTpsl gets target2). Kept as the
+        // "last confirmed" marker so rolling-TP2 retries can compare against it.
+        lastExchangeTp: liveOrderResult?.ok ? finalT2 : null,
+        tpSyncPending: false,
         leverage, walletINR: Math.round(effectiveWalletINR),
         walletDeployPct: w95.walletDeployPct,
         deployedWalletINR: finalDeployedINR,
@@ -2236,14 +2423,18 @@ export async function mtfAutoTick(p = {}) {
  * (used by mtfAutoStatus, SIGNAL RECHECK — 15s LIVE WATCH, MTFDualBoardPanel, and Telegram Bot).
  * Strictly filters out any untraded fallback entries ("entry without traded").
  */
-export function getActiveAutoTradesDeepMonitor(liveQuotes = {}) {
+export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
   const cfg = loadMtfAutoConfig();
   const open = _openLinked().filter(b => isGenuinelyTradedEntry(b, cfg));
+  const allowTpExtension = opts.allowTpExtension !== false;
   let bookUpdated = false;
   const rows = open.map((b) => {
-    const qRaw = liveQuotes?.[`${b.execMarket || b.market}|${b.symbol}`] ?? liveQuotes?.[b.symbol] ?? b.ltp ?? b.entry;
-    const rawLtp = typeof qRaw === 'object' ? Number(qRaw?.price ?? qRaw?.ltp ?? b.entry) : Number(qRaw || b.entry);
     const entryPx = Number(b.entry) || 0;
+    const quoteRaw = liveQuotes?.[`${b.execMarket || b.market}|${b.symbol}`] ?? liveQuotes?.[b.symbol];
+    const quotePx = typeof quoteRaw === 'object' ? Number(quoteRaw?.price ?? quoteRaw?.ltp) : Number(quoteRaw);
+    const hasFreshQuote = quotePx > 0 && (!(entryPx > 0) || (quotePx / entryPx >= 0.35 && quotePx / entryPx <= 2.85));
+    const qRaw = quoteRaw ?? b.ltp ?? b.entry;
+    const rawLtp = typeof qRaw === 'object' ? Number(qRaw?.price ?? qRaw?.ltp ?? b.entry) : Number(qRaw || b.entry);
     const ltp = (rawLtp > 0 && (!(entryPx > 0) || (rawLtp / entryPx >= 0.35 && rawLtp / entryPx <= 2.85)))
       ? rawLtp
       : (Number(b.ltp) > 0 ? Number(b.ltp) : entryPx);
@@ -2253,6 +2444,9 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}) {
     const mon = evaluateActiveTradeDeepMonitor(b, {
       ltp,
       boardRow: _snapshotRowFor(b.symbol, Date.now()),
+      // A fallback/stale book LTP may keep SL telemetry alive, but it must
+      // NEVER move TP2 — only a real, sanity-checked quote can extend.
+      allowTpExtension: allowTpExtension && hasFreshQuote,
     });
     // v21.22.0 ULTRA-FAST REALTIME SL RATCHET PERSISTENCE:
     // Persist peakPrice and ratcheted trailedStopLoss directly onto `_state.book`
@@ -2273,6 +2467,19 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}) {
         b.t1Hit = true;
         bookUpdated = true;
       }
+      // v21.24.0 ROLLING TP2 (3s status loop): persist so the next tick starts from the new target.
+      if (mon.t2Extended && mon.t2 > 0) {
+        b.t2 = mon.t2;
+        b.t2Extensions = mon.t2Extensions;
+        b.lastTpExtendAt = Date.now();
+        // LIVE exchange TP must be re-armed. Keep this pending until the 3s/15s
+        // loop gets an explicit {ok:true} from the exchange — a failed call must
+        // not leave the native TP stranded at the old target. INDIA rows have no
+        // CoinDCX native TP, so they never enter the retry path.
+        if (b.executionMode === 'LIVE' && !(b.market === 'INDIA' || b.execMarket === 'INDIA')) b.tpSyncPending = true;
+        bookUpdated = true;
+      }
+      b.smartTrail = mon.smartTrail || null;
       b.currentR = mon.currentR;
       b.peakR = mon.peakR;
       b.deepMonitorStage = mon.stageCode;
@@ -2298,6 +2505,10 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}) {
       mode: b.mode,
       holdMin: b.holdMin,
       openedAt: b.openedAt,
+      // Rolling-TP2 sync state: routes' 3s loop retries the exchange update
+      // until this clears (never trusts a failed call).
+      tpSyncPending: b.tpSyncPending === true,
+      lastExchangeTp: b.lastExchangeTp ?? null,
     };
   });
   if (bookUpdated) _persistState();
@@ -2317,7 +2528,11 @@ export function mtfAutoStatus(liveQuotes = {}) {
   const st = _loadState();
   const open = _openLinked();
   const w95 = computeWallet95Deployment({ walletINR: cfg.walletAmountINR, deployPct: cfg.walletDeployPct ?? 100, cfg });
-  const deepMonitor = getActiveAutoTradesDeepMonitor(liveQuotes);
+  // Extension needs a real quote snapshot. Calls without quotes (toggle,
+  // preview, session-lock checks) must not move a live target off stale LTP.
+  const deepMonitor = getActiveAutoTradesDeepMonitor(liveQuotes, {
+    allowTpExtension: Boolean(liveQuotes && Object.keys(liveQuotes).length),
+  });
   return {
     ok: true,
     // Persistence provenance — 'false' means config/state came from defaults
@@ -2453,6 +2668,11 @@ export function recordLiveMtfBoardTrade(item = {}) {
     }
     if (Number(item.t1) > 0) existing.t1 = Number(item.t1);
     if (Number(item.t2) > 0) existing.t2 = Number(item.t2);
+    // The re-anchored order carries its own native TP. Reset the rolling-TP2
+    // sync state so a stale "pending" flag from the previous lifecycle cannot
+    // re-arm an old target on the new position.
+    existing.tpSyncPending = false;
+    existing.lastExchangeTp = execMode === 'LIVE' && Number(existing.t2) > 0 ? Number(existing.t2) : null;
     if (Number(item.leverage) > 0) existing.leverage = Number(item.leverage);
     if (Number(item.walletINR) > 0) existing.walletINR = Math.round(Number(item.walletINR));
     if (Number(item.deployedWalletINR) > 0) existing.deployedWalletINR = Number(item.deployedWalletINR);
@@ -2502,6 +2722,8 @@ export function recordLiveMtfBoardTrade(item = {}) {
     peakPrice: entry,
     t1,
     t2,
+    lastExchangeTp: execMode === 'LIVE' && t2 > 0 ? t2 : null,
+    tpSyncPending: false,
     qty,
     leverage,
     walletINR: Math.round(w95.walletTotalINR),
