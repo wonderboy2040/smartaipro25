@@ -21,6 +21,17 @@
 //   6. buildTickStoreResolver — tick-store key mapping + staleness.
 // ============================================================
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+// v21.24.0 TEST ISOLATION: signalRecheck's 15s tick pins OPEN auto trades via
+// getActiveAutoTradesDeepMonitor() — bina isolate kiye ye REAL server/data
+// book padhta tha (production XRP row) aur test ka PENDING verdict badal
+// deta tha. Apna temp data dir = hermetic.
+const TMP_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'signal-recheck-test-'));
+process.env.MTF_AUTO_DATA_DIR = TMP_DATA;
+
 import {
   selectWatchlist, recheckRow, detectTransition, priceStateTransition,
   formatRecheckEvent, recheckTick, signalRecheckStatus, startSignalRecheckLoop,

@@ -214,7 +214,8 @@ import { dhanConnect, dhanDisconnect, dhanConnected, dhanProfile, scripMasterSta
 import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 // v21.16.0 + v21.20.0 MTF SIGNALS BOARD (Dual-Timeframe) + AUTO-LINK engine
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, mtfProEntryGate, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
-import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced } from './mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced } from './mtfAutoLink.js';
+import { buildPhase0Audit, getPhase0Summary } from './phase0Audit.js';
 // v21.23.1: cross-engine direction-lock release-on-close sweeper (directionLock.js)
 import { acquireDirectionLock, checkDirectionLock, reconcileDirectionLocks } from './directionLock.js';
 // v21.23.4: runtime direction certificate (user demand: "accurately fix
@@ -1470,13 +1471,30 @@ export function registerAITradingRoutes(app, deps) {
     return _statusSyncP;
   }
 
+  // v21.24.0 PHASE 0 — full canonical audit (closed outcomes + stop integrity
+  // + duplicate/manual-exit/reconciliation checks). `?fresh=1` bypasses the
+  // 30s cache; normal dashboard polls ride the cache via /status.phase0.
+  app.get('/api/ai/mtf-auto/phase0', (req, res) => {
+    try {
+      const fresh = String(req.query?.fresh || '') === '1';
+      res.set('Cache-Control', 'no-store');
+      res.json(buildPhase0Audit({ fresh }));
+    } catch (e) {
+      jsonError(res, 500, 'phase0 audit failed', e);
+    }
+  });
+
   app.get('/api/ai/mtf-auto/status', async (_req, res) => {
     try {
       const cfg = loadMtfAutoConfig();
       const hasCreds = Boolean(loadCredsForOrder());
+      let liveWalletINR = null;
       if (hasCreds) {
         try {
           const liveCtx = await mtfAutoLiveCtx(cfg);
+          // v21.24.0 PHASE 0 WALLET HONESTY: caps/95-deployment display ke
+          // liye actual live wallet — entry sizing pehle se isi ko use karta hai.
+          if (Number(liveCtx?.walletEquityINR) > 0) liveWalletINR = Number(liveCtx.walletEquityINR);
           await syncLiveThrottled(liveCtx);  // A2: throttled instead of direct
         } catch { /* non-fatal */ }
       }
@@ -1496,12 +1514,15 @@ export function registerAITradingRoutes(app, deps) {
           }
         }
       } catch { /* non-fatal */ }
-      const st = mtfAutoStatus(combinedQuotes);
+      const st = mtfAutoStatus(combinedQuotes, { walletINR: liveWalletINR });
       const routeCfg = loadMtfAutoConfig();
       const ready = mtfAutoReadiness(routeCfg);
       res.set('Cache-Control', 'no-store');
       res.json({
         ...st,
+        // v21.24.0 PHASE 0 — lightweight audit summary (30s cache; heavy
+        // detail /api/ai/mtf-auto/phase0 se milta hai).
+        phase0: getPhase0Summary(),
         siteLiveActive: ready.siteLiveActive,
         siteLiveByDesk: ready.siteLiveByDesk,
         deskReady: ready.deskReady,
@@ -3518,7 +3539,15 @@ export function registerAITradingRoutes(app, deps) {
         if (tr.t2 > 0 && (tr.executionMode === 'PAPER' || tr.paperId != null)) {
           try { updatePaperTradeTarget2(tr.paperId ?? tr.symbol, tr.t2, tr.execMarket || tr.market || null); } catch { /* non-fatal */ }
         }
-        if ((!tr.slTrailed && !tr.t2Extended && !tr.tpSyncPending) || !(tr.trailedStopLoss > 0)) continue;
+        // v21.24.0 STOP-INTEGRITY: sirf transition-flag par bharosa mat karo.
+        // Exchange par armed SL (lastExchangeSl, ya legacy rows ke liye
+        // initialStopLoss) aur book ke trailed SL ka gap har pass compare
+        // hota hai — restart ke baad bhi stale native SL silently nahi rehta.
+        const bookSl = Number(tr.trailedStopLoss ?? tr.stopLoss) || 0;
+        const anchorSl = Number(tr.lastExchangeSl) || Number(tr.initialStopLoss) || 0;
+        const slDiverged = bookSl > 0 && anchorSl > 0 && Math.abs(bookSl - anchorSl) / anchorSl >= 0.0005;
+        const slNeedsSync = Boolean(tr.slSyncPending) || slDiverged;
+        if ((!tr.slTrailed && !tr.t2Extended && !tr.tpSyncPending && !slNeedsSync) || !(tr.trailedStopLoss > 0)) continue;
         if (tr.executionMode === 'LIVE' && loadCredsForOrder()) {
           const lastSync = _lastCoinDcxSlSyncAt.get(tr.symbol) || 0;
           if (Date.now() - lastSync >= 4500) {
@@ -3547,6 +3576,9 @@ export function registerAITradingRoutes(app, deps) {
             // native TP stranded at the old target.
             if (syncRes?.ok) {
               markAutoTradeTpSynced({ symbol: tr.symbol, paperId: tr.paperId, t2: tr.t2, exchange: true });
+              // The same exchange call re-armed the SL — stamp it so the
+              // divergence check above stops firing on every pass.
+              markAutoTradeSlSynced({ symbol: tr.symbol, paperId: tr.paperId, stopLoss: tr.trailedStopLoss, exchange: true });
             }
           }
         }

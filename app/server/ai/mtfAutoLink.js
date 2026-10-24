@@ -90,6 +90,19 @@ const TIME_STOP_GRACE_MS = 4 * 60_000; // watcher ko SL/T1/T2 ka mauka do
 
 export const MTF_AUTO_DEFAULTS = {
   enabled: false,                  // opt-in — default OFF (paper only)
+  // v21.24.0 PHASE 0 [LIVE ENTRY PAUSE]: existing LIVE positions ka deep
+  // monitor / exchange SL sync CHALTA rehta hai — sirf NAYE live entries aur
+  // UC flip-reverse entries rukte hain. `executionMode` ko chhedne ki zaroorat
+  // nahi (paper kar dene se open LIVE position ka management bhi badal jata).
+  liveEntryPaused: false,
+  // v21.24.0 PHASE 0 [RISK CAPS]: 0 = legacy behaviour (backward compatible);
+  // production config me 1% target / 2% hard cap / 5x max leverage /
+  // 25% max wallet deploy / 1.5% daily loss stop explicitly set hote hain.
+  riskPerTradePct: 0,              // target % of live wallet per trade (0 = off)
+  maxRiskPerTradePct: 2,           // HARD ceiling jab pct-based risk active ho
+  maxLeverage: 0,                  // 0 = wallet-tier leverage as-is; >0 = hard cap
+  maxWalletDeployPct: 0,           // 0 = config walletDeployPct as-is; >0 = hard cap
+  dailyLossPct: 0,                 // 0 = off; >0 = new-entry stop after -X% day
   mode: 'INTRADAY',                // dual-TF mode: INTRADAY (15m→5m) | SWING (1h→15m) | SCALP (5m→1m)
   holdMin: null,                   // null → mode ka default (INTRADAY 45 / SWING 120 / SCALP 20)
   minScore: 75,                    // user spec: 75+ ACTION/STRONG
@@ -139,6 +152,11 @@ const UC_FLIP_MIN_AGE_MS_PAPER = 30_000;  // paper: thoda kam strict
 const CLAMPS = {
   minScore: [Number(SUPER_TIERS.ACTION), 95],
   riskPerTradeINR: [100, 25000],
+  riskPerTradePct: [0, 2],
+  maxRiskPerTradePct: [0.1, 2],
+  maxLeverage: [0, 20],
+  maxWalletDeployPct: [0, 100],
+  dailyLossPct: [0, 10],
   maxPositionsINR: [1000, 1000000],
   maxNotionalPerTradeINR: [1000, 500000],
   maxTradesPerDay: [1, 25],
@@ -274,6 +292,7 @@ function _sanitizeCfg(cfg) {
   out.timeStopEnabled = cfg.timeStopEnabled !== false;
   out.executionMode = String(cfg.executionMode || 'paper').toLowerCase() === 'live' ? 'live' : 'paper';
   out.autoSyncSiteLive = cfg.autoSyncSiteLive !== false;
+  out.liveEntryPaused = cfg.liveEntryPaused === true;
   out.feeAwareReversalExit = cfg.feeAwareReversalExit !== false;
   out.deepMonitorEnabled = cfg.deepMonitorEnabled !== false;
   // v21.23.8: UC FLIP-AND-REVERSE — default ON; config se OFF ho sakta hai
@@ -294,6 +313,65 @@ export function computeMtfWalletLeverage(walletINR, cfg = MTF_AUTO_DEFAULTS) {
     belowLev: cfg?.belowTenKLeverage ?? 10,
     aboveLev: cfg?.aboveTenKLeverage ?? 5,
   });
+}
+
+/**
+ * v21.24.0 PHASE 0 — single source of truth for EFFECTIVE risk caps.
+ * Sab entry paths (normal + UC flip-reverse) aur status isi se sizing karte
+ * hain, taaki UI/config/audit me ek hi number dikhe.
+ *
+ *   riskPerTradePct 0  → pct cap OFF, legacy riskPerTradeINR budget
+ *   maxRiskPerTradePct → hard ceiling (default 2%) jab pct cap active ho
+ *   maxLeverage 0      → wallet-tier leverage as-is
+ *   maxWalletDeployPct 0 → configured walletDeployPct as-is
+ *   dailyLossPct 0     → daily loss stop OFF
+ */
+export function computeEffectiveRiskCaps(cfg = MTF_AUTO_DEFAULTS, walletINR = null) {
+  const wallet = Number(walletINR) > 0
+    ? Number(walletINR)
+    : (Number(cfg?.walletAmountINR) > 0 ? Number(cfg.walletAmountINR) : 10000);
+  const targetPct = clampN(cfg?.riskPerTradePct, 0, 2, 0);
+  const hardPct = clampN(cfg?.maxRiskPerTradePct, 0.1, 2, 2);
+  const activePct = targetPct > 0 ? Math.min(targetPct, hardPct) : 0;
+  // Half-up paisa rounding: `(wallet * pct/100).toFixed(2)` can round DOWN on
+  // binary-FP artefacts (₹1385 × 1.5% = 20.775 → "20.77"). Money caps must
+  // never under-round, so multiply first and round at the paisa level.
+  const riskCapINR = activePct > 0 ? Math.round(wallet * activePct) / 100 : null;
+  const configuredRisk = clampN(cfg?.riskPerTradeINR, 100, 25000, 2000);
+  const effectiveRiskINR = riskCapINR != null
+    ? Math.min(configuredRisk, riskCapINR)
+    : configuredRisk;
+
+  const tierLeverage = computeMtfWalletLeverage(wallet, cfg);
+  const levCap = clampN(cfg?.maxLeverage, 0, 20, 0);
+  const effectiveLeverage = levCap > 0 ? Math.min(tierLeverage, levCap) : tierLeverage;
+
+  const configuredDeploy = clampN(cfg?.walletDeployPct ?? 100, 10, 100, 100);
+  const deployCap = clampN(cfg?.maxWalletDeployPct, 0, 100, 0);
+  const effectiveWalletDeployPct = deployCap > 0
+    ? Math.min(configuredDeploy, deployCap)
+    : configuredDeploy;
+
+  const dailyLossPct = clampN(cfg?.dailyLossPct, 0, 10, 0);
+  const dailyLossCapINR = dailyLossPct > 0 ? Math.round(wallet * dailyLossPct) / 100 : null;
+
+  return {
+    walletINR: +wallet.toFixed(2),
+    riskPerTradePct: targetPct,
+    maxRiskPerTradePct: hardPct,
+    activeRiskPct: activePct,
+    riskCapINR,
+    riskPerTradeINR: configuredRisk,
+    effectiveRiskINR: +effectiveRiskINR.toFixed(2),
+    tierLeverage,
+    maxLeverage: levCap,
+    effectiveLeverage,
+    walletDeployPctConfigured: configuredDeploy,
+    maxWalletDeployPct: deployCap,
+    effectiveWalletDeployPct,
+    dailyLossPct,
+    dailyLossCapINR,
+  };
 }
 
 /**
@@ -765,7 +843,7 @@ export function updateMtfAutoConfig(patch = {}) {
   _cfg = next;
   _cfgSavedAt = Date.now();
   _save(CFG_FILE(), { ...next, updatedAt: _cfgSavedAt });
-  _logEvent('config', `config updated — ${JSON.stringify({ enabled: next.enabled, mode: next.mode, minScore: next.minScore, riskPerTradeINR: next.riskPerTradeINR, maxPositionsINR: next.maxPositionsINR, maxTradesPerDay: next.maxTradesPerDay })}`);
+  _logEvent('config', `config updated — ${JSON.stringify({ enabled: next.enabled, liveEntryPaused: next.liveEntryPaused, mode: next.mode, minScore: next.minScore, riskPerTradeINR: next.riskPerTradeINR, riskPerTradePct: next.riskPerTradePct, maxLeverage: next.maxLeverage, maxWalletDeployPct: next.maxWalletDeployPct, dailyLossPct: next.dailyLossPct, maxPositionsINR: next.maxPositionsINR, maxTradesPerDay: next.maxTradesPerDay })}`);
   return next;
 }
 
@@ -1028,11 +1106,57 @@ export function markAutoTradeTpSynced({ symbol = null, paperId = null, t2 = null
   return { ok: true, trade: b };
 }
 
+/**
+ * v21.24.0 STOP-INTEGRITY: acknowledge that the book's trailed SL is now
+ * armed on the exchange. A stale ack (book SL moved meanwhile) is refused, so
+ * a slow exchange response can never mask a newer, tighter trail.
+ */
+export function markAutoTradeSlSynced({ symbol = null, paperId = null, stopLoss = null, exchange = false } = {}) {
+  const st = _loadState();
+  const sym = String(symbol || '').toUpperCase();
+  const b = st.book.find((x) => {
+    if (x.status !== 'OPEN') return false;
+    if (paperId != null && x.paperId != null && String(x.paperId) === String(paperId)) return true;
+    return Boolean(sym) && String(x.symbol || '').toUpperCase() === sym;
+  });
+  if (!b) return { ok: false, error: 'open trade not found' };
+  const wantSl = Number(stopLoss);
+  const bookSl = Number(b.trailedStopLoss ?? b.stopLoss);
+  if (wantSl > 0 && bookSl > 0 && Math.abs(bookSl - wantSl) / bookSl > 0.0005) {
+    return { ok: false, error: 'stop moved since sync request', trailedStopLoss: bookSl };
+  }
+  if (exchange) b.lastExchangeSl = wantSl > 0 ? wantSl : (bookSl > 0 ? bookSl : null);
+  b.slSyncPending = false;
+  b.lastSlSyncAt = Date.now();
+  _persistState();
+  return { ok: true, trade: b };
+}
+
 function _openNotionalINR(liveOnly = false) {
   const open = _openLinked();
   const rows = liveOnly ? open.filter(isLiveSessionEntry) : open;
   return rows.reduce((a, b) => a + (Number(b.notional) || 0), 0);
 }
+
+/**
+ * v21.24.0 PHASE 0 — realized PnL for a desk's OWN current trade-day.
+ * Book rows already carry `dayKey` (INDIA=IST / CRYPTO=UTC), so a quota reset
+ * can never mix yesterday's loss into today's cap (or vice versa).
+ */
+function _dailyRealizedPnlForMarket(market, liveOnly = false, now = Date.now()) {
+  const m = String(market || '').toUpperCase();
+  if (!m) return 0;
+  const dk = dayKeyFor(m, new Date(now));
+  return _loadState().book.reduce((sum, b) => {
+    if (String(b.status || '').toUpperCase() !== 'CLOSED') return sum;
+    if (String(b.market || '').toUpperCase() !== m) return sum;
+    if (b.dayKey !== dk) return sum;
+    if (liveOnly && !isLiveSessionEntry(b)) return sum;
+    const pnl = Number(b.pnl);
+    return Number.isFinite(pnl) ? sum + pnl : sum;
+  }, 0);
+}
+
 /**
  * v21.23.6: last SUCCESSFUL close epoch (persisted book se — restart-safe).
  * Successful = net pnl > 0 YA exchange ne position band ki jab wo >=0.5R
@@ -1339,6 +1463,13 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     // ke liye site-live hone se relaxed live quota / LIVE order dono galat hain.
     const priorWasLive = b.executionMode === 'LIVE' || Boolean(b.livePositionId) || Boolean(b.liveOrderId);
 
+    // v21.24.0 PHASE 0: LIVE entries paused → protective exit ho sakta hai,
+    // par naya reverse LIVE entry NAHI. Existing position management intact.
+    if (cfg?.liveEntryPaused === true && priorWasLive) {
+      _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: LIVE entries paused (Phase 0) — protective exit only`);
+      return null;
+    }
+
     // v21.23.14 [REVERSE-ENTRY PARITY]: a protective exit may use an
     // opposite row, but a NEW reverse position must clear the same hard
     // readiness gates as a manual/auto entry. Unverified / ensemble-warming /
@@ -1398,8 +1529,20 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     const entry = ticket.entry;
     const riskPerUnit = ticket.riskUnit;
 
+    // v21.24.0 PHASE 0 risk caps — normal entry path ke SAME contract se.
+    const effectiveWalletINR = Number(p.walletEquityINR) > 0 ? Number(p.walletEquityINR) : Number(cfg.walletAmountINR) || 10000;
+    const riskCaps = computeEffectiveRiskCaps(cfg, effectiveWalletINR);
+    const dailyLossCapINR = riskCaps.dailyLossCapINR;
+    if (dailyLossCapINR != null) {
+      const realized = _dailyRealizedPnlForMarket(execMarket === 'INDIA' ? 'INDIA' : 'CRYPTO', flipLiveSession, now);
+      if (realized <= -dailyLossCapINR) {
+        _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: daily loss stop hit (${realized.toFixed(2)} <= -${dailyLossCapINR})`);
+        return null;
+      }
+    }
+
     // qty: risk-based sizing (wahi math jo normal entry path use karta hai)
-    const riskBudget = isUsd ? cfg.riskPerTradeINR / fxRate : cfg.riskPerTradeINR;
+    const riskBudget = isUsd ? riskCaps.effectiveRiskINR / fxRate : riskCaps.effectiveRiskINR;
     let qty = isUsd ? Math.floor((riskBudget / riskPerUnit) * 10000) / 10000 : Math.floor(riskBudget / riskPerUnit);
     const notionalCapINR = Math.min(cfg.maxNotionalPerTradeINR, cfg.maxPositionsINR - _openNotionalINR(flipLiveSession));
     const capQty = isUsd ? (notionalCapINR / fxRate) / entry : notionalCapINR / entry;
@@ -1410,9 +1553,8 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
       return null;
     }
 
-    const effectiveWalletINR = Number(p.walletEquityINR) > 0 ? Number(p.walletEquityINR) : Number(cfg.walletAmountINR) || 10000;
-    const leverage = isSim ? 1 : computeMtfWalletLeverage(effectiveWalletINR, cfg);
-    const w95 = computeWallet95Deployment({ walletINR: effectiveWalletINR, leverage, fxRate, deployPct: cfg.walletDeployPct ?? 100, cfg });
+    const leverage = isSim ? 1 : riskCaps.effectiveLeverage;
+    const w95 = computeWallet95Deployment({ walletINR: effectiveWalletINR, leverage, fxRate, deployPct: riskCaps.effectiveWalletDeployPct, cfg });
     const feeBePrice = feeBreakevenFloor({ entry, side, market: execMarket });
 
     // v21.23.7 ENTRY-STAMP parity: vol class + TP1 partial % flip entry par bhi
@@ -1511,6 +1653,10 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
       entry: finalEntry, stopLoss: finalSl, initialStopLoss: finalSl, trailedStopLoss: finalSl, peakPrice: finalEntry,
       t1: finalT1, t2: finalT2, qty: finalQty,
       lastExchangeTp: liveOrderResult?.ok ? finalT2 : null,
+      // v21.24.0 STOP-INTEGRITY anchor: entry-arming ne yahi SL exchange par
+      // arm kiya tha — 3s divergence check isi ke against compare karta hai.
+      lastExchangeSl: liveOrderResult?.ok ? finalSl : null,
+      slSyncPending: false,
       tpSyncPending: false,
       leverage, walletINR: Math.round(effectiveWalletINR),
       walletDeployPct: w95.walletDeployPct,
@@ -1752,13 +1898,13 @@ export async function mtfAutoTick(p = {}) {
           livePaper.t1ClosePct = deepEval.t1ClosePct;
         } catch { /* non-fatal */ }
       }
+      const isLiveTpRow = b.executionMode === 'LIVE' && !(b.market === 'INDIA' || b.execMarket === 'INDIA');
       if (deepEval.slTrailed && deepEval.trailedStopLoss > 0) {
         const prevSl = b.trailedStopLoss ?? b.stopLoss;
         b.trailedStopLoss = deepEval.trailedStopLoss;
         b.stopLoss = deepEval.trailedStopLoss;
         if (livePaper) livePaper.stopLoss = deepEval.trailedStopLoss;
-        const indiaDeskRow = b.market === 'INDIA' || b.execMarket === 'INDIA';
-        if (!indiaDeskRow && b.executionMode === 'LIVE' && typeof p.liveUpdateSl === 'function') {
+        if (isLiveTpRow && typeof p.liveUpdateSl === 'function') {
           const lastSyncSl = Number(b.lastExchangeSl) || 0;
           const slDeltaPct = lastSyncSl > 0 ? Math.abs(deepEval.trailedStopLoss - lastSyncSl) / lastSyncSl : 1;
           if (slDeltaPct >= 0.0005) {
@@ -1769,16 +1915,41 @@ export async function mtfAutoTick(p = {}) {
                 // This call carried takeProfit too — the target is now armed.
                 if (Number(b.t2) > 0) b.lastExchangeTp = b.t2;
                 b.tpSyncPending = false;
+                b.slSyncPending = false;
+              } else {
+                // v21.24.0 STOP-INTEGRITY: exchange ne SL accept nahi kiya —
+                // retry flag ON rakho. Warna next trail transition na aane par
+                // book tighter SL CLAIM karta rahega jabki exchange purane
+                // (wider) SL par khada hoga — exactly XRP divergence.
+                b.slSyncPending = true;
               }
-            } catch { /* non-fatal */ }
+            } catch {
+              b.slSyncPending = true;
+            }
           }
         }
         _logEvent('sl-trail', `🛡️ DEEP MONITOR SL TRAILED ${b.symbol} (${b.side}): SL ${prevSl} → ${deepEval.trailedStopLoss} [${deepEval.stageLabel}] @ LTP ${rawQuote} (${deepEval.currentR >= 0 ? '+' : ''}${deepEval.currentR}R)`);
+      } else if (b.slSyncPending && isLiveTpRow && typeof p.liveUpdateSl === 'function') {
+        // v21.24.0 STOP-INTEGRITY RETRY: pichhla SL sync fail hua tha (ya
+        // process restart se pehle land nahi hua) — exchange confirm hone tak
+        // har tick retry, silently stale stop kabhi nahi.
+        try {
+          const slRes = await p.liveUpdateSl({
+            ...b,
+            stopLoss: b.trailedStopLoss ?? b.stopLoss,
+            takeProfit: b.t2,
+          });
+          if (slRes?.ok) {
+            const syncedSl = b.trailedStopLoss ?? b.stopLoss;
+            if (Number(syncedSl) > 0) b.lastExchangeSl = syncedSl;
+            b.slSyncPending = false;
+            _logEvent('sl-sync', `🛡️ SL SYNC RECOVERED ${b.symbol} (${b.side}): exchange SL re-armed at ${syncedSl}`);
+          }
+        } catch { /* next tick retries */ }
       }
 
       // v21.24.0 SMART TRAIL v2 telemetry + ROLLING TP2 (enforce only moves the target).
       b.smartTrail = deepEval.smartTrail || null;
-      const isLiveTpRow = b.executionMode === 'LIVE' && !(b.market === 'INDIA' || b.execMarket === 'INDIA');
       if (deepEval.t2Extended && Number(deepEval.t2) > 0) {
         const prevT2 = b.t2;
         b.t2 = deepEval.t2;
@@ -2011,6 +2182,19 @@ export async function mtfAutoTick(p = {}) {
     _persistState();
   }
 
+  // ---------- 1b) v21.24.0 PHASE 0 LIVE ENTRY PAUSE ----------
+  // Existing OPEN positions upar 0b/1 me already manage ho chuke (deep monitor,
+  // trailing SL, exchange SL sync, time-stop). Pause sirf NAYE entries rokta
+  // hai — executionMode ko paper karne se live position ka management bhi
+  // badal jata, isliye alag explicit switch.
+  if (cfg.liveEntryPaused === true && isLiveSession) {
+    out.skipped.push('LIVE entries paused (Phase 0 safety) — existing positions still deep-monitored + SL-managed');
+    const stp = _loadState();
+    stp.lastTick = { at: now, opened: out.opened.length, closed: out.closed.length, skipped: out.skipped.slice(0, 4) };
+    _persistState();
+    return out;
+  }
+
   // ---------- 2) NEW ENTRIES per desk (STRICT 1-TRADE-PER-SESSION FULL-WALLET LOCK) ----------
   if (!cfg.enabled) {
     out.skipped.push('auto-link OFF');
@@ -2084,6 +2268,18 @@ export async function mtfAutoTick(p = {}) {
     if (dayCountForDesk >= effectiveMaxTradesPerDay) { out.skipped.push(`${market}: desk quota done`); continue; }
     if (openForDesk >= effectiveMaxOpenPositions || sessionOpen().length >= effectiveMaxOpenPositions) { out.skipped.push(`${market}: max open positions (${openForDesk}/${effectiveMaxOpenPositions})`); continue; }
     if (_openNotionalINR(isLiveSession) >= cfg.maxPositionsINR) { out.skipped.push(`${market}: notional budget full (₹${Math.round(_openNotionalINR(isLiveSession))}/${cfg.maxPositionsINR})`); continue; }
+    // v21.24.0 PHASE 0 daily-loss circuit breaker — desk ke apne day key par,
+    // realized CLOSED pnl se. Cap hit → us desk ke naye entries band (existing
+    // positions ka management upar already chal chuka).
+    const dayWalletINR = Number(p.walletEquityINR) > 0 ? Number(p.walletEquityINR) : Number(cfg.walletAmountINR) || 10000;
+    const dayCaps = computeEffectiveRiskCaps(cfg, dayWalletINR);
+    if (dayCaps.dailyLossCapINR != null) {
+      const realizedToday = _dailyRealizedPnlForMarket(market, isLiveSession, now);
+      if (realizedToday <= -dayCaps.dailyLossCapINR) {
+        out.skipped.push(`${market}: daily loss stop hit (${realizedToday.toFixed(2)} <= -${dayCaps.dailyLossCapINR}) — no new entries today`);
+        continue;
+      }
+    }
 
     // v21.23.8 USER SPEC: "sirf FUTURES USDT & EQUITY SIM aur GOLD & SILVER
     // me hi trade lagna chahiye" — crypto-desk auto-pool ab teen ALLOWED
@@ -2301,8 +2497,14 @@ export async function mtfAutoTick(p = {}) {
         }
       }
 
+      // v21.18.0 + v21.22.0 WALLET-AMOUNT LEVERAGE (< ₹10,000 → 10x, ≥ ₹10,000 → 5x)
+      // + v21.24.0 PHASE 0 EFFECTIVE RISK CAPS (pct-based risk, leverage cap,
+      // wallet-deploy cap) — same helper as UC flip-reverse + status.
+      const effectiveWalletINR = Number(p.walletEquityINR) > 0 ? Number(p.walletEquityINR) : Number(cfg.walletAmountINR) || 10000;
+      const riskCaps = computeEffectiveRiskCaps(cfg, effectiveWalletINR);
+
       // qty: risk-based (₹ → USDT risk for usd desks), rounded, notional-capped
-      const riskBudget = isUsd ? cfg.riskPerTradeINR / fxRate : cfg.riskPerTradeINR; // USDT | INR
+      const riskBudget = isUsd ? riskCaps.effectiveRiskINR / fxRate : riskCaps.effectiveRiskINR; // USDT | INR
       const rawQty = riskBudget / riskPerUnit;
       let qty = isUsd ? Math.floor(rawQty * 10000) / 10000 : Math.floor(rawQty);
       const notionalCapINR = Math.min(cfg.maxNotionalPerTradeINR, cfg.maxPositionsINR - _openNotionalINR(isLiveSession));
@@ -2311,22 +2513,21 @@ export async function mtfAutoTick(p = {}) {
       const minQty = isUsd ? 0.0001 : 1;
       if (!(qty >= minQty)) { out.skipped.push(`${sym}: qty too small after caps (SL ${riskPerUnit.toFixed(4)})`); continue; }
 
-      // v21.18.0 + v21.22.0 WALLET-AMOUNT LEVERAGE (< ₹10,000 → 10x, ≥ ₹10,000 → 5x)
-      // + 100% COINDCX WALLET DEPLOYMENT + LIVE MODE AUTO-ORDER:
-      const effectiveWalletINR = Number(p.walletEquityINR) > 0 ? Number(p.walletEquityINR) : Number(cfg.walletAmountINR) || 10000;
-      const leverage = computeMtfWalletLeverage(effectiveWalletINR, cfg);
+      const leverage = riskCaps.effectiveLeverage;
       const w95 = computeWallet95Deployment({
         walletINR: effectiveWalletINR,
         leverage,
         fxRate,
-        deployPct: cfg.walletDeployPct ?? 100,
+        deployPct: riskCaps.effectiveWalletDeployPct,
         cfg,
       });
       const feeBePrice = feeBreakevenFloor({ entry, side: row.side, market: execMarket });
       const isEliteOrStrong = row.tier === 'ELITE' || row.tier === 'STRONG' || row.tier === 'ACTION' || Number(row.superScore) >= (Number(cfg.minScore) || 75);
       // v21.23.8: EQUITY SIM (GLOBALFUTURES) rows KABHI live order nahi lagati
       // — CoinDCX par US equities listed nahi, SIM/paper-only desk hai.
-      const wantLiveOrder = !isSimRow &&
+      // v21.24.0: liveEntryPaused ek DEFENCE-IN-DEPTH guard hai (primary pause
+      // upar section 2 se pehle return karta hai).
+      const wantLiveOrder = cfg.liveEntryPaused !== true && !isSimRow &&
         Boolean(siteLiveForDesk(p, row.market)) &&
         (cfg.executionMode === 'live' || cfg.autoSyncSiteLive !== false) &&
         isEliteOrStrong;
@@ -2464,6 +2665,9 @@ export async function mtfAutoTick(p = {}) {
         // Entry-armed exchange TP (createFuturesTpsl gets target2). Kept as the
         // "last confirmed" marker so rolling-TP2 retries can compare against it.
         lastExchangeTp: liveOrderResult?.ok ? finalT2 : null,
+        // v21.24.0 STOP-INTEGRITY anchor (entry-arming armed yahi SL).
+        lastExchangeSl: liveOrderResult?.ok ? finalSl : null,
+        slSyncPending: false,
         tpSyncPending: false,
         leverage, walletINR: Math.round(effectiveWalletINR),
         walletDeployPct: w95.walletDeployPct,
@@ -2607,6 +2811,12 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
       // until this clears (never trusts a failed call).
       tpSyncPending: b.tpSyncPending === true,
       lastExchangeTp: b.lastExchangeTp ?? null,
+      // v21.24.0 STOP-INTEGRITY: boot/restart ke baad bhi routes ka 3s loop
+      // book-vs-exchange SL divergence detect kar sake — `lastExchangeSl`
+      // missing ho to `initialStopLoss` hi exchange anchor maana jata hai.
+      slSyncPending: b.slSyncPending === true,
+      lastExchangeSl: b.lastExchangeSl ?? null,
+      initialStopLoss: b.initialStopLoss ?? b.stopLoss ?? null,
     };
   });
   if (bookUpdated) _persistState();
@@ -2621,11 +2831,28 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
 }
 
 // ---------------- status / views ----------------
-export function mtfAutoStatus(liveQuotes = {}) {
+export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
   const cfg = loadMtfAutoConfig();
   const st = _loadState();
   const open = _openLinked();
   const w95 = computeWallet95Deployment({ walletINR: cfg.walletAmountINR, deployPct: cfg.walletDeployPct ?? 100, cfg });
+  // v21.24.0 PHASE 0 WALLET HONESTY: entry path actual live wallet
+  // (liveCtx.walletEquityINR) se size karta hai — status bhi wahi wallet use
+  // kare, warna ₹10,000 configured par ₹100 risk dikhta tha jabki real wallet
+  // ~₹1,385 thi (actual risk budget ₹13.85). Caller wallet na de to
+  // configured value hi fallback hai (paper/offline status).
+  const effectiveWalletINR = Number(opts?.walletINR) > 0
+    ? Number(opts.walletINR)
+    : (Number(cfg.walletAmountINR) > 0 ? Number(cfg.walletAmountINR) : 10000);
+  // v21.24.0 PHASE 0 — effective caps (configured values status me as-is
+  // rehte hain for backward compatibility; UI/audit effective values padhte hain).
+  const riskCaps = computeEffectiveRiskCaps(cfg, effectiveWalletINR);
+  const effective95 = computeWallet95Deployment({
+    walletINR: effectiveWalletINR,
+    leverage: riskCaps.effectiveLeverage,
+    deployPct: riskCaps.effectiveWalletDeployPct,
+    cfg,
+  });
   // Extension needs a real quote snapshot. Calls without quotes (toggle,
   // preview, session-lock checks) must not move a live target off stale LTP.
   const deepMonitor = getActiveAutoTradesDeepMonitor(liveQuotes, {
@@ -2642,10 +2869,17 @@ export function mtfAutoStatus(liveQuotes = {}) {
     configSavedAt: _cfgSavedAt,
     stateSavedAt: st.updatedAt,
     enabled: cfg.enabled,
+    liveEntryPaused: cfg.liveEntryPaused === true,
+    entryPauseReason: cfg.liveEntryPaused === true
+      ? 'Phase 0 safety: naye LIVE/UC-flip entries paused; existing positions ka deep monitor + SL management chalu hai'
+      : null,
     mode: cfg.mode,
     holdMin: cfg.holdMin,
     minScore: cfg.minScore,
     riskPerTradeINR: cfg.riskPerTradeINR,
+    riskCaps,
+    effectiveWalletDeployPct: riskCaps.effectiveWalletDeployPct,
+    effectiveWallet95Deployment: effective95,
     maxPositionsINR: cfg.maxPositionsINR,
     maxNotionalPerTradeINR: cfg.maxNotionalPerTradeINR,
     maxTradesPerDay: cfg.maxTradesPerDay,
@@ -2657,12 +2891,15 @@ export function mtfAutoStatus(liveQuotes = {}) {
     executionMode: cfg.executionMode || 'paper',
     autoSyncSiteLive: cfg.autoSyncSiteLive !== false,
     walletAmountINR: cfg.walletAmountINR,
+    // v21.24.0 WALLET HONESTY: caps/effective95 jis wallet par bane hain.
+    // Live status me ye actual CoinDCX equity hai (configured ₹10,000 nahi).
+    effectiveWalletINR: +effectiveWalletINR.toFixed(2),
     walletDeployPct: cfg.walletDeployPct ?? 100,
     wallet95Deployment: w95,
     wallet100Deployment: w95,
     belowTenKLeverage: cfg.belowTenKLeverage,
     aboveTenKLeverage: cfg.aboveTenKLeverage,
-    activeLeverage: computeMtfWalletLeverage(cfg.walletAmountINR, cfg),
+    activeLeverage: riskCaps.effectiveLeverage,
     feeAwareReversalExit: cfg.feeAwareReversalExit !== false,
     deepMonitorEnabled: cfg.deepMonitorEnabled !== false,
     deepMonitor,
@@ -2675,9 +2912,11 @@ export function mtfAutoStatus(liveQuotes = {}) {
     events: st.events.slice(-40).reverse(),
     lastTick: st.lastTick,
     paperOnly: cfg.executionMode !== 'live',
-    note: cfg.executionMode === 'live'
-      ? `LIVE AUTO MODE ACTIVE — 100% CoinDCX Wallet Deployment + ${computeMtfWalletLeverage(cfg.walletAmountINR, cfg)}x leverage (Wallet < ₹10,000 → 10x · ≥ ₹10,000 → 5x) + Full CoinDCX Active Position Control (TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.`
-      : 'MTF AUTO-LINK PAPER mode me hai (Live Mode activate karne par ELITE/STRONG trades 100% CoinDCX Wallet + <₹10k=10x / ≥₹10k=5x leverage ke saath auto lagte hain; Full CoinDCX Active Position Control + TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.',
+    note: cfg.liveEntryPaused === true
+      ? `⏸ PHASE 0 LIVE ENTRIES PAUSED — naye LIVE/UC-flip entries band; existing positions ka deep monitor, trailing SL aur exchange SL sync chalu hai. Effective caps: ${riskCaps.activeRiskPct || '—'}% risk/trade · ${riskCaps.effectiveWalletDeployPct}% wallet deploy · ${riskCaps.effectiveLeverage}x max leverage.`
+      : cfg.executionMode === 'live'
+        ? `LIVE AUTO MODE ACTIVE — ${riskCaps.effectiveWalletDeployPct}% CoinDCX Wallet Deployment + ${riskCaps.effectiveLeverage}x leverage (Wallet < ₹10,000 → 10x · ≥ ₹10,000 → 5x, Phase 0 cap) + Full CoinDCX Active Position Control (TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.`
+        : 'MTF AUTO-LINK PAPER mode me hai (Live Mode activate karne par ELITE/STRONG trades Phase 0 caps ke saath auto lagte hain; Full CoinDCX Active Position Control + TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.',
   };
 }
 
@@ -2821,6 +3060,8 @@ export function recordLiveMtfBoardTrade(item = {}) {
     t1,
     t2,
     lastExchangeTp: execMode === 'LIVE' && t2 > 0 ? t2 : null,
+    lastExchangeSl: execMode === 'LIVE' && sl > 0 ? sl : null,
+    slSyncPending: false,
     tpSyncPending: false,
     qty,
     leverage,

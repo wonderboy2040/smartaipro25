@@ -74,7 +74,7 @@ describe('v21.23.15 recheck — desk scope + safety source pins', () => {
 
   it('live order arming follows the per-desk site flag, not global executionMode alone', () => {
     const ai = read('server/ai/mtfAutoLink.js');
-    expect(ai).toContain('const wantLiveOrder = !isSimRow');
+    expect(ai).toContain('const wantLiveOrder = cfg.liveEntryPaused !== true && !isSimRow');
     expect(ai).toContain('Boolean(siteLiveForDesk(p, row.market))');
     expect(ai).toContain("(cfg.executionMode === 'live' || cfg.autoSyncSiteLive !== false)");
     expect(ai).not.toContain("cfg.executionMode === 'live' || Boolean(siteLiveForDesk(p, row.market)");
@@ -132,8 +132,8 @@ describe('v21.23.15 recheck — India live lifecycle', () => {
   it('India SL is never sent to the CoinDCX SL updater; journal writes stay locked', () => {
     const ai = read('server/ai/mtfAutoLink.js');
     const futures = read('server/ai/futures.js');
-    expect(ai).toContain('const indiaDeskRow = b.market === \'INDIA\' || b.execMarket === \'INDIA\';');
-    expect(ai).toContain('if (!indiaDeskRow && b.executionMode === \'LIVE\'');
+    expect(ai).toContain("const isLiveTpRow = b.executionMode === 'LIVE' && !(b.market === 'INDIA' || b.execMarket === 'INDIA');");
+    expect(ai).toContain('if (isLiveTpRow && typeof p.liveUpdateSl === \'function\')');
     // The old direct `jPos.sl = sl; saveJournalFresh(j);` is gone.
     expect(futures).not.toContain('jPos.sl = sl;');
     expect(futures).toContain('jp.sl = sl;');

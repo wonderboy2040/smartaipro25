@@ -1096,12 +1096,57 @@ export async function fetchMtfDualBoard(
 
 export interface MtfAutoStatus {
   ok: boolean; enabled: boolean; mode?: TradePlanModeId; holdMin?: number | null;
+  /** v21.24.0 Phase 0: naye LIVE/UC-flip entries paused; existing positions managed. */
+  liveEntryPaused?: boolean;
+  entryPauseReason?: string | null;
   minScore: number; riskPerTradeINR: number; maxPositionsINR: number; maxNotionalPerTradeINR?: number;
   maxTradesPerDay: number; maxOpenPositions?: number; cooldownMin: number;
   desks?: { india: boolean; crypto: boolean }; timeStopEnabled?: boolean;
   inrPerUsdt?: number; ccyMode?: string;
   executionMode?: 'paper' | 'live';
   autoSyncSiteLive?: boolean;
+  /** v21.24.0 Phase 0 effective risk caps (same contract as entry sizing). */
+  riskCaps?: {
+    walletINR: number;
+    riskPerTradePct: number;
+    maxRiskPerTradePct: number;
+    activeRiskPct: number;
+    riskCapINR: number | null;
+    riskPerTradeINR: number;
+    effectiveRiskINR: number;
+    tierLeverage: number;
+    maxLeverage: number;
+    effectiveLeverage: number;
+    walletDeployPctConfigured: number;
+    maxWalletDeployPct: number;
+    effectiveWalletDeployPct: number;
+    dailyLossPct: number;
+    dailyLossCapINR: number | null;
+  };
+  effectiveWalletDeployPct?: number;
+  /** v21.24.0 WALLET HONESTY: wallet those caps were computed from (actual live equity when connected). */
+  effectiveWalletINR?: number;
+  effectiveWallet95Deployment?: MtfAutoStatus['wallet95Deployment'];
+  /** v21.24.0 Phase 0 dashboard summary (heavy detail via /api/ai/mtf-auto/phase0). */
+  phase0?: {
+    generatedAt: number;
+    verdict: 'OK' | 'ATTENTION';
+    warnings: string[];
+    unresolved: { boardSignals: number; paperTrades: number; rowLedger: number; operationalOpen: number };
+    stopIntegrity: {
+      boardSlHits: number; excessStopR: number; worstR: number | null; beyond2R: number;
+      liveStopViolations: number; overRiskPositions: number;
+    };
+    duplicates: { groups: number; extraSignals: number; oppositeSideGroups: number };
+    manualExits: { paper: number; journal: number; total: number };
+    reconciliation: {
+      bookOpen: number; liveOpen: number; paperOpen: number; mirrored: number;
+      qtyMismatches: number; slMismatches: number; missingMirrors: number;
+      stopViolations: number; overRiskPositions: number;
+    };
+    sources?: Record<string, unknown>;
+    riskCaps?: MtfAutoStatus['riskCaps'];
+  };
   siteLiveActive?: boolean;
   siteLiveByDesk?: { crypto: boolean; india: boolean };
   /** A3: server-computed per-desk live readiness + the exact blocking reason. */

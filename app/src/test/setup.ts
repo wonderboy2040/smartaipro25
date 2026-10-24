@@ -23,6 +23,21 @@ if (!process.env.SMARTAI_DATA_DIR) {
 }
 
 // ============================================================
+// v21.24.0 TEST-INFRA HYGIENE (MTF AUTO): mtfAutoLink ka apna
+// MTF_AUTO_DATA_DIR override hai — SMARTAI_DATA_DIR isse nahi bachata.
+// siteRecheck212312/212313 + directionConflict jaise suites
+// __resetMtfAutoForTests() real server/data par chala kar LIVE book
+// (open XRP position) aur Phase 0 config WIPE kar dete the. Har suite
+// ke liye hermetic default; per-file overrides (jo apna env set karte
+// hain) pehle ki tarah jeet-te hain.
+// ============================================================
+if (!process.env.MTF_AUTO_DATA_DIR) {
+  try {
+    process.env.MTF_AUTO_DATA_DIR = mkdtempSync(path.join(os.tmpdir(), 'smartai-test-mtf-'));
+  } catch { /* best-effort: fall back to default resolution */ }
+}
+
+// ============================================================
 // v21.11 TEST-STABILITY PIN: Superintelligence accuracy suite ab
 // PRODUCTION DEFAULT ON hai (AI_ENABLE_V2_MODELS / MESH / MTF —
 // models.js + meshModels.js). Saare legacy suites (202 files) in

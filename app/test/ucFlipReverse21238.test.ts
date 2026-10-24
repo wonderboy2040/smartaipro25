@@ -321,6 +321,36 @@ describe('v21.23.8 S2 — LOSS trade + UC flip PAKKA → minimal-loss close + IM
     expect(liveExecuteFail).toHaveBeenCalledTimes(1);
   });
 
+  it('v21.24.0 Phase 0: LIVE entries paused — flip protective exit hota hai, reverse LIVE entry NAHI', async () => {
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'live', minScore: 75, liveEntryPaused: true },
+      state: {
+        book: [openLongBtc({
+          paperId: null, executionMode: 'LIVE', traded: true, fullControl: true,
+          openedInLiveMode: true, liveOrderId: 'ord-1', livePositionId: 'pos-1',
+        })],
+      },
+    });
+    const { paper } = fakePaper([]);
+    const liveClose = vi.fn(async () => ({ ok: true, realizedPnl: -5 }));
+    const liveExecute = vi.fn(async () => ({ ok: true }));
+    const out = await mtfAutoTick(tickP(paper, cryptoBoardRows([flippedShortRow()]), {
+      siteLiveActive: true, liveClose, liveExecute,
+    }));
+
+    // 1) existing position ka protective exit still happened (management alive)
+    expect(liveClose).toHaveBeenCalledTimes(1);
+    expect(out.closed).toHaveLength(1);
+    expect(out.closed[0].reason).toBe('UC_FLIP_MINIMAL_LOSS_EXIT');
+    // 2) reverse LIVE entry blocked — main pause return se pehle deep-monitor
+    //    flip path ka apna guard hi fire hua (event proof)
+    expect(liveExecute).not.toHaveBeenCalled();
+    expect(out.opened).toHaveLength(0);
+    const stateRaw = JSON.parse(fs.readFileSync(path.join(TMP_DATA, 'mtf-auto-state.json'), 'utf8'));
+    const events = (stateRaw.events || []).map(e => String(e.text || '')).join(' ');
+    expect(events).toMatch(/UC FLIP-REVERSE SKIP BTC: LIVE entries paused \(Phase 0\)/);
+  });
+
   it('PAPER trade + siteLiveActive: reverse PAPER hi rehta hai — LIVE order leak nahi', async () => {
     __resetMtfAutoForTests({
       config: { enabled: true, executionMode: 'paper', minScore: 75 },
@@ -652,7 +682,7 @@ describe('v21.23.8 S8 — EQUITY SIM rows ab auto-pool me (sirf allowed domains)
     expect(LINK_SRC).toContain('equitySimRows');
     expect(LINK_SRC).toContain('const isSimRow = rowExecMarket === \'GLOBALFUTURES\'');
     expect(LINK_SRC).toContain('ccy: isSimRow ? \'USDC\' : (isUsd ? \'USDT\' : \'INR\')');
-    expect(LINK_SRC).toContain('const wantLiveOrder = !isSimRow &&');
+    expect(LINK_SRC).toContain('const wantLiveOrder = cfg.liveEntryPaused !== true && !isSimRow &&');
   });
 });
 
