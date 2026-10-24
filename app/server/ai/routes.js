@@ -199,6 +199,10 @@ import { eventGuardStatus } from './eventGuard.js';
 import { councilStatus, runCouncilDeep, councilStampOf } from './council.js';
 // v18.7 ENGINE SENTINEL — per-engine health view + manual recheck.
 import { engineSnapshot, engineClearCooldowns, ollamaProbe, ollamaStatus } from './llmSentinel.js';
+import {
+  opencodeProbe, opencodeStatus, opencodeClearCooldowns,
+  probeOpenCodeSeats, OPENCODE_SEATS,
+} from './opencodeBridge.js';
 import { councilAskVision } from './llmChain.js';
 import { coreSeatGuardStatus } from './seatCorrelation.js';
 import { nearMissList, nearMissStats } from './consensus.js';
@@ -334,6 +338,9 @@ export function registerAITradingRoutes(app, deps) {
   }
   _registered = true;
   const { KEYS, OPENAI_COMPAT, TG, jsonError } = deps || {};
+  // v21.24.0 AI TRIO PHASE 1: manual bridge probe throttle (1 / 10s).
+  // The probe endpoint accepts only a seat name — never a model or prompt.
+  let _trioProbeAt = 0;
   // v6.5: AI Council keys — secrets (typed in the app) WIN over env.
   // Built fresh on every call so a key saved mid-flight engages on the
   // next board run without a restart.
@@ -457,8 +464,18 @@ export function registerAITradingRoutes(app, deps) {
   app.get('/api/ai/engines', async (_req, res) => {
     try {
       await ollamaProbe().catch(() => false); // refresh the local-engine view (90s cache)
+      // v21.24.0 AI TRIO PHASE 1: OpenCode CLI is a separate keyless
+      // engine. Never block the strip on a cold CLI probe — kick one
+      // off in the background and return the cached view now.
+      const opencode = opencodeStatus();
+      if (!opencode.probed) void opencodeProbe().catch(() => null);
       res.set('Cache-Control', 'no-store');
-      res.json({ ok: true, engines: engineSnapshot(effectiveKeys()), ollama: ollamaStatus() });
+      res.json({
+        ok: true,
+        engines: engineSnapshot(effectiveKeys()),
+        ollama: ollamaStatus(),
+        opencode,
+      });
     } catch (e) {
       jsonError(res, 500, 'engine status failed', e);
     }
@@ -467,11 +484,72 @@ export function registerAITradingRoutes(app, deps) {
   app.post('/api/ai/engines/recheck', async (_req, res) => {
     try {
       engineClearCooldowns();               // half-open every engine NOW
-      await ollamaProbe(true).catch(() => false); // fresh local probe (bypass cache)
+      opencodeClearCooldowns();             // OpenCode per-model breaker too
+      await Promise.all([
+        ollamaProbe(true).catch(() => false), // fresh local probe (bypass cache)
+        opencodeProbe(true).catch(() => null), // version/models/auth (never a model call)
+      ]);
       res.set('Cache-Control', 'no-store');
-      res.json({ ok: true, cleared: true, engines: engineSnapshot(effectiveKeys()), ollama: ollamaStatus() });
+      res.json({
+        ok: true,
+        cleared: true,
+        engines: engineSnapshot(effectiveKeys()),
+        ollama: ollamaStatus(),
+        opencode: opencodeStatus(),
+      });
     } catch (e) {
       jsonError(res, 500, 'engine recheck failed', e);
+    }
+  });
+
+  // v21.24.0 AI TRIO PHASE 1 — manual setup probe.
+  // Runs the configured OpenCode seat chain(s) through a tiny strict-JSON
+  // prompt. Rate-limited to 1 request / 10s. The browser can choose a
+  // seat only; arbitrary models/prompts are rejected by construction.
+  app.post('/api/ai/trio/probe', async (req, res) => {
+    try {
+      const seatArg = String(req.body?.seat || 'all').toLowerCase();
+      if (seatArg !== 'all' && !OPENCODE_SEATS.includes(seatArg)) {
+        return res.status(400).json({ ok: false, error: 'seat must be fast, deep, sentinel or all' });
+      }
+      const now = Date.now();
+      const waitMs = 10_000 - (now - _trioProbeAt);
+      if (_trioProbeAt && waitMs > 0) {
+        res.set('Retry-After', String(Math.ceil(waitMs / 1000)));
+        return res.status(429).json({
+          ok: false,
+          error: 'trio probe rate-limited',
+          retryAfterSec: Math.ceil(waitMs / 1000),
+        });
+      }
+      _trioProbeAt = now;
+
+      const health = await opencodeProbe(true).catch(() => opencodeStatus());
+      if (!health?.available) {
+        res.set('Cache-Control', 'no-store');
+        return res.status(503).json({
+          ok: false,
+          phase: 1,
+          error: health?.lastError || 'opencode unavailable',
+          opencode: health || opencodeStatus(),
+          seats: {},
+        });
+      }
+
+      const seats = seatArg === 'all' ? OPENCODE_SEATS : [seatArg];
+      const results = await probeOpenCodeSeats(seats, {
+        knownModels: Array.isArray(health.models) ? health.models : [],
+      });
+      res.set('Cache-Control', 'no-store');
+      res.json({
+        ok: Object.values(results).every(r => r?.ok === true),
+        phase: 1,
+        opencode: opencodeStatus(),
+        seats: results,
+        at: Date.now(),
+      });
+    } catch (e) {
+      jsonError(res, 500, 'trio probe failed', e);
     }
   });
 
