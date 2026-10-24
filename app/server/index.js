@@ -89,7 +89,6 @@ import crypto from 'node:crypto';
 import compression from 'compression';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const app = express();
 
 // v21.3.0 (Issue-1: "baar baar server down"): Express 4 async-rejection
 // guard — sub-routers register through this proxy so an async handler
@@ -98,9 +97,14 @@ const app = express();
 // router objects, middleware factories and settings getters pass through
 // byte-for-byte unchanged.
 import { withAsyncRouteGuard } from './lib/asyncGuard.js';
-const routesApp = withAsyncRouteGuard(app, {
+// v21.23.18 [ROOT-GUARD]: proxy sirf sub-routers par tha — server/index.js
+// ke direct `app.get/post` async handlers (chart/quote/cloud/ML/AI bridges)
+// rejection par abhi bhi hung socket bana sakte the. Ab ROOT app hi proxy
+// hai; `routesApp` wahi identity sub-routers ko milti hai.
+const app = withAsyncRouteGuard(express(), {
   onError: (err) => { try { console.error('[async-guard] route handler rejected:', String(err?.message || err).slice(0, 160)); } catch { /* noop */ } },
 });
+const routesApp = app;
 const PORT = process.env.PORT || 8080;
 const DEFAULT_USD_INR = 83.5;
 

@@ -116,7 +116,7 @@ async function _auditChain({ label, tf, fetchCandles, tickerPrice }) {
 export async function runLiveDirectionCertificate(opts = {}) {
   const ranAt = Date.now();
   if (opts?.skipNetwork) {
-    return { pass: true, ranAt, version: 'v21.23.17', chains: [], synthetic: null, note: 'network skipped' };
+    return { pass: true, ranAt, version: 'v21.23.18', chains: [], synthetic: null, note: 'network skipped' };
   }
   const chains = [];
   try {
@@ -233,7 +233,7 @@ export async function runLiveDirectionCertificate(opts = {}) {
     verifiedChains: passCount,
     unverifiedChains: unreachable,
     ranAt,
-    version: 'v21.23.17',
+    version: 'v21.23.18',
     chains,
     wireAbsorb,
     synthetic: { pass: synthetic.pass, passed: synthetic.passed, total: synthetic.total },

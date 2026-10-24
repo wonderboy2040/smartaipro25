@@ -1055,12 +1055,6 @@ function _lastProfitCloseAt(liveOnly = false) {
   }
   return at;
 }
-function _paperOpenSymbols(paperSummary) {
-  const set = new Set();
-  for (const t of paperSummary?.open || []) set.add(String(t.symbol || '').toUpperCase());
-  return set;
-}
-
 /**
  * v21.22.0 FULL CONTROL OF COINDCX ACTIVE POSITIONS:
  * Adopts and syncs real active CoinDCX Futures positions into the Auto-Trade Deep Monitor
@@ -1376,7 +1370,13 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     }
     // strict 1-trade-per-session: close ke baad koi aur open bacha to flip nahi
     // v21.23.18: LIVE session me PAPER test rows is lock ko nahi khaate.
-    const flipLiveSession = cfg.executionMode === 'live' || cfg.autoSyncSiteLive !== false;
+    // v21.23.18 [FLIP SESSION PARITY]: yahi expression tick ke `isLiveSession`
+    // se match karna chahiye. Pehle `autoSyncSiteLive !== false` akela bhi true
+    // hota tha (default true), isliye PAPER mode me bhi session LIVE maana jata
+    // tha -> doosra open PAPER trade 1-session lock break kar deta tha aur
+    // paper notional LIVE budget se kata jata tha.
+    const flipLiveSession = cfg.executionMode === 'live'
+      || Boolean(cfg.autoSyncSiteLive !== false && (siteLiveForDesk(p, 'CRYPTO') || siteLiveForDesk(p, 'INDIA')));
     const otherOpen = flipLiveSession ? _openLinked().filter(isLiveSessionEntry) : _openLinked();
     if (otherOpen.length > 0) {
       _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: another trade still open — 1 session = 1 trade lock`);
@@ -1401,7 +1401,7 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     // qty: risk-based sizing (wahi math jo normal entry path use karta hai)
     const riskBudget = isUsd ? cfg.riskPerTradeINR / fxRate : cfg.riskPerTradeINR;
     let qty = isUsd ? Math.floor((riskBudget / riskPerUnit) * 10000) / 10000 : Math.floor(riskBudget / riskPerUnit);
-    const notionalCapINR = Math.min(cfg.maxNotionalPerTradeINR, cfg.maxPositionsINR - _openNotionalINR());
+    const notionalCapINR = Math.min(cfg.maxNotionalPerTradeINR, cfg.maxPositionsINR - _openNotionalINR(flipLiveSession));
     const capQty = isUsd ? (notionalCapINR / fxRate) / entry : notionalCapINR / entry;
     if (qty > capQty) qty = isUsd ? Math.floor(capQty * 10000) / 10000 : Math.floor(capQty);
     const minQty = isUsd ? 0.0001 : 1;

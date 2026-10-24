@@ -451,6 +451,64 @@ describe('v21.23.8 S6 — flip churn guards', () => {
     expect(out.opened).toHaveLength(0);   // par 5th flip entry cap ke kaadam nahi
   });
 
+  it('v21.23.18: PAPER session me doosra open PAPER trade 1-session lock todta nahi — reverse entry blocked', async () => {
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'paper', minScore: 75 },
+      state: {
+        book: [
+          openLongBtc(),
+          openLongBtc({ paperId: 778, symbol: 'ETH', entry: 50, stopLoss: 49, t1: 51, t2: 52, notional: 4747.5 }),
+        ],
+      },
+    });
+    const { paper } = fakePaper([
+      { id: 777, symbol: 'BTC', market: 'FUTURES', status: 'OPEN', direction: 'LONG', openedAt: NOW - 5 * 60_000 },
+      { id: 778, symbol: 'ETH', market: 'FUTURES', status: 'OPEN', direction: 'LONG', openedAt: NOW - 5 * 60_000 },
+    ]);
+    const out = await mtfAutoTick(tickP(paper, cryptoBoardRows([flippedShortRow()])));
+    expect(out.closed).toHaveLength(1);
+    expect(out.closed[0].reason).toBe('UC_FLIP_MINIMAL_LOSS_EXIT');
+    // PAPER mode me bhi 1 session = 1 trade — ETH open hai to BTC reverse nahi
+    expect(out.opened).toHaveLength(0);
+    expect(paper.open.map(t => t.symbol)).toEqual(['ETH']);
+  });
+
+  it('v21.23.18: LIVE flip notional budget PAPER test rows ko count nahi karta', async () => {
+    __resetMtfAutoForTests({
+      config: {
+        enabled: true, executionMode: 'live', minScore: 75,
+        maxPositionsINR: 100000, maxNotionalPerTradeINR: 50000,
+      },
+      state: {
+        book: [
+          openLongBtc({
+            paperId: null, executionMode: 'LIVE', traded: true, fullControl: true,
+            openedInLiveMode: true, liveOrderId: 'ord-1', livePositionId: 'pos-1',
+          }),
+          openLongBtc({
+            paperId: 778, symbol: 'ETH', executionMode: 'PAPER',
+            entry: 50, stopLoss: 49, t1: 51, t2: 52, notional: 99999.99,
+          }),
+        ],
+      },
+    });
+    const { paper } = fakePaper([
+      { id: 778, symbol: 'ETH', market: 'FUTURES', status: 'OPEN', direction: 'LONG', openedAt: NOW - 5 * 60_000 },
+    ]);
+    const liveClose = vi.fn(async () => ({ ok: true }));
+    const liveExecute = vi.fn(async (o) => ({
+      ok: true, orderId: 'ord-2', position: { id: 'pos-2' },
+      filled: { qty: o.qty, price: o.entry, stopLoss: o.stopLoss, t1: o.target1, t2: o.target2 },
+    }));
+    const out = await mtfAutoTick(tickP(paper, cryptoBoardRows([flippedShortRow()]), {
+      siteLiveByDesk: { crypto: true, india: false }, liveClose, liveExecute,
+    }));
+    expect(out.closed).toHaveLength(1);
+    expect(out.opened).toHaveLength(1);
+    expect(out.opened[0].executionMode).toBe('LIVE');
+    expect(liveExecute).toHaveBeenCalledTimes(1);
+  });
+
   it('ucFlipReverse:false → flip close bhi nahi (pure opt-out — v21.23.6/7 behavior)', async () => {
     __resetMtfAutoForTests({
       config: { enabled: true, executionMode: 'paper', minScore: 75, ucFlipReverse: false },

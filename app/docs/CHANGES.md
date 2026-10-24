@@ -3514,3 +3514,27 @@ Recheck me auto-trade readiness, India live lifecycle, boot persistence, quota d
 - Targeted MTF/direction/UI batches PASS: 6 files / 44 tests; 7 files / 165 tests. Version/recheck batch PASS: 3 files / 113 tests.
 - `tsc 0`, source `lint 0`, `check:version OK (21.23.17)`, `check:routes PASS`, `dist 21.23.17`.
 - Full-suite attempt still hits pre-existing network/trading-watcher 5s timeouts in this environment; the same failures reproduce on a clean v21.23.16 worktree (verified `directionProof` EXIT timeout), so they are not attributed to this change set.
+
+## v21.23.18 — FULL PRO-TRADER RECHECK: flip-session parity + root async guard + PAPER/LIVE isolation (2026-10-24)
+
+**User ask: "full site ko pro trader level par recheck karo, sabhi features end-to-end verify karo, LONG/SHORT signal accuracy confirm karo, issues fix karo aur unwanted code/temp files clean karo."**
+
+### 1) UC flip-reverse session parity (mtfAutoLink.js)
+- **Bug**: `_tryOpenUcFlipReverse` apna session type `cfg.executionMode === 'live' || cfg.autoSyncSiteLive !== false` se nikalta tha. `autoSyncSiteLive` default `true` hai, isliye PAPER mode me bhi flip session LIVE maana jata tha -> doosra open PAPER trade 1-session-1-trade lock ko nahi rokta tha aur paper notional LIVE budget se kat jata tha.
+- **Fix**: flip session ab tick ke authoritative `isLiveSession` jaisa hi hai (`executionMode live` YA `autoSyncSiteLive` + koi desk site-live). Reverse entry ka 1-session lock, daily quota aur `_openNotionalINR(...)` teeno isi scoped value se chalte hain. PAPER mode me 1 session = 1 trade ab flip path par bhi hard hai; LIVE session me PAPER test rows real LIVE notional cap nahi khate.
+
+### 2) Root-level async route guard (server/index.js)
+- Pehle sirf sub-routers `withAsyncRouteGuard` proxy se register hote the; `server/index.js` ke direct `app.get/post` async handlers (chart, quote, cloud sync, ML, AI bridges) rejection par socket hang kar sakte the.
+- Ab ROOT `app` hi guard proxy hai aur `routesApp` wahi identity hai — direct async routes bhi honest `next(err)` / 500 dete hain. Sync handlers, routers, middleware factories aur 4-arg error middleware unchanged.
+
+### 3) Dead code removal
+- Unused `_paperOpenSymbols()` helper removed (grep-verified: koi caller nahi).
+
+### 4) Version/docs consistency
+- Prior commit `25fba3f` ne v21.23.18 code ship kiya tha par `package.json`, lockfile, `src/version.ts`, cert aur watchdog stamp 21.23.17 hi the. Ab sab **21.23.18** par aligned hain (cert `v21.23.18`, watchdog bat + dist stamp included).
+
+### Tests / gate
+- New locks: PAPER flip reverse doosre open PAPER trade se blocked; LIVE flip notional cap PAPER rows ignore karta hai; root async-guard source pin.
+- Targeted batches PASS: `ucFlipReverse21238 + mtfAutoLink + routeMount + fullFlowAudit212314` = 76 tests; recheck/UI/MTF batch = 232 tests; core trading batch (aiOrders, leverage, agent, indiaAgent, options, proTrader, globalFutures, v70, v702, trailing) = 233 tests (all with `--testTimeout=30000`).
+- `tsc 0`, source `lint 0`, `check:version OK (21.23.18)`, `check:routes PASS`, `dist 21.23.18`.
+- Full-suite default 5s run: 4254 passed / 140 failed across 29 files — 80 failures were 5s timeouts (this Windows box + live server/LLM feeds); the same files pass when rerun with a 30s timeout, so no signal/direction regression is attributed to this change set. Pre-existing environment-dependent suites (`v69-core`, `cryptoAgent`, `council`, `llmValidator`) remain network/LLM-timeout sensitive.

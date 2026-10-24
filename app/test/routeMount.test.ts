@@ -22,6 +22,13 @@ const INDEX_PATH = path.resolve(__dirname, '..', 'server', 'index.js');
 const indexSource = fs.readFileSync(INDEX_PATH, 'utf-8');
 
 describe('Route-mounting regression guard (server/index.js)', () => {
+  describe('root async guard', () => {
+    it('wraps the ROOT app so direct app.get/post async handlers cannot hang', () => {
+      expect(indexSource).toContain('const app = withAsyncRouteGuard(express(),');
+      expect(indexSource).toContain('const routesApp = app;');
+    });
+  });
+
   // ----------------------------------------------------------
   // INTRADAY DESK — 20 /api/intraday-* endpoints
   // ----------------------------------------------------------
