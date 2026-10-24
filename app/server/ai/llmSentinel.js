@@ -279,16 +279,19 @@ export function ollamaVisionModel() {
 /** View for /api/ai/engines. */
 export function ollamaStatus() {
   const installed = (_state.ollama.models || []).filter(Boolean);
-  const defaultTrio = ['qwen3:8b', 'deepseek-r1:14b', 'qwen2.5vl:7b'];
-  const trioModels = installed.length >= 3
-    ? installed.slice(0, 3)
-    : [...installed, ...defaultTrio.filter(m => !installed.includes(m))].slice(0, 3);
+  // Role order, NOT `ollama list` installation order. The old installed.slice(0,3)
+  // could label qwen2.5vl:7b as the DEEP seat and deepseek-r1:14b as the
+  // VISION/sentinel seat — the UI chip and trio attribution then lied.
+  const resolvedModel = _state.ollama.model || OLLAMA_MODEL || 'qwen3:8b';
+  const resolvedDeep = _state.ollama.deepModel || OLLAMA_DEEP_MODEL || 'deepseek-r1:14b';
+  const resolvedVision = _state.ollama.visionModel || OLLAMA_VISION_MODEL || 'qwen2.5vl:7b';
+  const trioModels = [resolvedModel, resolvedDeep, resolvedVision].filter(Boolean);
   return {
     base: OLLAMA_BASE,
     reachable: !!_state.ollama.reachable,
-    model: _state.ollama.model || OLLAMA_MODEL || 'qwen3:8b',
-    deepModel: _state.ollama.deepModel || OLLAMA_DEEP_MODEL || null,
-    visionModel: _state.ollama.visionModel || (OLLAMA_VISION_MODEL || null),
+    model: resolvedModel,
+    deepModel: resolvedDeep,
+    visionModel: resolvedVision,
     models: (_state.ollama.models || []).slice(0, 8),
     trioModels,
     downloadedModelCount: Math.max(3, installed.length),
@@ -306,6 +309,11 @@ export function ollamaStatus() {
 // local Ollama (127.0.0.1:11434) is online so MTF Dual-Board scans stay <50ms!
 const _mtfOllamaCache = new Map();
 const MTF_OLLAMA_TTL_MS = 30_000;
+// v21.25: the old 1.5s abort was impossible for qwen3:8b (even a warm call
+// needs a few seconds; a cold model load needs ~10-20s). This call is
+// fire-and-forget, so a realistic 30s budget costs the board zero latency
+// and finally lets the "Live Ollama" verdict reach the cache.
+const MTF_OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_MTF_TIMEOUT_MS) || 30_000;
 
 export function getOllamaTrioModels() {
   const st = ollamaStatus();
@@ -378,13 +386,14 @@ export function evaluateMtfRowWithOllamaTrio(rowCtx = {}) {
         model: trio.fastModel,
         prompt: `MTF ${sym} ${side} score=${superScore} inst8=${worldAligned8}/8 RR=${netRR} revRisk=${hasReversalOrTrap} conflict=${hasCrossConflict}. Reply in 8 words max: CONFIRM or CAUTION + reason.`,
         stream: false,
+        think: false,
         keep_alive: '30m',
         options: { temperature: 0.1, num_predict: 24, num_ctx: 1024 },
       }),
-      signal: AbortSignal.timeout(1500),
+      signal: AbortSignal.timeout(MTF_OLLAMA_TIMEOUT_MS),
     }).then(r => r.ok ? r.json() : null).then(j => {
-      if (j?.response) {
-        const text = String(j.response).trim().slice(0, 90);
+      const text = String(j?.response || j?.message?.content || j?.thinking || '').trim().slice(0, 90);
+      if (text) {
         const parsedVerdict = /\b(CAUTION|VETO|REVERSE|AVOID|TRAP|WAIT|SKIP|DISAGREE)\b/i.test(text)
           ? 'CAUTION'
           : /\b(CONFIRM|AGREE|LOCK)\b/i.test(text)

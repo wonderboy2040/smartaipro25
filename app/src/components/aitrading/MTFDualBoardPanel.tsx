@@ -278,7 +278,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
         : Number(auto?.walletAmountINR) || 10000));
   const activeLeverage = auto?.riskCaps?.effectiveLeverage ?? auto?.activeLeverage
     ?? (effectiveWalletINR < 10000 ? (auto?.belowTenKLeverage ?? 10) : (auto?.aboveTenKLeverage ?? 5));
-  const walletDeployPct = auto?.riskCaps?.effectiveWalletDeployPct ?? auto?.effectiveWalletDeployPct ?? auto?.walletDeployPct ?? 25;
+  const walletDeployPct = auto?.riskCaps?.effectiveWalletDeployPct ?? auto?.effectiveWalletDeployPct ?? auto?.walletDeployPct ?? 100;
   const deployed95WalletINR = Math.round(effectiveWalletINR * (walletDeployPct / 100));
   const buyingPower95INR = Math.round(deployed95WalletINR * activeLeverage);
   const liveEntriesPaused = auto?.liveEntryPaused === true;
@@ -418,7 +418,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     }
   }, [mode, holdMin, minScore, effectiveWalletINR, notify, loadAuto, applyAutoStatus]);
 
-  /** ⚡ LIVE ORDER — places real CoinDCX Futures order directly for this MTF Dual Board card using .env keys (Phase 0 capped wallet + leverage). */
+  /** ⚡ LIVE ORDER — places real CoinDCX Futures order directly for this MTF Dual Board card using .env keys (100% wallet + wallet-tier leverage). */
   const onLiveOrder = useCallback(async (row: MtfDualRow) => {
     if (row.side !== 'LONG' && row.side !== 'SHORT') {
       notify(false, `${row.symbol}: directional signal (LONG/SHORT) required`);
@@ -453,7 +453,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     }
   }, [market, mode, holdMin, activeLeverage, walletDeployPct, deployed95WalletINR, activeLiveRows, notify, onExecuteLive, onPaperOpened, loadAuto]);
 
-  /** ⚡ SINGLE LIVE BUTTON — turns ON Auto-Trade Intelligence, fetches CoinDCX Wallet, deploys the Phase 0 capped wallet slice on strictly 1 Verified Strong Trade per session, and takes Full Control! */
+  /** ⚡ SINGLE LIVE BUTTON — turns ON Auto-Trade Intelligence, fetches CoinDCX Wallet, deploys 100% of it on strictly 1 Verified Strong Trade per session, and takes Full Control! */
   const onAutoLiveExecute = useCallback(async () => {
     if (!canLive) {
       notify(false, '⛔ LIVE execution is not enabled for this desk/tab — arm it in the desk console first.');
@@ -476,15 +476,17 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
         mode,
         holdMin,
         minScore,
-        walletDeployPct,
+        walletDeployPct: 100,
         maxOpenPositions: 2,
         maxTradesPerDay: 3,
-        // Phase 0 hard caps — one-click LIVE kabhi purani 100% / 10x config
-        // ko wapas nahi laata.
+        // User spec v21.25: FULL 100% CoinDCX wallet deployment. Leverage is
+        // wallet-tier driven — below ₹10,000 → 10x, ₹10,000+ → 5x. The 10x
+        // ceiling only lets the tier rule decide; it never over-leverages a
+        // ₹10k+ wallet (tier leverage stays 5x and wins the min()).
         riskPerTradePct: 1,
         maxRiskPerTradePct: 2,
-        maxLeverage: 5,
-        maxWalletDeployPct: 25,
+        maxLeverage: 10,
+        maxWalletDeployPct: 100,
         dailyLossPct: 1.5,
         deepMonitorEnabled: true,
       };
@@ -561,7 +563,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       // UI arm karke honest "watching" state dikhata hai.
       notify(
         true,
-        `🟢 LIVE AUTO-TRADE INTELLIGENCE ON — Watching 24×7 for engine-verified STRONG (PAKKA LONG/SHORT) Signal · 1 Session = 1 Capped-Wallet Trade (₹${deployed95WalletINR.toLocaleString('en-IN')} @ ${activeLeverage}x) · client-side fallback entry disabled`,
+        `🟢 LIVE AUTO-TRADE INTELLIGENCE ON — Watching 24×7 for engine-verified STRONG (PAKKA LONG/SHORT) Signal · 1 Session = 1 Full-Wallet Trade (₹${deployed95WalletINR.toLocaleString('en-IN')} @ ${activeLeverage}x) · client-side fallback entry disabled`,
       );
       await loadAuto();
     } finally {
@@ -575,7 +577,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     const nextPaused = !liveEntriesPaused;
     if (!nextPaused) {
       const ok = typeof window === 'undefined' || window.confirm(
-        'LIVE auto entries RESUME karein? Existing positions alag se managed rehte hain; naye ELITE/STRONG signals real orders lenge (Phase 0 caps: 1% risk/trade, 5x max, 25% wallet deploy).',
+        'LIVE auto entries RESUME karein? Existing positions alag se managed rehte hain; naye ELITE/STRONG signals real orders lenge (100% wallet deploy; leverage wallet-tier: below ₹10,000 → 10x, ₹10,000+ → 5x; 1% risk/trade).',
       );
       if (!ok) return;
     }
@@ -651,7 +653,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black border border-violet-500/45 bg-violet-500/15 text-violet-200" title="Optimized for 3 Local Ollama AI Models (Fast Scan + Deep Reasoner + Risk/Vision Sentinel)">
               🤖 3-MODEL OLLAMA TURBO: {(board?.ollamaTrio?.models || ['qwen3:8b', 'deepseek-r1:14b', 'qwen2.5vl:7b']).join(' + ')}
             </span>
-            <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black border border-cyan-500/40 bg-cyan-500/10 text-cyan-200" title="Phase 0 capped CoinDCX Wallet Auto-Deployment (max 25%) + leverage cap (max 5x)">
+            <span className="px-1.5 py-0.5 rounded-md text-[9px] font-black border border-cyan-500/40 bg-cyan-500/10 text-cyan-200" title="Full 100% CoinDCX Wallet Auto-Deployment + wallet-tier leverage (below ₹10,000 → 10x, ₹10,000+ → 5x)">
               ⚡ {walletDeployPct}% WALLET ₹{deployed95WalletINR.toLocaleString('en-IN')} / ₹{Math.round(effectiveWalletINR).toLocaleString('en-IN')}{liveFutWalletINR > 0 ? ` (${liveFutMarginCcy})` : ''} → {activeLeverage}x LEV
             </span>
             {counts && (
@@ -743,7 +745,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                 className="mt-1.5 flex items-center gap-2 flex-wrap text-[9px] font-mono text-slate-300"
               >
                 <span className="px-1.5 py-0.5 rounded border border-violet-500/40 bg-violet-500/10 text-violet-200 font-black">
-                  🛡 PHASE 0 · {auto.riskCaps.activeRiskPct || '—'}% risk/trade (hard {auto.riskCaps.maxRiskPerTradePct}%) · {auto.riskCaps.effectiveWalletDeployPct}% deploy · {auto.riskCaps.effectiveLeverage}x max · daily loss stop {auto.riskCaps.dailyLossPct || '—'}% · max {auto.maxOpenPositions ?? '—'} open / {auto.maxTradesPerDay}/day
+                  🛡 LIVE RISK · {auto.riskCaps.activeRiskPct || '—'}% risk/trade (hard {auto.riskCaps.maxRiskPerTradePct}%) · {auto.riskCaps.effectiveWalletDeployPct}% deploy · {auto.riskCaps.effectiveLeverage}x wallet-tier · daily loss stop {auto.riskCaps.dailyLossPct || '—'}% · max {auto.maxOpenPositions ?? '—'} open / {auto.maxTradesPerDay}/day
                 </span>
                 {auto.phase0 && (
                   <span className={`px-1.5 py-0.5 rounded border font-black ${auto.phase0.verdict === 'OK' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200' : 'border-amber-500/40 bg-amber-500/10 text-amber-200'}`}>
@@ -781,7 +783,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                     : 'border-slate-400/60 bg-slate-700/40 text-slate-200 hover:bg-slate-700/60'
                 } disabled:opacity-50`}
                 title={liveEntriesPaused
-                  ? 'Resume LIVE entries (Phase 0 caps active). Existing position management is unaffected.'
+                  ? 'Resume LIVE entries (100% wallet + wallet-tier leverage active). Existing position management is unaffected.'
                   : 'Pause NEW live entries only. Existing positions continue deep monitor + SL sync.'}
               >
                 {liveEntriesPaused ? '▶ RESUME ENTRIES' : '⏸ PAUSE ENTRIES'}
@@ -809,7 +811,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                   ? `LIVE arm blocked: ${armBlockWhy}`
                   : liveBlockWhy
                     ? `LIVE blocked: ${liveBlockWhy}`
-                    : `Click karne par Auto Trade Intelligence ON hoga — CoinDCX Wallet fetch karke ${walletDeployPct}% wallet + ${activeLeverage}x leverage (Phase 0 caps) ke saath trade lagega, Active Positions ko Full Control pe lega aur TP1/TP2 tak Deep Monitor + Trailing SL + Reversal Profit Book chalega`}>
+                    : `Click karne par Auto Trade Intelligence ON hoga — CoinDCX Wallet fetch karke ${walletDeployPct}% wallet + ${activeLeverage}x wallet-tier leverage ke saath trade lagega, Active Positions ko Full Control pe lega aur TP1/TP2 tak Deep Monitor + Trailing SL + Reversal Profit Book chalega`}>
               <Power size={13} className={isLiveAuto ? 'text-emerald-300 animate-pulse' : 'text-amber-300'} />
               {busy
                 ? '⏳ ACTIVATING LIVE AI…'
@@ -1149,7 +1151,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                     </span>
                   )}
                   {r.grade && <span className="px-1.5 py-0.5 rounded border border-slate-500/30 text-slate-400">grade {r.grade}</span>}
-                  <span className="px-1.5 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-200 font-black" title="Phase 0 capped CoinDCX Wallet Auto-Deployment (max 25%) + max 5x leverage">
+                  <span className="px-1.5 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-200 font-black" title="Full 100% CoinDCX Wallet Auto-Deployment + wallet-tier leverage (below ₹10,000 → 10x, ₹10,000+ → 5x)">
                     ⚡ {walletDeployPct}% Wallet · {activeLeverage}x LEV
                   </span>
                   {r.feeProtection?.feeBreakevenPrice != null && (
@@ -1302,7 +1304,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       <div className="mt-2 text-[9px] text-slate-500 leading-relaxed">
         <div>• <b className="text-slate-400">8 Institutional Top Indicators Integrated</b>: 1. SMC (BOS/CHoCH/OB) · 2. Liquidity Sweep/Trap · 3. Volume Profile (POC/VAH/VAL) · 4. Fair Value Gap (FVG) · 5. ICT (OTE 62–79%/MSS) · 6. EMA (9/20/50/200) · 7. Supply & Demand Zones · 8. Price Action (+ Supertrend/VWAP/Ichimoku + CVD/Chandelier/TTM Squeeze).</div>
         <div>• <b className="text-slate-400">Pakka LONG/SHORT Direction Lock</b>: Deep Context TF + Action Trigger TF + 8 Institutional Pillars consensus + Liquidity Trap Veto & Supply/Demand Wall Veto — false breakout traps auto-blocked.</div>
-        <div>• <b className="text-slate-400">One-Click Live Auto-Trade & Deep Monitor</b>: Phase 0 capped CoinDCX Futures Wallet deployment (<b className="text-slate-400">max {walletDeployPct}% wallet · max {activeLeverage}x · 1% risk/trade</b>) + Full Control of CoinDCX Active Positions (Sirf Active Traded Positions) + 15s Live Signal Recheck + 5-Stage Dynamic SL Trailing & Reversal Profit-Booking until TP1/TP2.</div>
+        <div>• <b className="text-slate-400">One-Click Live Auto-Trade & Deep Monitor</b>: Full {walletDeployPct}% CoinDCX Futures Wallet deployment (<b className="text-slate-400">{activeLeverage}x wallet-tier leverage · 1% risk/trade</b>) + Full Control of CoinDCX Active Positions (Sirf Active Traded Positions) + 15s Live Signal Recheck + 5-Stage Dynamic SL Trailing & Reversal Profit-Booking until TP1/TP2.</div>
       </div>
     </div>
   );

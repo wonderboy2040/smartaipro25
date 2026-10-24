@@ -31,7 +31,10 @@ import {
 } from './llmSentinel.js';
 
 const CLOUD_TIMEOUT_MS = 15_000;   // GPU cloud engines — fast fail
-const OLLAMA_TIMEOUT_MS = 90_000;  // CPU-local llama can be slow (first prompt esp.)
+// CPU-local models are slow (first prompt + 14B deep-reasoner especially).
+// deepseek-r1:14b needs ~2-3 min for a real JSON verdict on a 15GB laptop,
+// so the old 90s budget guaranteed deep-path timeouts. Env-overridable.
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS) || 240_000;
 
 // v21.0: the local Ollama base (sentinel ke jaisa hi env resolve — ek
 // hi default, dono modules me consistent).
@@ -94,6 +97,10 @@ async function askOllamaNative(prompt, { deep = false, images = null, system = n
       { role: 'user', content: prompt, ...(Array.isArray(images) && images.length ? { images } : {}) },
     ],
     ...(useJsonFormat ? { format: 'json' } : {}),
+    // Scan/vision seats must answer fast (the 8B Qwen3 otherwise burns the
+    // whole budget on hidden thinking and can leave `content` empty). The
+    // deep seat keeps native reasoning for the 14B R1 model.
+    ...(deep ? {} : { think: false }),
     options: {
       temperature: 0.2,
       num_ctx: deep ? OLLAMA_NUM_CTX_DEEP : OLLAMA_NUM_CTX,

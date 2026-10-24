@@ -2915,8 +2915,8 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
     note: cfg.liveEntryPaused === true
       ? `⏸ PHASE 0 LIVE ENTRIES PAUSED — naye LIVE/UC-flip entries band; existing positions ka deep monitor, trailing SL aur exchange SL sync chalu hai. Effective caps: ${riskCaps.activeRiskPct || '—'}% risk/trade · ${riskCaps.effectiveWalletDeployPct}% wallet deploy · ${riskCaps.effectiveLeverage}x max leverage.`
       : cfg.executionMode === 'live'
-        ? `LIVE AUTO MODE ACTIVE — ${riskCaps.effectiveWalletDeployPct}% CoinDCX Wallet Deployment + ${riskCaps.effectiveLeverage}x leverage (Wallet < ₹10,000 → 10x · ≥ ₹10,000 → 5x, Phase 0 cap) + Full CoinDCX Active Position Control (TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.`
-        : 'MTF AUTO-LINK PAPER mode me hai (Live Mode activate karne par ELITE/STRONG trades Phase 0 caps ke saath auto lagte hain; Full CoinDCX Active Position Control + TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.',
+        ? `LIVE AUTO MODE ACTIVE — ${riskCaps.effectiveWalletDeployPct}% CoinDCX Wallet Deployment + ${riskCaps.effectiveLeverage}x leverage (wallet-tier: < ₹10,000 → 10x · ≥ ₹10,000 → 5x) + Full CoinDCX Active Position Control (TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.`
+        : 'MTF AUTO-LINK PAPER mode me hai (Live Mode activate karne par ELITE/STRONG trades full-wallet deployment + wallet-tier leverage ke saath auto lagte hain; Full CoinDCX Active Position Control + TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.',
   };
 }
 
