@@ -1127,7 +1127,13 @@ export function registerAITradingRoutes(app, deps) {
         return res.status(409).json({ ok: false, blocked: true, error: lockMsg, reason: lockMsg, directionLock: liveLock });
       }
       const activeSt = mtfAutoStatus();
-      const activeSessionTrades = (activeSt?.deepMonitor?.trades || []).filter(t => t.traded !== false);
+      // v21.23.18 [PAPER != LIVE LOCK]: 1-session-1-trade lock sirf LIVE rows
+      // par lagta hai. Ek open PAPER test trade real LIVE board order ko
+      // indefinitely block nahi karega.
+      const activeSessionTrades = (activeSt?.deepMonitor?.trades || []).filter(t =>
+        t.traded !== false
+        && (String(t.executionMode || '').toUpperCase() === 'LIVE' || Boolean(t.livePositionId)),
+      );
       if (activeSessionTrades.length >= 1) {
         const cur = activeSessionTrades[0];
         const lockMsg = `1 session = 1 trade lock: ${cur.symbol} (${cur.side}) is already active — next trade will open only after ${cur.symbol} finishes`;

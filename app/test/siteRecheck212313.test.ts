@@ -132,11 +132,20 @@ describe('v21.23.13 T3 — paper clicks do not eat the auto engine quota', () =>
 // T4 — HONEST LIVE BUTTON (UI source locks)
 // ============================================================
 describe('v21.23.13 T4 — honest LIVE badge + arm + idle transparency (UI locks)', () => {
-  it('isLiveAuto requires canLive + executionMode live + fresh server deskReady (A3)', () => {
+  it('LIVE badge stays ON for server-armed live mode; readiness is an amber warning (A3 + v21.23.18 stability)', () => {
     const src = read('src/components/aitrading/MTFDualBoardPanel.tsx');
-    expect(src.includes('armed && canLive && autoFresh && auto?.executionMode === \'live\'')).toBe(true);
-    expect(src.includes('deskReadiness?.ready === true')).toBe(true);
+    // v21.23.18: button OFF-flicker cure — server `enabled + executionMode:'live'`
+    // authoritative hai. Readiness/freshness button ko ON/OFF nahi karte.
+    expect(src.includes("const liveArmed = Boolean(armed && auto?.executionMode === 'live')")).toBe(true);
+    expect(src.includes('const isLiveAuto = liveArmed')).toBe(true);
+    // Ek timeout turant OFF nahi karta — 3 consecutive failures ke baad stale.
+    expect(src.includes('autoFailStreakRef.current >= 3')).toBe(true);
     expect(src.includes('setAutoFresh(false)')).toBe(true);
+    // Readiness ab warning hai (button state nahi).
+    expect(src.includes('deskReadiness && deskReadiness.ready === false')).toBe(true);
+    expect(src.includes('LIVE execution is not enabled for this desk/tab')).toBe(true);
+    // Armed state me button kabhi disable nahi (OFF allow karna zaroori).
+    expect(src.includes('disabled={busy || (!armed && auto != null && autoFresh && !canArmLive)}')).toBe(true);
   });
   it('onAutoLiveExecute: honest abort on config/toggle fail + creds pre-flight + skip-reason status', () => {
     const src = read('src/components/aitrading/MTFDualBoardPanel.tsx');

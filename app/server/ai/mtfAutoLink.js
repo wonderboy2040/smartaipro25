@@ -770,7 +770,20 @@ export function updateMtfAutoConfig(patch = {}) {
 }
 
 export function setMtfAutoEnabled(enabled) {
-  return updateMtfAutoConfig({ enabled: Boolean(enabled) });
+  const on = Boolean(enabled);
+  const next = updateMtfAutoConfig({ enabled: on });
+  // v21.23.18 [EXPLICIT RE-ARM = FRESH RETRY]: creds/arming fix karne ke baad
+  // user jab LIVE dobara ON karta hai, purana failed-LIVE per-symbol backoff
+  // (5m→4h) ELITE entry ko ghanton tak block nahi karega. Fail hua to naya
+  // escalating backoff phir lagega (thrash protection intact).
+  if (on) {
+    const st = _loadState();
+    if (st.failedLiveAttempts && Object.keys(st.failedLiveAttempts).length > 0) {
+      st.failedLiveAttempts = {};
+      _persistState();
+    }
+  }
+  return next;
 }
 export function mtfAutoEnabled() { return !!loadMtfAutoConfig().enabled; }
 
@@ -918,6 +931,22 @@ export function isGenuinelyTradedEntry(b, cfg = loadMtfAutoConfig()) {
   return Boolean(b.executionMode === 'LIVE' || b.liveOrderId || b.livePositionId || b.paperId != null || b.traded === true);
 }
 
+/**
+ * v21.23.18 [PAPER != LIVE SESSION]: ek book me PAPER test rows aur LIVE
+ * exchange rows dono rehte hain. LIVE session ke hard gates (1-session lock,
+ * day quota, notional budget, open-symbol lock, post-success cooldown) sirf
+ * LIVE rows count karne chahiye — warna ek open PAPER test trade REAL ELITE
+ * live entry ko indefinitely block kar deta hai ("LIVE ON par trade nahi
+ * lagta"). PAPER rows monitoring ke liye book me rehte hain (SL/TP deep
+ * monitor unhe pehle ki tarah manage karta hai), bas live gates nahi khaate.
+ */
+export function isLiveSessionEntry(b) {
+  if (!b) return false;
+  if (String(b.executionMode || '').toUpperCase() === 'LIVE') return true;
+  if (b.liveOrderId || b.livePositionId) return true;
+  return false;
+}
+
 export function purgeUntradedBookEntries() {
   const st = _loadState();
   let purged = 0;
@@ -999,8 +1028,10 @@ export function markAutoTradeTpSynced({ symbol = null, paperId = null, t2 = null
   return { ok: true, trade: b };
 }
 
-function _openNotionalINR() {
-  return _openLinked().reduce((a, b) => a + (Number(b.notional) || 0), 0);
+function _openNotionalINR(liveOnly = false) {
+  const open = _openLinked();
+  const rows = liveOnly ? open.filter(isLiveSessionEntry) : open;
+  return rows.reduce((a, b) => a + (Number(b.notional) || 0), 0);
 }
 /**
  * v21.23.6: last SUCCESSFUL close epoch (persisted book se — restart-safe).
@@ -1008,11 +1039,14 @@ function _openNotionalINR() {
  * profit stage me thi (native TP/trailed-SL fills jahan row pnl null rehta
  * hai — EXCHANGE_POSITION_CLOSED). PURGED rows kabhi count nahi hote.
  */
-function _lastProfitCloseAt() {
+function _lastProfitCloseAt(liveOnly = false) {
   const st = _loadState();
   let at = 0;
   for (const b of st.book) {
     if (b.status !== 'CLOSED' || !Number(b.closedAt)) continue;
+    // v21.23.18: LIVE post-success cooldown sirf LIVE closes se — paper test
+    // ka profit-mirror real live re-entry ko 5 min block nahi karega.
+    if (liveOnly && !isLiveSessionEntry(b)) continue;
     const reason = String(b.closeReason || '');
     const success = Number(b.pnl) > 0
       || reason.includes('PROFIT')
@@ -1341,7 +1375,10 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
       return null;
     }
     // strict 1-trade-per-session: close ke baad koi aur open bacha to flip nahi
-    if (_openLinked().length > 0) {
+    // v21.23.18: LIVE session me PAPER test rows is lock ko nahi khaate.
+    const flipLiveSession = cfg.executionMode === 'live' || cfg.autoSyncSiteLive !== false;
+    const otherOpen = flipLiveSession ? _openLinked().filter(isLiveSessionEntry) : _openLinked();
+    if (otherOpen.length > 0) {
       _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: another trade still open — 1 session = 1 trade lock`);
       return null;
     }
@@ -1349,7 +1386,8 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     // UTC crypto session cannot be blocked/shortened by the IST rollover.
     const stq = _rollDayIfNeeded();
     const flipQuota = Number(cfg.maxTradesPerDay) || 5;
-    const flipDayCount = stq.book.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;
+    const flipDayCount = (flipLiveSession ? stq.book.filter(isLiveSessionEntry) : stq.book)
+      .filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;
     if (flipDayCount >= flipQuota) {
       _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: daily quota ${flipDayCount}/${flipQuota} done`);
       return null;
@@ -1561,10 +1599,31 @@ export async function mtfAutoTick(p = {}) {
 
   const paper = p.paper || {};
   const summary = typeof paper.getPaperSummary === 'function' ? paper.getPaperSummary() : { open: [] };
-  const openSymbols = _paperOpenSymbols(summary);
-  for (const b of _openLinked()) {
-    if (b.symbol) openSymbols.add(String(b.symbol).toUpperCase());
+  // v21.22.0 USER SPEC:
+  // "ab sirf auto trade button activate hone par Strong trade ko verfied signal lagna chahiye
+  //  long or short accurately aur 1 session me ek hi trade aur full amount of wallet ka
+  //  ye trade hone ke baad then next trade ek sath 2 trades mat lagao"
+  // v21.23.18: session type yahan (openSymbols se PEHLE) compute hota hai —
+  // LIVE session me sirf LIVE rows symbol-lock karte hain, PAPER test row
+  // same symbol ki real ELITE entry ko block nahi karegi.
+  const isLiveSession = cfg.executionMode === 'live'
+    || Boolean(cfg.autoSyncSiteLive !== false && (siteLiveForDesk(p, 'CRYPTO') || siteLiveForDesk(p, 'INDIA')));
+  const openSymbols = new Set();
+  if (isLiveSession) {
+    for (const b of _openLinked().filter(isLiveSessionEntry)) {
+      if (b.symbol) openSymbols.add(String(b.symbol).toUpperCase());
+    }
+  } else {
+    for (const t of summary?.open || []) openSymbols.add(String(t.symbol || '').toUpperCase());
+    for (const b of _openLinked()) {
+      if (b.symbol) openSymbols.add(String(b.symbol).toUpperCase());
+    }
   }
+  // Session-scoped open book: LIVE session me paper test rows gates se bahar.
+  const sessionOpen = () => {
+    const open = _openLinked();
+    return isLiveSession ? open.filter(isLiveSessionEntry) : open;
+  };
 
   // ---------- 0) IMMEDIATE BOOK RECONCILE (SL/T2/manual closes) ----------
   // v21.17.0 DEEP AUDIT: pehle ye check `ageMs < holdMin` ke BAAD tha — agar
@@ -1965,9 +2024,8 @@ export async function mtfAutoTick(p = {}) {
   // "ab sirf auto trade button activate hone par Strong trade ko verfied signal lagna chahiye
   //  long or short accurately aur 1 session me ek hi trade aur full amount of wallet ka
   //  ye trade hone ke baad then next trade ek sath 2 trades mat lagao"
-  const isLiveSession = cfg.executionMode === 'live'
-    || Boolean(cfg.autoSyncSiteLive !== false && (siteLiveForDesk(p, 'CRYPTO') || siteLiveForDesk(p, 'INDIA')));
-  const currentOpenInSession = _openLinked();
+  // (isLiveSession upar compute hota hai — openSymbols ko bhi scope karta hai.)
+  const currentOpenInSession = sessionOpen();
   if (isLiveSession && currentOpenInSession.length >= 1) {
     const act = currentOpenInSession[0];
     out.skipped.push(`1 session = 1 trade lock: ${act?.symbol || 'trade'} (${act?.side || ''}) already active — next trade only after current trade finishes`);
@@ -1983,7 +2041,7 @@ export async function mtfAutoTick(p = {}) {
   // chahiye". Cooldown ke BAAD elite-gate (neeche) hi entry allow karta hai.
   const postSuccessCooldownMs = Math.max(0, Number(cfg.postSuccessCooldownMin ?? 5)) * 60_000;
   if (isLiveSession && postSuccessCooldownMs > 0) {
-    const lastSuccessAt = _lastProfitCloseAt();
+    const lastSuccessAt = _lastProfitCloseAt(isLiveSession);
     if (lastSuccessAt && now - lastSuccessAt < postSuccessCooldownMs) {
       const leftMin = +((postSuccessCooldownMs - (now - lastSuccessAt)) / 60_000).toFixed(1);
       out.skipped.push(`post-success cooldown: ${leftMin}m left (last profitable close ${Math.round((now - lastSuccessAt) / 60_000)}m ago — re-entry ELITE-verified only after cooldown)`);
@@ -1996,7 +2054,7 @@ export async function mtfAutoTick(p = {}) {
 
   for (const market of ['INDIA', 'CRYPTO']) {
     if (out.opened.length >= 1) break;
-    if (isLiveSession && _openLinked().length >= 1) break;
+    if (isLiveSession && sessionOpen().length >= 1) break;
     const deskOn = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
     if (!deskOn) { out.skipped.push(`${market} desk off`); continue; }
     // market gate
@@ -2006,23 +2064,26 @@ export async function mtfAutoTick(p = {}) {
 
     _rollDayIfNeeded();
     const stDay = _loadState(); // day counters (rolled above)
+    // v21.23.18: LIVE session me day quota sirf LIVE rows ka — PAPER test
+    // trades real live quota ko consume nahi karte.
+    const dayRows = isLiveSession ? stDay.book.filter(isLiveSessionEntry) : stDay.book;
     // budget / quota gates (market-wise counters use the SAME day bucket)
     const deskDay = dayKeyFor(market === 'INDIA' ? 'INDIA' : 'CRYPTO');
-    const dayCountForDesk = stDay.book.filter(b => b.market === market && b.dayKey === deskDay).length;
+    const dayCountForDesk = dayRows.filter(b => b.market === market && b.dayKey === deskDay).length;
     // The global counter must respect each desk's own session boundary:
     // INDIA rolls at IST midnight, CRYPTO/FUTURES at UTC midnight. A single
     // st.dayCount rolled only at IST midnight let crypto reset its desk bucket
     // at UTC midnight while the global cap stayed stuck for another 5.5h (and
     // vice versa). Count rows against their own market's current day instead.
-    const dayCountAllDesks = stDay.book.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;
-    const openForDesk = _openLinked().filter(b => b.market === market).length;
+    const dayCountAllDesks = dayRows.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;
+    const openForDesk = sessionOpen().filter(b => b.market === market).length;
     const isLiveExecActive = isLiveSession;
     const effectiveMaxOpenPositions = isLiveExecActive ? 1 : cfg.maxOpenPositions;
     const effectiveMaxTradesPerDay = cfg.maxTradesPerDay;
     if (dayCountAllDesks >= effectiveMaxTradesPerDay) { out.skipped.push(`${market}: daily quota ${dayCountAllDesks}/${cfg.maxTradesPerDay} done`); continue; }
     if (dayCountForDesk >= effectiveMaxTradesPerDay) { out.skipped.push(`${market}: desk quota done`); continue; }
-    if (openForDesk >= effectiveMaxOpenPositions || _openLinked().length >= effectiveMaxOpenPositions) { out.skipped.push(`${market}: max open positions (${openForDesk}/${effectiveMaxOpenPositions})`); continue; }
-    if (_openNotionalINR() >= cfg.maxPositionsINR) { out.skipped.push(`${market}: notional budget full (₹${Math.round(_openNotionalINR())}/${cfg.maxPositionsINR})`); continue; }
+    if (openForDesk >= effectiveMaxOpenPositions || sessionOpen().length >= effectiveMaxOpenPositions) { out.skipped.push(`${market}: max open positions (${openForDesk}/${effectiveMaxOpenPositions})`); continue; }
+    if (_openNotionalINR(isLiveSession) >= cfg.maxPositionsINR) { out.skipped.push(`${market}: notional budget full (₹${Math.round(_openNotionalINR(isLiveSession))}/${cfg.maxPositionsINR})`); continue; }
 
     // v21.23.8 USER SPEC: "sirf FUTURES USDT & EQUITY SIM aur GOLD & SILVER
     // me hi trade lagna chahiye" — crypto-desk auto-pool ab teen ALLOWED
@@ -2046,7 +2107,7 @@ export async function mtfAutoTick(p = {}) {
         ]
       : board.rows;
     // When 0 positions are currently open in Live Auto mode, bypass stale symbol cooldown so user's Live Auto click always fires
-    const effectiveLastEntryAt = (isLiveExecActive && _openLinked().length === 0) ? {} : stDay.perSymbolLast;
+    const effectiveLastEntryAt = (isLiveExecActive && sessionOpen().length === 0) ? {} : stDay.perSymbolLast;
     // v21.23.10 [THRASH-CURE]: failed-LIVE-attempt per-symbol ESCALATING backoff
     // (5m→10m→20m→…cap 4h) — success-cooldown bypass isse affect NAHI hota
     // (user ka "Live Auto click always fires" intent intact), par ek REJECTED
@@ -2096,7 +2157,7 @@ export async function mtfAutoTick(p = {}) {
     // Even in Live Auto mode when 0 trades are open, require `r.triggerFired === true`,
     // `!r.trigger?.overextended`, and `!r.trigger?.postPeakTrap` so Auto-Trade NEVER enters
     // after the trend wave has already completed ("trend moment ke baad trade na lage").
-    if (eligible.length === 0 && isLiveExecActive && _openLinked().length === 0) {
+    if (eligible.length === 0 && isLiveExecActive && sessionOpen().length === 0) {
       eligible = picks.filter(r =>
         (r.side === 'LONG' || r.side === 'SHORT')
         && r.ensembleSignalAvailable !== false
@@ -2133,11 +2194,38 @@ export async function mtfAutoTick(p = {}) {
     }
     out.candidates += eligible.length;
 
+    // v21.23.18 [WHY-NO-TRADE VISIBILITY]: jab koi row eligible na ho to
+    // generic silence ki jagah exact near-miss reasons lastTick me daalo —
+    // UI status line "ELITE signal hai par trigger/direction pending" clearly
+    // dikha sake. LIVE me sirf ELITE/STRONG + trigger-fired hi count hota hai.
+    if (eligible.length === 0) {
+      const near = picks
+        .filter(r => (r.side === 'LONG' || r.side === 'SHORT'))
+        .sort((a, b) => (Number(b.superScore) || 0) - (Number(a.superScore) || 0))
+        .slice(0, 3)
+        .map(r => {
+          const why = [
+            ...(r.autoPickBlockers || []),
+            ...(r.autoBlockers || []),
+          ].filter(Boolean).slice(0, 2);
+          if (why.length === 0) {
+            why.push(
+              `${r.tier || 'ROW'} ${r.superScore ?? '—'}`,
+              `trigger ${r.triggerFired === true ? 'fired' : 'pending'}`,
+              `direction ${r.directionVerified === true ? 'verified' : 'pending'}`,
+            );
+          }
+          return `${r.symbol}: ${why.join(', ')}`;
+        });
+      out.skipped.push(`${market}: no ELITE/STRONG trigger-fired candidate${near.length ? ` — ${near.join(' | ')}` : ' (board has no directional row)'}`);
+      continue;
+    }
+
     let openedThisDesk = 0;
     for (const row of eligible) { // v21.22.0: strictly 1 trade at a time per session — never open 2 trades simultaneously!
       if (openedThisDesk >= 1 || out.opened.length >= 1) break;
       if (dayCountAllDesks + openedThisDesk >= effectiveMaxTradesPerDay) break;
-      if (_openLinked().length >= effectiveMaxOpenPositions) break;
+      if (sessionOpen().length >= effectiveMaxOpenPositions) break;
       const sym = normalizeLinkSymbol(row.symbol, market);
       if (!sym || openSymbols.has(sym)) { out.skipped.push(`${sym}: already open`); continue; }
       const dirLock = checkDirectionLock(sym, row.side, { now });
@@ -2217,7 +2305,7 @@ export async function mtfAutoTick(p = {}) {
       const riskBudget = isUsd ? cfg.riskPerTradeINR / fxRate : cfg.riskPerTradeINR; // USDT | INR
       const rawQty = riskBudget / riskPerUnit;
       let qty = isUsd ? Math.floor(rawQty * 10000) / 10000 : Math.floor(rawQty);
-      const notionalCapINR = Math.min(cfg.maxNotionalPerTradeINR, cfg.maxPositionsINR - _openNotionalINR());
+      const notionalCapINR = Math.min(cfg.maxNotionalPerTradeINR, cfg.maxPositionsINR - _openNotionalINR(isLiveSession));
       const capQty = isUsd ? (notionalCapINR / fxRate) / entry : notionalCapINR / entry;
       if (qty > capQty) qty = isUsd ? Math.floor(capQty * 10000) / 10000 : Math.floor(capQty);
       const minQty = isUsd ? 0.0001 : 1;
@@ -2246,6 +2334,16 @@ export async function mtfAutoTick(p = {}) {
       // In strict live-only mode, only ELITE/STRONG rows auto-place
       if (cfg.executionMode === 'live' && !isEliteOrStrong) {
         out.skipped.push(`${sym}: live mode requires ELITE/STRONG tier (got ${row.tier} ${row.superScore})`);
+        continue;
+      }
+      // v21.23.18 [NO SILENT PAPER FALLBACK IN STRICT LIVE]: user ne LIVE mode
+      // ON kiya hai par is desk ka site-live arm nahi hai (e.g. INDIA typed-
+      // LIVE arming pending) — aise me PAPER row kholna "trade lag gaya" ka
+      // fake signal deta hai jabki exchange par kuch nahi jaata. Explicit skip
+      // + reason do, taaki user desk LIVE arm kare ya PAPER mode chune.
+      // EQUITY SIM exempt hai — wo design se paper/SIM-only desk hai.
+      if (cfg.executionMode === 'live' && !isSimRow && !wantLiveOrder) {
+        out.skipped.push(`${sym}: LIVE mode ON but ${row.market} desk site-live not armed — paper fallback skipped (desk LIVE arm karo ya PAPER mode chuno)`);
         continue;
       }
 

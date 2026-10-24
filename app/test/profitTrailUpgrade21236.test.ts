@@ -253,7 +253,7 @@ describe('v21.23.6 G1 — post-success 5-min cooldown on LIVE re-entry', () => {
   it('profitable close 2m ago → LIVE entry BLOCKED (skipped reason visible, no order)', async () => {
     __resetMtfAutoForTests({ config: cfg, state: { book: [closedProfitRow(2)] } });
     const { paper } = fakePaper();
-    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk() }));
+    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk(), siteLiveByDesk: { crypto: true, india: false } }));
     expect(out.skipped.join(' | ')).toMatch(/post-success cooldown/);
     expect(paper.openPaperTrade).not.toHaveBeenCalled();
     expect(out.opened).toHaveLength(0);
@@ -262,7 +262,7 @@ describe('v21.23.6 G1 — post-success 5-min cooldown on LIVE re-entry', () => {
   it('profitable close 6m ago → cooldown expired → ELITE-verified entry OPENS', async () => {
     __resetMtfAutoForTests({ config: cfg, state: { book: [closedProfitRow(6)] } });
     const { paper } = fakePaper();
-    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk() }));
+    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk(), siteLiveByDesk: { crypto: true, india: false } }));
     expect(out.skipped.join(' | ')).not.toMatch(/post-success cooldown/);
     expect(paper.openPaperTrade).toHaveBeenCalledTimes(1);
     expect(out.opened).toHaveLength(1);
@@ -274,7 +274,7 @@ describe('v21.23.6 G1 — post-success 5-min cooldown on LIVE re-entry', () => {
       state: { book: [closedProfitRow(2, { pnl: null, closeReason: 'EXCHANGE_POSITION_CLOSED', peakR: 0.9 })] },
     });
     const { paper } = fakePaper();
-    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk() }));
+    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk(), siteLiveByDesk: { crypto: true, india: false } }));
     expect(out.skipped.join(' | ')).toMatch(/post-success cooldown/);
     expect(paper.openPaperTrade).not.toHaveBeenCalled();
   });
@@ -285,7 +285,7 @@ describe('v21.23.6 G1 — post-success 5-min cooldown on LIVE re-entry', () => {
       state: { book: [closedProfitRow(2, { pnl: -50, closeReason: 'SL_HIT' })] },
     });
     const { paper } = fakePaper();
-    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk() }));
+    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk(), siteLiveByDesk: { crypto: true, india: false } }));
     expect(out.skipped.join(' | ')).not.toMatch(/post-success cooldown/);
     expect(paper.openPaperTrade).toHaveBeenCalledTimes(1);
   });
@@ -296,7 +296,7 @@ describe('v21.23.6 G1 — post-success 5-min cooldown on LIVE re-entry', () => {
       state: { book: [closedProfitRow(2, { pnl: null, closeReason: 'PURGED_UNTRADED_ENTRY' })] },
     });
     const { paper } = fakePaper();
-    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk() }));
+    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk(), siteLiveByDesk: { crypto: true, india: false } }));
     expect(out.skipped.join(' | ')).not.toMatch(/post-success cooldown/);
     expect(paper.openPaperTrade).toHaveBeenCalledTimes(1);
   });
@@ -307,7 +307,7 @@ describe('v21.23.6 G1 — post-success 5-min cooldown on LIVE re-entry', () => {
       state: { book: [closedProfitRow(2)] },
     });
     const { paper } = fakePaper();
-    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk() }));
+    const out = await mtfAutoTick(liveP(paper, { liveExecute: liveExecuteOk(), siteLiveByDesk: { crypto: true, india: false } }));
     expect(out.skipped.join(' | ')).not.toMatch(/post-success cooldown/);
     expect(paper.openPaperTrade).toHaveBeenCalledTimes(1);
   });
@@ -411,7 +411,10 @@ describe('v21.23.6 source pins', () => {
 
   it('cooldown + elite gates wired (config default 5 + helper + tick gate)', () => {
     expect(LINK_SRC).toContain('postSuccessCooldownMin: 5');
-    expect(LINK_SRC).toContain('function _lastProfitCloseAt()');
+    // v21.23.18: cooldown helper ab live-scoped hai — PAPER test closes real
+    // LIVE re-entry ko block nahi karte.
+    expect(LINK_SRC).toContain('function _lastProfitCloseAt(liveOnly = false)');
+    expect(LINK_SRC).toContain('const lastSuccessAt = _lastProfitCloseAt(isLiveSession);');
     expect(LINK_SRC).toContain('post-success cooldown: ${leftMin}m left');
   });
 });

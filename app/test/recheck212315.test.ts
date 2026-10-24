@@ -89,8 +89,12 @@ describe('v21.23.15 recheck — desk scope + safety source pins', () => {
 
   it('daily quota counts each desk against its own UTC/IST day boundary', () => {
     const ai = read('server/ai/mtfAutoLink.js');
-    expect(ai).toContain('const dayCountAllDesks = stDay.book.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;');
-    expect(ai).toContain('const flipDayCount = stq.book.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;');
+    // v21.23.18: day rows live-scoped hain (PAPER test rows live quota nahi
+    // khaate), par day boundary still per-desk UTC/IST hi hai.
+    expect(ai).toContain('const dayRows = isLiveSession ? stDay.book.filter(isLiveSessionEntry) : stDay.book;');
+    expect(ai).toContain('const dayCountAllDesks = dayRows.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;');
+    expect(ai).toContain('const flipDayCount = (flipLiveSession ? stq.book.filter(isLiveSessionEntry) : stq.book)');
+    expect(ai).toContain('.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;');
   });
 
   it('POST /mtf-auto/config paper mode defaults autoSyncSiteLive to false', () => {

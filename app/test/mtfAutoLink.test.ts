@@ -24,8 +24,9 @@ import { durablePut } from '../server/mcp/durable.js';
 import {
   mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig,
   setMtfAutoEnabled, normalizeLinkSymbol, recordPaperMtfBoardTrade,
-  __resetMtfAutoForTests, __reloadMtfAutoForBoot, MTF_AUTO_DEFAULTS,
+  isLiveSessionEntry, __resetMtfAutoForTests, __reloadMtfAutoForBoot, MTF_AUTO_DEFAULTS,
 } from '../server/ai/mtfAutoLink.js';
+import { dayKeyFor } from '../server/intraday/time.js';
 
 // Phase-3 persistence is asserted without any GitHub/network calls.
 vi.mock('../server/mcp/durable.js', () => ({ durablePut: vi.fn() }));
@@ -98,6 +99,14 @@ describe('mtfAutoLink — config + status', () => {
     expect(cfg.riskPerTradeINR).toBeLessThanOrEqual(25000);
     expect(cfg.maxTradesPerDay).toBeLessThanOrEqual(25);
     expect(cfg.mode).toBe('INTRADAY');
+  });
+
+  it('v21.23.18: isLiveSessionEntry separates PAPER test rows from LIVE exchange rows', () => {
+    expect(isLiveSessionEntry({ executionMode: 'LIVE' })).toBe(true);
+    expect(isLiveSessionEntry({ liveOrderId: 'ord' })).toBe(true);
+    expect(isLiveSessionEntry({ livePositionId: 'pos' })).toBe(true);
+    expect(isLiveSessionEntry({ paperId: 7, executionMode: 'PAPER', traded: true })).toBe(false);
+    expect(isLiveSessionEntry(null)).toBe(false);
   });
 
   it('normalizeLinkSymbol strips venue namespaces + quote suffixes', () => {
@@ -211,6 +220,178 @@ describe('mtfAutoLink — tick gates', () => {
       // test ran inside NSE hours — entry must be a real paper open
       expect(calls.opened[0].market).toBe('INDIA');
     }
+  });
+});
+
+describe('mtfAutoLink — PAPER test rows never block the LIVE session', () => {
+  beforeEach(() => { __resetMtfAutoForTests(); });
+
+  function livePaper() {
+    const { paper } = fakePaper();
+    return paper;
+  }
+  function liveExec() {
+    return vi.fn(async () => ({
+      ok: true, orderId: 'ord-1',
+      filled: { qty: 1, price: 100, stopLoss: 99, t1: 101, t2: 102 },
+      position: { id: 'pos-1' },
+    }));
+  }
+  const liveCtx = () => ({ siteLiveByDesk: { crypto: true, india: false } });
+
+  it('v21.23.18: an open PAPER test trade does NOT trigger the 1-session live lock', async () => {
+    const now = Date.now();
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'live', desks: { india: false, crypto: true } },
+      state: {
+        book: [{
+          paperId: 77, symbol: 'ETH', market: 'CRYPTO', execMarket: 'FUTURES', side: 'LONG',
+          entry: 50, stopLoss: 49, t1: 51, t2: 52, qty: 1, notional: 5000,
+          openedAt: now, status: 'OPEN', executionMode: 'PAPER', traded: true,
+        }],
+      },
+    });
+    const paper = livePaper();
+    paper.open.push({ id: 77, symbol: 'ETH', market: 'FUTURES', status: 'OPEN' });
+    const liveExecute = liveExec();
+    const out = await mtfAutoTick({
+      boards: { CRYPTO: boardFixture('BTCUSDT') }, paper, liveExecute, ...liveCtx(),
+    });
+    expect(out.skipped.join(' ')).not.toMatch(/1 session = 1 trade lock/);
+    expect(liveExecute).toHaveBeenCalledTimes(1);
+    expect(out.opened).toHaveLength(1);
+    expect(out.opened[0].executionMode).toBe('LIVE');
+  });
+
+  it('v21.23.18: a PAPER row on the SAME symbol does not poison the live symbol lock', async () => {
+    const now = Date.now();
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'live', desks: { india: false, crypto: true } },
+      state: {
+        book: [{
+          paperId: 88, symbol: 'BTC', market: 'CRYPTO', execMarket: 'FUTURES', side: 'LONG',
+          entry: 100, stopLoss: 99, t1: 101, t2: 102, qty: 1, notional: 5000,
+          openedAt: now, status: 'OPEN', executionMode: 'PAPER', traded: true,
+        }],
+      },
+    });
+    const paper = livePaper();
+    paper.open.push({ id: 88, symbol: 'BTC', market: 'FUTURES', status: 'OPEN' });
+    const liveExecute = liveExec();
+    const out = await mtfAutoTick({
+      boards: { CRYPTO: boardFixture('BTCUSDT') }, paper, liveExecute, ...liveCtx(),
+    });
+    expect(out.skipped.join(' ')).not.toMatch(/already open/);
+    expect(liveExecute).toHaveBeenCalledTimes(1);
+    expect(out.opened).toHaveLength(1);
+  });
+
+  it('v21.23.18: PAPER rows do not consume the LIVE daily quota / post-success cooldown', async () => {
+    const now = Date.now();
+    __resetMtfAutoForTests({
+      config: {
+        enabled: true, executionMode: 'live', maxTradesPerDay: 1,
+        postSuccessCooldownMin: 0, desks: { india: false, crypto: true },
+      },
+      state: {
+        book: [{
+          paperId: 99, symbol: 'ETH', market: 'CRYPTO', execMarket: 'FUTURES', side: 'LONG',
+          entry: 50, stopLoss: 49, t1: 51, t2: 52, qty: 1, notional: 5000,
+          openedAt: now, dayKey: dayKeyFor('CRYPTO', new Date(now)),
+          status: 'CLOSED', closeReason: 'T2_HIT', closedAt: now, pnl: 100,
+          executionMode: 'PAPER', traded: true,
+        }],
+      },
+    });
+    const paper = livePaper();
+    const liveExecute = liveExec();
+    const out = await mtfAutoTick({
+      boards: { CRYPTO: boardFixture('BTCUSDT') }, paper, liveExecute, ...liveCtx(),
+    });
+    expect(out.skipped.join(' ')).not.toMatch(/daily quota|desk quota|post-success cooldown/);
+    expect(liveExecute).toHaveBeenCalledTimes(1);
+    expect(out.opened).toHaveLength(1);
+  });
+
+  it('v21.23.18: explicit LIVE re-arm clears stale failed-attempt backoff', async () => {
+    const now = Date.now();
+    __resetMtfAutoForTests({
+      config: { enabled: false, executionMode: 'live', desks: { india: false, crypto: true } },
+      state: {
+        failedLiveAttempts: { BTC: { at: now, count: 5, reason: 'old creds error' } },
+      },
+    });
+    // User explicitly re-arms LIVE after fixing creds/arming.
+    setMtfAutoEnabled(true);
+    const paper = livePaper();
+    const liveExecute = liveExec();
+    const out = await mtfAutoTick({
+      boards: { CRYPTO: boardFixture('BTCUSDT') }, paper, liveExecute, ...liveCtx(),
+    });
+    expect(out.skipped.join(' ')).not.toMatch(/live-attempt backoff/);
+    expect(liveExecute).toHaveBeenCalledTimes(1);
+    expect(out.opened).toHaveLength(1);
+  });
+
+  it('v21.23.18: strict LIVE mode does NOT open a silent PAPER fallback when the desk is not site-live', async () => {
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'live', desks: { india: false, crypto: true } },
+    });
+    const { paper, calls } = fakePaper();
+    const liveExecute = liveExec();
+    const out = await mtfAutoTick({
+      boards: { CRYPTO: boardFixture('BTCUSDT') }, paper, liveExecute,
+      siteLiveByDesk: { crypto: false, india: false },
+    });
+    expect(out.skipped.join(' ')).toMatch(/paper fallback skipped/);
+    expect(calls.opened).toEqual([]);
+    expect(liveExecute).not.toHaveBeenCalled();
+    expect(out.opened).toHaveLength(0);
+  });
+
+  it('v21.23.18: EQUITY SIM rows still open paper/SIM entries in strict LIVE mode', async () => {
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'live', desks: { india: false, crypto: true } },
+    });
+    const { paper, calls } = fakePaper();
+    const baseRow = boardFixture('NVDA').rows[0];
+    const board = {
+      ...boardFixture('NVDA'),
+      rows: [],
+      equitySimRows: [{ ...baseRow, market: 'GLOBALFUTURES', ltp: 100 }],
+    };
+    const out = await mtfAutoTick({
+      boards: { CRYPTO: board }, paper, liveExecute: liveExec(),
+      siteLiveByDesk: { crypto: false, india: false },
+    });
+    expect(out.skipped.join(' ')).not.toMatch(/paper fallback skipped/);
+    expect(calls.opened).toHaveLength(1);
+    expect(calls.opened[0].market).toBe('GLOBALFUTURES');
+    expect(out.opened).toHaveLength(1);
+    expect(out.opened[0].executionMode).toBe('PAPER');
+  });
+
+  it('v21.23.18: a real LIVE open position still enforces 1 session = 1 trade', async () => {
+    const now = Date.now();
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'live', desks: { india: false, crypto: true } },
+      state: {
+        book: [{
+          paperId: 55, liveOrderId: 'ord-live', livePositionId: 'pos-live',
+          symbol: 'ETH', market: 'CRYPTO', execMarket: 'FUTURES', side: 'LONG',
+          entry: 50, stopLoss: 49, t1: 51, t2: 52, qty: 1, notional: 5000,
+          openedAt: now, status: 'OPEN', executionMode: 'LIVE', traded: true,
+        }],
+      },
+    });
+    const paper = livePaper();
+    const liveExecute = liveExec();
+    const out = await mtfAutoTick({
+      boards: { CRYPTO: boardFixture('BTCUSDT') }, paper, liveExecute, ...liveCtx(),
+    });
+    expect(out.skipped.join(' ')).toMatch(/1 session = 1 trade lock/);
+    expect(liveExecute).not.toHaveBeenCalled();
+    expect(out.opened).toHaveLength(0);
   });
 });
 
