@@ -20,7 +20,7 @@
 // ============================================================
 import { loadJSON, saveJSON } from './store.js';
 import { istDayKey, istMinutes, isNseMarketOpen, dayKeyFor } from './time.js';
-import { isCryptoSymbolBase } from './engine.js';
+import { isCryptoSymbolBase, intradayDirectionGateConfig, INTRADAY_NO_EDGE_CAP } from './engine.js';
 // v10.3.1: encrypted durable mirror (paper-trades already had the raw
 // scheduleBackup; the track record now rides the same encrypted
 // durableBootRestore path as the trading journal) — a Render spin-down
@@ -580,6 +580,76 @@ function _directionStats(rows) {
   };
 }
 
+// v21.23.17 GATE PROMOTION READINESS — the shadow gates stay the default
+// until the DIRECTION REPORT proves the cohort they would block actually
+// underperforms the cohort they keep. This is deliberately a cohort
+// comparison (not a per-trade "would have won" simulation): the persisted
+// telemetry is honest about which side of the threshold each row was on.
+//   • blocked: resolved rows the gate would suppress (margin < min, stale)
+//   • kept:    resolved rows the gate would allow
+// Promotion requires BOTH sides to have enough settled outcomes, the
+// blocked cohort to be at/below a coin-flip win rate, and a material
+// (>=8pp) underperformance gap. Until then: COLLECTING / KEEP_SHADOW.
+const GATE_PROMOTION_CRITERIA = Object.freeze({
+  minBlockedResolved: 10,
+  minKeptResolved: 20,
+  maxBlockedWinRate: 50,
+  minWinRateGap: 8,
+});
+
+function _gateCohort(rows, test) {
+  const s = _directionStats(rows.filter(test));
+  return {
+    n: s.n,
+    resolved: s.resolved,
+    wins: s.wins,
+    losses: s.losses,
+    winRate: s.winRate,
+    avgConfidence: s.avgConfidence,
+  };
+}
+
+function _gateReadiness({ rows, mode, blockedTest, keptTest, thresholdLabel, thresholdValue, envFlag }) {
+  const blocked = _gateCohort(rows, blockedTest);
+  const kept = _gateCohort(rows, keptTest);
+  const enough = blocked.resolved >= GATE_PROMOTION_CRITERIA.minBlockedResolved
+    && kept.resolved >= GATE_PROMOTION_CRITERIA.minKeptResolved;
+  const winRateGapPp = blocked.winRate != null && kept.winRate != null
+    ? +(kept.winRate - blocked.winRate).toFixed(1)
+    : null;
+  const promote = enough
+    && blocked.winRate != null
+    && blocked.winRate <= GATE_PROMOTION_CRITERIA.maxBlockedWinRate
+    && winRateGapPp != null
+    && winRateGapPp >= GATE_PROMOTION_CRITERIA.minWinRateGap;
+  const status = mode === 'enforce'
+    ? 'ENFORCED'
+    : !enough ? 'COLLECTING' : promote ? 'PROMOTE_READY' : 'KEEP_SHADOW';
+  const missing = {
+    blockedResolved: Math.max(0, GATE_PROMOTION_CRITERIA.minBlockedResolved - blocked.resolved),
+    keptResolved: Math.max(0, GATE_PROMOTION_CRITERIA.minKeptResolved - kept.resolved),
+  };
+  const nextStep = status === 'ENFORCED'
+    ? `${envFlag} is enforced — take the cohorts above as historical evidence, not a running A/B.`
+    : status === 'PROMOTE_READY'
+      ? `Set ${envFlag}=enforce on Render (the blocked cohort underperforms by ${winRateGapPp}pp).`
+      : status === 'COLLECTING'
+        ? `Collect ${missing.blockedResolved} more resolved blocked + ${missing.keptResolved} more resolved kept rows, then re-check /api/ai/direction-report.`
+        : `Keep ${envFlag}=${mode} — the blocked cohort is not underperforming enough yet (gap ${winRateGapPp ?? 'n/a'}pp).`;
+  return {
+    mode,
+    status,
+    recommended: status === 'PROMOTE_READY',
+    threshold: { label: thresholdLabel, value: thresholdValue },
+    blocked,
+    kept,
+    winRateGapPp,
+    missing,
+    criteria: { ...GATE_PROMOTION_CRITERIA },
+    nextStep,
+  };
+}
+
 /**
  * Direction-accuracy report over the FULL tracked-signals state.
  * @param {number} days lookback (1..365, default 30)
@@ -648,6 +718,45 @@ export function getDirectionReport(days = 30, tab = 'ALL') {
     if (r.staleCapped === true) staleCapped++;
   }
 
+  // v21.23.17: promotion readiness for the shadow-by-default direction
+  // gates. Both cohorts are measured on settled outcomes only; null
+  // telemetry (board rows / no TV reference) never counts as a clean row.
+  const gateCfg = intradayDirectionGateConfig();
+  const gateReadiness = {
+    config: {
+      marginGate: gateCfg.marginGate,
+      minMargin: gateCfg.minMargin,
+      staleGuard: gateCfg.staleGuard,
+      staleMaxPct: gateCfg.staleMaxPct,
+      noEdgeCap: INTRADAY_NO_EDGE_CAP,
+    },
+    margin: _gateReadiness({
+      rows,
+      mode: gateCfg.marginGate,
+      blockedTest: r => {
+        const m = _numOrNull(r.edgeMargin);
+        return m != null && m < gateCfg.minMargin;
+      },
+      keptTest: r => {
+        const m = _numOrNull(r.edgeMargin);
+        return m != null && m >= gateCfg.minMargin;
+      },
+      thresholdLabel: 'edgeMargin',
+      thresholdValue: gateCfg.minMargin,
+      envFlag: 'INTRADAY_MARGIN_GATE',
+    }),
+    stale: _gateReadiness({
+      rows,
+      mode: gateCfg.staleGuard,
+      blockedTest: r => r.staleDetected === true,
+      // A false staleDetected with no TV reference is NOT clean evidence.
+      keptTest: r => r.staleDetected === false && _numOrNull(r.ltpTvDivPct) != null,
+      thresholdLabel: 'abs(ltpTvDivPct) >',
+      thresholdValue: gateCfg.staleMaxPct,
+      envFlag: 'INTRADAY_STALE_GUARD',
+    }),
+  };
+
   return {
     ok: true,
     days: windowDays,
@@ -675,6 +784,7 @@ export function getDirectionReport(days = 30, tab = 'ALL') {
       marginCapped,
       staleGuard: { detected: staleDetected, capped: staleCapped },
     },
+    gateReadiness,
   };
 }
 

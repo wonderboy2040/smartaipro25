@@ -412,23 +412,44 @@ function _tfVote(candles, tf) {
   const { dir, scaled } = __decideVoteDirection({ score, adx: adxV, v2, activeDump, activePump });
 
   // Structure: EMA20/50 stack primary, Supertrend fallback. A vote against
-  // structure is allowed (reversals trade) but its strength is capped at 60
-  // so the board/weighting never treats it as a full-conviction trend read.
+  // structure is allowed (reversals trade) but two conditions apply:
+  //   1. it is only PUBLISHED when the reversal is confirmed (active pump/
+  //      dump) AND price has closed beyond EMA50 in the vote direction.
+  //      Without this, a ~1% counter-trend bounce inside a clean downtrend
+  //      breaks a 13-bar swing, forces the reversal direction, and flips the
+  //      timeframe to +1 while the EMA20/50 stack (and price vs EMA50) still
+  //      say the trend is intact.
+  //   2. when it IS published, strength stays capped at 60 so the board/
+  //      weighting never treats it as a full-conviction trend read.
   const supDir = sup && Number.isFinite(sup.direction) ? Math.sign(sup.direction) : 0;
   const structureDir = (ema20 != null && ema50 != null)
     ? (ema20 > ema50 ? 1 : ema20 < ema50 ? -1 : 0)
     : supDir;
   const structureConflict = v2 && dir !== 0 && structureDir !== 0 && dir !== structureDir;
+  const reversalConfirmed = dir > 0 ? activePump : dir < 0 ? activeDump : false;
+  const closeBeyondEma50 = ema50 == null
+    ? false
+    : dir > 0 ? close > ema50 : dir < 0 ? close < ema50 : false;
+  // Counter-structure votes are neutral (no board weight) until the reversal
+  // proves itself beyond EMA50. A missing EMA50 is treated as unconfirmed —
+  // conservative by design (the legacy escape hatch still publishes it).
+  const counterStructureSuppressed = structureConflict && !(reversalConfirmed && closeBeyondEma50);
+  const voteDir = counterStructureSuppressed ? 0 : dir;
   const rawStrength = Math.round(clamp(Math.abs(scaled) / 4.5, 0, 1) * 100);
-  const strength = structureConflict ? Math.min(rawStrength, 60) : rawStrength;
+  const strength = counterStructureSuppressed
+    ? 0
+    : structureConflict ? Math.min(rawStrength, 60) : rawStrength;
   const noteBits = [];
   if (ema20 != null && ema50 != null) noteBits.push(close >= ema20 && ema20 > ema50 ? 'EMA bull' : close <= ema20 && ema20 < ema50 ? 'EMA bear' : close >= ema20 ? 'EMA reclaim' : 'EMA break');
   if (rsiV != null) noteBits.push(`RSI ${Math.round(rsiV)}`);
   if (adxV != null) noteBits.push(`ADX ${Math.round(adxV)}`);
   if (mac && num(mac.hist) != null) noteBits.push(mac.hist > 0 ? 'MACD+' : 'MACD-');
-  if (v2 && structureConflict) noteBits.push('counter-structure');
+  if (v2 && structureConflict) {
+    const vetoWhy = ema50 == null ? 'EMA50 unavailable' : !closeBeyondEma50 ? 'price not beyond EMA50' : 'reversal unconfirmed';
+    noteBits.push(counterStructureSuppressed ? `counter-structure veto (${vetoWhy})` : 'counter-structure');
+  }
   return {
-    tf, dir, strength, conf: Math.max(20, strength),
+    tf, dir: voteDir, strength, conf: Math.max(20, strength),
     rsi: rsiV != null ? Math.round(rsiV * 10) / 10 : null,
     adx: adxV != null ? Math.round(adxV * 10) / 10 : null,
     ltp: close,
@@ -439,6 +460,12 @@ function _tfVote(candles, tf) {
     context2: v2 ? context2 : null,
     structureDir: v2 ? structureDir : null,
     structureConflict,
+    // v21.23.17: explicit suppression telemetry — the board badge can show
+    // "60% capped" vs "neutral (EMA50 not reclaimed)" without guessing.
+    counterStructureSuppressed,
+    counterStructureSuppressedReason: counterStructureSuppressed
+      ? (ema50 == null ? 'ema50-unavailable' : !closeBeyondEma50 ? 'close-not-beyond-ema50' : 'reversal-unconfirmed')
+      : null,
     rawStrength,
     // Additive telemetry: pre-ADX score + confirmed reversal side. Tests use
     // them to prove the force path and the legacy escape hatch.
@@ -712,7 +739,19 @@ export function mtfWire6Payload(snap) {
     ...legacy,
     engine: 'mtf6',
     available: true,
-    tfs: (snap.timeframes || []).map(v => ({ tf: v.tf, dir: v.dir, conf: v.conf ?? v.strength ?? 0 })),
+    tfs: (snap.timeframes || []).map(v => ({
+      tf: v.tf,
+      dir: v.dir,
+      conf: v.conf ?? v.strength ?? 0,
+      // v21.23.17: expose the cap/veto so the badge can explain why a
+      // counter-structure vote is 60% (or absent) instead of silently
+      // looking like a weak trend read.
+      strength: v.strength ?? v.conf ?? 0,
+      rawStrength: v.rawStrength ?? null,
+      structureConflict: v.structureConflict === true,
+      counterStructureSuppressed: v.counterStructureSuppressed === true,
+      reversal: v.reversal ?? null,
+    })),
     consensus: snap.consensus,
     alignment: snap.alignment,
     agreementPct: snap.agreementPct,

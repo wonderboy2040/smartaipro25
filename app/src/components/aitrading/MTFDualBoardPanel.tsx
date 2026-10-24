@@ -171,20 +171,34 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     window.setTimeout(() => setNote(null), 7000);
   }, []);
 
-  const pickMode = useCallback((m: TradePlanModeId) => {
+  const pickMode = useCallback(async (m: TradePlanModeId) => {
     const h = MODES.find(x => x.id === m)?.hold ?? 45;
+    const prevMode = mode;
+    const prevHold = holdMin;
     userTouchedRef.current = true;
     setMode(m);
     setHoldMin(h);
-    void updateMtfAutoConfigApi({ mode: m, holdMin: h });
-  }, []);
+    // v21.23.17 [HONEST CONFIG]: a failed save used to leave the UI showing a
+    // mode the engine never accepted. Revert + show the real server reason.
+    const res = await updateMtfAutoConfigApi({ mode: m, holdMin: h });
+    if (res.ok) setAuto(res.status);
+    else {
+      setMode(prevMode);
+      setHoldMin(prevHold);
+      notify(false, `mode save fail — ${res.error}`);
+    }
+  }, [mode, holdMin, notify]);
 
   const onToggle = useCallback(async (enabled: boolean) => {
     setBusy(true);
-    const st = await setMtfAutoEnabledApi(enabled);
+    const res = await setMtfAutoEnabledApi(enabled);
     setBusy(false);
-    if (st) { setAuto(st); notify(true, enabled ? 'MTF AUTO-LINK ARMED — 75+ confirmed Deep-Trend rows auto-execute honge' : 'MTF AUTO-LINK DISARMED — naye entries band'); }
-    else notify(false, 'toggle fail — server check karo');
+    if (res.ok) {
+      setAuto(res.status);
+      notify(true, enabled ? 'MTF AUTO-LINK ARMED — 75+ confirmed Deep-Trend rows auto-execute honge' : 'MTF AUTO-LINK DISARMED — naye entries band');
+    } else {
+      notify(false, `toggle fail — ${res.error}`);
+    }
   }, [notify]);
 
   const { wallet: liveWallet } = useWalletPoll();
@@ -320,10 +334,21 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
         deepMonitorEnabled: true,
       };
       if (effectiveWalletINR > 0) cfgPatch.walletAmountINR = effectiveWalletINR;
-      const stCfg = await updateMtfAutoConfigApi(cfgPatch);
-      if (stCfg) setAuto(stCfg);
-      const stArm = await setMtfAutoEnabledApi(true);
-      if (stArm) setAuto(stArm);
+      const resCfg = await updateMtfAutoConfigApi(cfgPatch);
+      if (!resCfg.ok) {
+        // v21.23.17 [HONEST PAPER ARM]: the old path armed the engine even
+        // when the config POST failed, so the paper test could silently run
+        // with stale mode/desk settings. Abort + show the REAL server reason.
+        notify(false, `⛔ PAPER AUTO-TEST config save fail — ${resCfg.error}. Engine arm nahi hua; retry karo.`);
+        return;
+      }
+      setAuto(resCfg.status);
+      const resArm = await setMtfAutoEnabledApi(true);
+      if (!resArm.ok) {
+        notify(false, `⛔ PAPER AUTO-TEST arm fail — ${resArm.error}. Retry karo.`);
+        return;
+      }
+      setAuto(resArm.status);
       const r = await runMtfAutoTick();
       const openedCount = r?.tick?.opened?.length ?? 0;
       if (openedCount > 0) {
@@ -396,20 +421,21 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
         deepMonitorEnabled: true,
       };
       if (effectiveWalletINR > 0) cfgPatch.walletAmountINR = effectiveWalletINR;
-      const stCfg = await updateMtfAutoConfigApi(cfgPatch);
+      const resCfg = await updateMtfAutoConfigApi(cfgPatch);
       // v21.23.13 [HONEST ARM — LIVE]: /config ya /toggle fail par bhi code
       // aage badh ke engine PURANE mode (paper) me arm ho sakta tha — user
       // LIVE samajh baithta tha. Ab har step fail par HONEST abort + reason.
-      if (!stCfg) {
-        notify(false, '⛔ AUTO-LIVE config save NAHI hua (server error) — LIVE mode arm nahi hua. Retry karo.');
+      if (!resCfg.ok) {
+        notify(false, `⛔ AUTO-LIVE config save fail — ${resCfg.error}. LIVE mode arm nahi hua. Retry karo.`);
         setBusy(false); return;
       }
-      setAuto(stCfg);
-      const stArm = await setMtfAutoEnabledApi(true);
-      if (!stArm) {
-        notify(false, '⛔ AUTO-LINK arm fail (server error) — LIVE ON nahi hua. Retry karo.');
+      setAuto(resCfg.status);
+      const resArm = await setMtfAutoEnabledApi(true);
+      if (!resArm.ok) {
+        notify(false, `⛔ AUTO-LINK arm fail — ${resArm.error}. LIVE ON nahi hua. Retry karo.`);
         setBusy(false); return;
       }
+      const stArm = resArm.status;
       setAuto(stArm);
       // v21.23.13 [CREDS PRE-FLIGHT]: creds missing = engine har live attempt
       // instantly reject + per-symbol escalating backoff (5m→4h) khayega —

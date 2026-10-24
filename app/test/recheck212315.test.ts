@@ -23,7 +23,7 @@ const CFG_FILE = path.join(TMP, 'mtf-auto-config.json');
 
 beforeAll(async () => {
   mtf = await import('../server/ai/mtfAutoLink.js');
-});
+}, 30_000);
 
 afterAll(() => {
   try { mtf?.__reloadMtfAutoForBoot({ restored: false }); } catch { /* best-effort */ }
@@ -97,6 +97,18 @@ describe('v21.23.15 recheck — desk scope + safety source pins', () => {
     const routes = read('server/ai/routes.js');
     expect(routes).toContain("if (body.executionMode === 'paper' && body.autoSyncSiteLive === undefined)");
     expect(routes).toContain('body.autoSyncSiteLive = false;');
+  });
+
+  it('paper/live arm aborts on config/toggle failure with the real reason', () => {
+    const ui = read('src/components/aitrading/MTFDualBoardPanel.tsx');
+    expect(ui).toContain('PAPER AUTO-TEST config save fail');
+    expect(ui).toContain('AUTO-LIVE config save fail');
+    expect(ui).toContain('${resCfg.error}');
+    expect(ui).toContain('${resArm.error}');
+    expect(ui).not.toContain('config save NAHI hua (server error)');
+    // The paper test must not arm the engine when the config POST failed.
+    const paper = ui.slice(ui.indexOf('const onAutoPaperExecute'), ui.indexOf('const onLiveOrder'));
+    expect(paper.indexOf('if (!resCfg.ok)')).toBeLessThan(paper.indexOf('setMtfAutoEnabledApi(true)'));
   });
 
   it('India LIVE pre-flight does not require CoinDCX creds (Dhan desk)', () => {

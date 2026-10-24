@@ -86,7 +86,18 @@ export interface MTFConfluence {
    *  the 6-chip view with consensus/phase/timing when engine==='mtf6'. */
   engine?: 'mtf6';
   available?: boolean;
-  tfs?: Array<{ tf: string; dir: number | null; conf: number }>;
+  tfs?: Array<{
+    tf: string;
+    dir: number | null;
+    conf: number;
+    /** v21.23.17: published vote strength (0 when structure-vetoed). */
+    strength?: number;
+    /** Pre-cap strength — lets the badge explain a 60% counter-structure cap. */
+    rawStrength?: number | null;
+    structureConflict?: boolean;
+    counterStructureSuppressed?: boolean;
+    reversal?: 'pump' | 'dump' | null;
+  }>;
   consensus?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
   alignment?: number;
   agreementPct?: number;

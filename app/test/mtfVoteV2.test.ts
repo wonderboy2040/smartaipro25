@@ -5,7 +5,7 @@
 // flipping the env flag and restored afterwards.
 // ============================================================
 import { describe, it, expect, afterEach } from 'vitest';
-import { __tfVote, __decideVoteDirection, mtfVoteV2Enabled } from '../server/ai/mtf.js';
+import { __tfVote, __decideVoteDirection, mtfVoteV2Enabled, mtfWire6Payload } from '../server/ai/mtf.js';
 
 const OPEN = 1_700_000_000_000;
 
@@ -72,10 +72,70 @@ describe('v21.23.15 MTF vote v2', () => {
     expect(v.dir).toBe(1);
     expect(v.structureDir).toBe(-1);
     expect(v.structureConflict).toBe(true);
+    expect(v.counterStructureSuppressed).toBe(false); // close 148 > EMA50 133.4
     expect(v.rawStrength).toBeGreaterThan(60);
     expect(v.strength).toBe(60);
     expect(v.conf).toBe(60);
     expect(v.note).toContain('counter-structure');
+  });
+
+  it('suppresses a shallow ~1% counter-structure bounce (no confirmed pump)', () => {
+    // Clean 27-point downtrend, then a 4-bar 1.15% bounce. The vote engine
+    // sees enough momentum for +1 (strength 36) but the trend structure is
+    // still bearish and price is far below EMA50 — this must stay NEUTRAL.
+    const down = linear(90, 200, -0.3);
+    const last = down[down.length - 1].close;
+    const v = __tfVote([...down, ...linear(4, last + 0.5, 0.5)], '15m')!;
+    expect(v.reversal).toBeNull();
+    expect(v.structureDir).toBe(-1);
+    expect(v.structureConflict).toBe(true);
+    expect(v.counterStructureSuppressed).toBe(true);
+    expect(v.counterStructureSuppressedReason).toBe('close-not-beyond-ema50');
+    expect(v.dir).toBe(0);
+    expect(v.strength).toBe(0);
+    expect(v.note).toContain('counter-structure veto');
+  });
+
+  it('suppresses even a confirmed pump while price has not reclaimed EMA50', () => {
+    // 1.38% bounce: the active-pump guard fires (swing break + 2-bar context
+    // + ATR momentum), but close is still below EMA50. That is the exact
+    // "shallow bounce flips 15m to +1" case — neutral, not a capped +1.
+    const down = linear(90, 200, -0.3);
+    const last = down[down.length - 1].close;
+    const v = __tfVote([...down, ...linear(6, last + 0.4, 0.4)], '15m')!;
+    expect(v.reversal).toBe('pump');
+    expect(v.structureConflict).toBe(true);
+    expect(v.counterStructureSuppressed).toBe(true);
+    expect(v.counterStructureSuppressedReason).toBe('close-not-beyond-ema50');
+    expect(v.dir).toBe(0);
+    expect(v.strength).toBe(0);
+  });
+
+  it('exposes cap/veto details in the board wire payload', () => {
+    const capped = __tfVote([...linear(90, 200, -1), ...linear(20, 110, 2)], '15m')!;
+    const down = linear(90, 200, -0.3);
+    const last = down[down.length - 1].close;
+    const vetoed = __tfVote([...down, ...linear(6, last + 0.4, 0.4)], '15m')!;
+
+    const wire = mtfWire6Payload({
+      ok: true,
+      timeframes: [capped, vetoed],
+      consensus: 'NEUTRAL', alignment: 0, agreement: 0.5, agreementPct: 50,
+      phase: 'SPLIT', htfBias: 'BEARISH', ltfTrigger: 'NEUTRAL', timing: null,
+    } as never)!;
+
+    const capRow = wire.tfs!.find(t => t.tf === '15m' && t.dir === 1)!;
+    expect(capRow.strength).toBe(60);
+    expect(capRow.rawStrength).toBe(100);
+    expect(capRow.structureConflict).toBe(true);
+    expect(capRow.counterStructureSuppressed).toBe(false);
+
+    const vetoRow = wire.tfs!.filter(t => t.tf === '15m')[1];
+    expect(vetoRow.dir).toBe(0);
+    expect(vetoRow.strength).toBe(0);
+    expect(vetoRow.structureConflict).toBe(true);
+    expect(vetoRow.counterStructureSuppressed).toBe(true);
+    expect(vetoRow.reversal).toBe('pump');
   });
 
   it('does not publish a directional vote on a mid-band score', () => {

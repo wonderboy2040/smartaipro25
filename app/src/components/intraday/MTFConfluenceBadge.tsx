@@ -53,15 +53,34 @@ function TfChip({ label, read, title }: { label: string; read: MTFTapeRead | nul
   );
 }
 
-function Tf6Chip({ tf, dir, conf }: { tf: string; dir: number | null; conf: number }) {
+interface Tf6Read {
+  tf: string;
+  dir: number | null;
+  conf: number;
+  strength?: number;
+  rawStrength?: number | null;
+  structureConflict?: boolean;
+  counterStructureSuppressed?: boolean;
+}
+
+function Tf6Chip({ tf, read }: { tf: string; read: Tf6Read }) {
+  const dir = read.dir;
+  const strength = Math.round(read.strength ?? read.conf ?? 0);
+  const rawStrength = Math.round(read.rawStrength ?? strength);
   const arrow = dir == null ? '·' : dir > 0 ? '▲' : dir < 0 ? '▼' : '·';
-  const title = `${TF6_TITLE[tf] || tf} — ${dir != null && dir > 0 ? 'bull' : dir != null && dir < 0 ? 'bear' : 'neutral'}${conf ? `, ${Math.round(conf)}% strength` : ''}`;
+  const capNote = read.counterStructureSuppressed
+    ? ' — neutral: counter-structure vote suppressed (price has not confirmed beyond EMA50); no board weight'
+    : read.structureConflict
+      ? ` — ${strength}% strength (counter-structure cap 60, raw ${rawStrength}%; board weight still applied)`
+      : strength ? `, ${strength}% strength` : '';
+  const side = dir != null && dir > 0 ? 'bull' : dir != null && dir < 0 ? 'bear' : 'neutral';
+  const title = `${TF6_TITLE[tf] || tf} — ${side}${capNote}`;
   return (
     <span
       className={`px-1.5 py-0.5 rounded text-[9px] font-black font-mono border tracking-wide ${chipCls(dir)}`}
       title={title}
     >
-      {tf} {arrow}
+      {tf} {arrow}{read.structureConflict && !read.counterStructureSuppressed ? ` ${strength}` : ''}
     </span>
   );
 }
@@ -99,6 +118,7 @@ export const MTFConfluenceBadge = memo(function MTFConfluenceBadge({ mtf }: { mt
       `HTF bias (1d+4h): ${mtf.htfBias ?? '—'} · LTF trigger (1m+5m): ${mtf.ltfTrigger ?? '—'}`,
       mtf.timing ? `timing: ${mtf.timing.quality} — ${mtf.timing.note}` : '',
       'weights: 1d ×3.0 · 4h ×2.4 · 1h ×1.8 · 15m ×1.3 · 5m ×1.0 · 1m ×0.6',
+      'board weight = TF weight × (0.4 + 0.6 × strength/100) · counter-structure votes cap at 60 · unconfirmed reversal beyond EMA50 → neutral (no weight)',
       'counter-consensus trade → server −7/−10 conf + STRONG banned; aligned → +3/+5',
     ].filter(Boolean).join('\n');
     return (
@@ -108,7 +128,7 @@ export const MTFConfluenceBadge = memo(function MTFConfluenceBadge({ mtf }: { mt
             .filter(tf => tfs.some(x => x.tf === tf))
             .map(tf => {
               const v = tfs.find(x => x.tf === tf);
-              return <Tf6Chip key={tf} tf={tf} dir={v?.dir ?? null} conf={v?.conf ?? 0} />;
+              return <Tf6Chip key={tf} tf={tf} read={v ?? { tf, dir: null, conf: 0 }} />;
             })
           : TF_META.map(({ key, label, title: t }) => (
             <TfChip key={key} label={label} read={mtf[key]} title={t} />

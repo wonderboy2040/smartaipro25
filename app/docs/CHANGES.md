@@ -3486,3 +3486,31 @@ Recheck me auto-trade readiness, India live lifecycle, boot persistence, quota d
 - Targeted recheck/UI/MTF batches PASS: 18 files / 413 tests (initial recheck batch), final UI/recheck batch 144, version/direction batch 138, `ucFlipReverse21238 + v2122NinePointSuperUpgrade` 43.
 - `tsc 0`, `lint 0`, `check:version OK (21.23.16)`, `check:routes PASS`, `dist 21.23.16`.
 - Full suite: 226 files / 4346 tests PASS; remaining 5 failures across 4 files (`v69-core` network timeout, `cryptoAgent` x2 5s timeout, `council`/`llmValidator` key/mock calls) are environment-dependent and reproduce independently of this change set.
+
+## v21.23.17 — MTF BOUNCE GUARD + GATE PROMOTION READINESS (2026-10-24)
+
+**User ask: clean downtrend ke ~1% bounce par 15m MTF vote flip na ho; config save failure ka asli reason dikhe; naye env flags document hon; margin/stale gates ka rollout data-driven ho — legacy escape hatches intact rakho.**
+
+### 1) MTF shallow-bounce veto (mtf.js, board wire, badge)
+- Counter-structure vote ab neutral hai unless `activePump` / `activeDump` CONFIRMED ho **aur** price ne vote direction me EMA50 ke beyond close kiya ho. Missing EMA50 = unconfirmed, isliye suppress. Pehle ek clean downtrend me ~1% bounce 15m vote ko `+1` kar sakta tha.
+- Confirmed counter-structure reversal pehle jaisa strength cap `60` rakhta hai — cap ek directional vote hai, neutral nahi. Board ab `60` chip ke saath `raw → capped` aur EMA50 veto reason dikhata hai, taaki capped reversal full-strength vote se confuse na ho.
+- Wire/UI telemetry: `rawStrength`, `structureConflict`, `counterStructureSuppressed`, `counterStructureSuppressedReason`, `reversal`. Suppressed row `dir:0`, `strength:0` publish karta hai (board par neutral + reason), vote direction silently flip nahi hota.
+- `MTF_VOTE_V2=0/false/off/no/disabled/legacy` exact legacy vote deta hai (threshold 0.9, absolute-% momentum, koi v2 veto/telemetry nahi) — emergency rollback path unchanged.
+
+### 2) Gate promotion readiness (trackRecord.js, direction-report)
+- `GET /api/ai/direction-report` me naya `gateReadiness` block: margin aur stale gate ke liye blocked vs kept cohorts, settled outcomes par only. Null telemetry (board rows / no TV reference) ko clean evidence nahi gina jata.
+- Promotion criteria: ≥10 resolved blocked + ≥20 resolved kept rows, blocked win-rate ≤50%, aur kept ke against ≥8pp underperformance gap. Statuses: `COLLECTING`, `PROMOTE_READY`, `KEEP_SHADOW`, `ENFORCED`; `nextStep` exact Render env flag batata hai.
+- Defaults safe hain: `INTRADAY_MARGIN_GATE=shadow`, `INTRADAY_MIN_MARGIN=12`, `INTRADAY_STALE_GUARD=shadow`, `INTRADAY_STALE_MAX_PCT=1.2`; `enforce` tabhi jab report `PROMOTE_READY` ho. `INTRADAY_NO_EDGE_CAP=69` entry floor (70) se neeche hai, isliye gated row trade nahi kar sakti.
+
+### 3) Honest config/toggle errors (useAITrading.ts, MTFDualBoardPanel.tsx)
+- `updateMtfAutoConfigApi` / `setMtfAutoEnabledApi` ab `MtfAutoApiResult` return karte hain — server ka real message + correlation id + HTTP status. Pehle har failure `null` ban jata tha aur UI sirf generic “NAHI hua” dikhata tha.
+- Mode switch failure par UI previous mode/hold revert karta hai; paper auto-test config save fail par engine arm nahi karta; LIVE arm config/toggle fail par honest abort + reason deta hai. Successful POST config authoritative rehta hai, `/status` best-effort overlay.
+
+### 4) Env documentation (.env.example)
+- `MTF_VOTE_V2`, `INTRADAY_MARGIN_GATE`, `INTRADAY_MIN_MARGIN`, `INTRADAY_STALE_GUARD`, `INTRADAY_STALE_MAX_PCT` documented with defaults, accepted values, legacy escape, aur promotion workflow.
+
+### Tests / gate
+- New `test/mtfAutoApiHonesty.test.ts` (real server error + correlation ref, flat toggle error, POST authoritative when `/status` down, network failure); `directionGateReadiness.test.ts` (COLLECTING / PROMOTE_READY / KEEP_SHADOW / ENFORCED); extended `directionReport`, `mtfVoteV2` (shallow bounce, confirmed pump, legacy, cap/wire), `recheck212315` (arm-abort source locks).
+- Targeted MTF/direction/UI batches PASS: 6 files / 44 tests; 7 files / 165 tests. Version/recheck batch PASS: 3 files / 113 tests.
+- `tsc 0`, source `lint 0`, `check:version OK (21.23.17)`, `check:routes PASS`, `dist 21.23.17`.
+- Full-suite attempt still hits pre-existing network/trading-watcher 5s timeouts in this environment; the same failures reproduce on a clean v21.23.16 worktree (verified `directionProof` EXIT timeout), so they are not attributed to this change set.

@@ -28,6 +28,11 @@ const row = (over: Record<string, unknown>) => ({
 });
 
 beforeAll(async () => {
+  // v21.23.17: pin gate defaults so the readiness block is deterministic.
+  delete process.env.INTRADAY_MARGIN_GATE;
+  delete process.env.INTRADAY_STALE_GUARD;
+  delete process.env.INTRADAY_MIN_MARGIN;
+  delete process.env.INTRADAY_STALE_MAX_PCT;
   const signals = [
     // INDIA LONG win — engine-tagged, wide margin, high confidence
     row({
@@ -139,6 +144,24 @@ describe('v21.23.15 getDirectionReport', () => {
     expect(r.telemetry.marginWouldBlock).toBe(1);
     expect(r.telemetry.marginGateModes.shadow).toBe(4);
     expect(r.telemetry.marginGateModes.missing).toBe(1);
+  });
+
+  it('reports gate promotion readiness honestly (collecting, never auto-enforce)', () => {
+    const r = report(30, 'ALL');
+    expect(r.gateReadiness.config.marginGate).toBe('shadow');
+    expect(r.gateReadiness.config.minMargin).toBe(12);
+    expect(r.gateReadiness.config.staleGuard).toBe('shadow');
+    expect(r.gateReadiness.config.noEdgeCap).toBe(69);
+    // One sub-margin loser vs two kept winners is not enough evidence.
+    expect(r.gateReadiness.margin.blocked.resolved).toBe(1);
+    expect(r.gateReadiness.margin.kept.resolved).toBe(2);
+    expect(r.gateReadiness.margin.status).toBe('COLLECTING');
+    expect(r.gateReadiness.margin.recommended).toBe(false);
+    expect(r.gateReadiness.margin.missing.blockedResolved).toBe(9);
+    expect(r.gateReadiness.margin.missing.keptResolved).toBe(18);
+    // No stale telemetry in these rows → stale guard cannot be judged.
+    expect(r.gateReadiness.stale.blocked.n).toBe(0);
+    expect(r.gateReadiness.stale.status).toBe('COLLECTING');
   });
 
   it('tab filter narrows to one desk and clamps the window', () => {

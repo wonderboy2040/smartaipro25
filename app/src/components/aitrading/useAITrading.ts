@@ -17,6 +17,7 @@
 // ============================================================
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch, getProxyBase, getSessionToken } from '../../utils/api';
+import { describeApiError } from '../../utils/apiError';
 import { createTickBatcher } from '../../utils/tickBatcher';
 import { desktopNotify, desktopNotifyPermission } from '../../utils/desktopNotify';
 import type { AISignal, OptionsDesk, OptionSignalsView, OptionsScanView, SignalBoard, TradingState, JournalPosition, JournalEntry, BacktestResult, StrategyLabResult, AlertsStatus, DhanStatus, SwingBoard, WhaleRadar, LedgerView, MorningBrief, OrderbookView, AgentView, WalletView, MarketKind, TrustView, PerfView, CorrView, SectorView, IncomeView, NarrativeView, EdgeStats, LtfSnapshot, CouncilStatusView, CouncilStamp, CouncilCalibrationView, NearMissEntry, FuturesPrecheckResult } from './types';
@@ -1205,31 +1206,55 @@ export async function fetchMtfAutoStatus(): Promise<MtfAutoStatus | null> {
   } catch { return null; }
 }
 
-export async function updateMtfAutoConfigApi(patch: Record<string, unknown>): Promise<MtfAutoStatus | null> {
+/** v21.23.17: API results carry the REAL server reason instead of a bare
+ *  null. The panel can then show "why" (jsonError message + correlation id)
+ *  for config/toggle failures instead of a generic "NAHI hua". */
+export type MtfAutoApiResult =
+  | { ok: true; status: MtfAutoStatus }
+  | { ok: false; error: string; httpStatus?: number };
+
+export async function updateMtfAutoConfigApi(patch: Record<string, unknown>): Promise<MtfAutoApiResult> {
   try {
     const r = await apiFetch(`${getProxyBase()}/api/ai/mtf-auto/config`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch), signal: AbortSignal.timeout(15000),
     });
     const j = await r.json().catch(() => null);
-    if (!r.ok || !j?.ok) return null;
+    if (!r.ok || !j?.ok) {
+      return {
+        ok: false,
+        httpStatus: r.status,
+        error: describeApiError(j, r.status, `config save failed (${r.status})`),
+      };
+    }
     // A1 FIX: config save is authoritative — POST response is the source of truth.
     // Status fetch is best-effort overlay; a slow/failed /status must NOT cause
     // "config save NAHI hua" when the config was already saved server-side.
     const status = await fetchMtfAutoStatus().catch(() => null);
-    return status ?? ({ ok: true, config: j.config, coindcxConnected: j.coindcxConnected } as unknown as MtfAutoStatus);
-  } catch { return null; }
+    return { ok: true, status: status ?? ({ ok: true, config: j.config, coindcxConnected: j.coindcxConnected } as unknown as MtfAutoStatus) };
+  } catch (e) {
+    return { ok: false, error: describeApiError(e, undefined, 'config save failed — server unreachable') };
+  }
 }
 
-export async function setMtfAutoEnabledApi(enabled: boolean): Promise<MtfAutoStatus | null> {
+export async function setMtfAutoEnabledApi(enabled: boolean): Promise<MtfAutoApiResult> {
   try {
     const r = await apiFetch(`${getProxyBase()}/api/ai/mtf-auto/toggle`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }), signal: AbortSignal.timeout(15000),
     });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch { return null; }
+    const j = await r.json().catch(() => null);
+    if (!r.ok || !j) {
+      return {
+        ok: false,
+        httpStatus: r.status,
+        error: describeApiError(j, r.status, `auto-link toggle failed (${r.status})`),
+      };
+    }
+    return { ok: true, status: j as MtfAutoStatus };
+  } catch (e) {
+    return { ok: false, error: describeApiError(e, undefined, 'auto-link toggle failed — server unreachable') };
+  }
 }
 
 export interface MtfAutoPreviewRow { symbol: string; side: 'LONG' | 'SHORT' | null; superScore: number | null; tier: string; entry: number | null; stopLoss: number | null; t1: number | null; t2: number | null; tfFit?: string | null; holdMin?: number; eligible: boolean; blockers: string[] }
