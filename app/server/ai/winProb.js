@@ -34,6 +34,7 @@
 // is the only IO wrapper (5-min cached trust.js read).
 // ============================================================
 import { trustReport } from './trust.js';
+import { normalizeSide } from './directionCertificate.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 // null/undefined → null (NEVER 0 — a missing input must not silently
@@ -76,7 +77,12 @@ export function computeWinProb({
   mtfAligned = null, counterRegime = false, fundingBps8h = null, positioningScore = null,
   calibration = null,
 }) {
-  const long = String(side || 'LONG').toUpperCase() !== 'SHORT';
+  // v21.25.0 [NO SILENT LONG]: an unknown side has no meaningful side-split /
+  // funding direction. Return null (honest "no probability") instead of a
+  // fabricated LONG read.
+  const canonicalSide = normalizeSide(side);
+  if (!canonicalSide) return null;
+  const long = canonicalSide === 'LONG';
   const mkt = String(market || 'CRYPTO').toUpperCase();
   const isPerp = mkt === 'FUTURES';
   const rrRaw = num(rewardRisk);

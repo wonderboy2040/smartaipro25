@@ -714,7 +714,26 @@ export function buildPlanFromCandles(p = {}) {
   }
   const side = explicitSide || impliedSide;
   const dir = side === 'LONG' ? 1 : side === 'SHORT' ? -1 : 0;
-  const trigForSide = side ? readTrigger(p.trigCandles, side) : rawTrig;
+  // v21.25.0 [NO SILENT SIDE]: agar context + trigger + institutional
+  // consensus teeno flat hain to levels banane ka koi side hi nahi hai.
+  // Pehle `side === 'LONG'` false hone par poora ticket SHORT geometry
+  // (SL above entry, targets below) ban jata tha — side null ke saath ek
+  // fabricated SHORT ticket. Ab honest refuse; koi guess nahi.
+  if (!side) {
+    return {
+      ok: false,
+      error: 'direction side unresolved (context + trigger + institutional consensus flat) — plan refuse, koi silent side nahi',
+      mode: mode.id,
+      symbol: p.symbol || null,
+      market,
+      side: null,
+      dir: 0,
+      bias: 'NONE',
+      triggerFired: false,
+      directionVerified: false,
+    };
+  }
+  const trigForSide = readTrigger(p.trigCandles, side);
   trigForSide.tf = mode.triggerTf;
   const trig = trigForSide;
 
@@ -948,7 +967,7 @@ export function buildPlanFromCandles(p = {}) {
   // v21.16.0: ek hi precision, strictly ordered ladder (shared guard).
   const ladder = (() => {
     try {
-      const r = pRoundLadder({ side: side || 'LONG', entry, stopLoss, targets: [t1, t2] });
+      const r = pRoundLadder({ side, entry, stopLoss, targets: [t1, t2] });
       return { entry: r.entry, stopLoss: r.stopLoss, t1: r.targets[0], t2: r.targets[1], precision: r.precision };
     } catch {
       return { entry: r2(entry), stopLoss: r2(stopLoss), t1: r2(t1), t2: r2(t2), precision: 2 };

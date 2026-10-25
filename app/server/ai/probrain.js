@@ -26,6 +26,7 @@
 // explicitly-passed `now`) so tests can pin every rule.
 // ============================================================
 import { ensureAscending } from './lib/candles.js'; // v21.23.12 [L2.5]: structureStop mirror-guard
+import { normalizeSide } from './directionCertificate.js'; // v21.25.0: no silent-LONG side guessing
 
 const _clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const r1 = (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
@@ -116,7 +117,16 @@ export function sessionPhase(market, now = Date.now()) {
 // Input shapes are deliberately forgiving: whichever fields are
 // null are skipped and honestly reported as unavailable.
 export function mtfAnalysis({ htf, ltf, side, ltfLabel = '15m' }) {
-  const want = String(side || '').toUpperCase() === 'SHORT' ? -1 : 1;
+  // v21.25.0 [NO SILENT LONG]: unknown side pehle LONG maan liya jaata tha.
+  const _side = normalizeSide(side);
+  if (!_side) {
+    return {
+      available: false, phase: 'INVALID_SIDE', aligned: null, score: 50,
+      facts: {}, ltfDir: 0, againstTapeStrength: 0,
+      reasons: [`side "${String(side ?? '')}" invalid — direction certificate blocks MTF analysis (LONG/SHORT required)`],
+    };
+  }
+  const want = _side === 'SHORT' ? -1 : 1;
   const reasons = [];
   const facts = {};
 
@@ -221,7 +231,12 @@ export function mtfAnalysis({ htf, ltf, side, ltfLabel = '15m' }) {
 //   INDIA   NIFTY ±0.35% directional · VIX > 18 = risk penalty
 //           · NIFTY daily EMA trend tie-break
 export function regimeGate({ market, side, regime }) {
-  const want = String(side || '').toUpperCase() === 'SHORT' ? -1 : 1;
+  // v21.25.0 [NO SILENT LONG]: invalid side = gate skipped, no direction guess.
+  const _side = normalizeSide(side);
+  if (!_side) {
+    return { aligned: null, counterTrend: false, penaltyPct: 0, regimeDir: 0, reasons: [`side "${String(side ?? '')}" invalid — regime gate skipped (direction certificate)`] };
+  }
+  const want = _side === 'SHORT' ? -1 : 1;
   const mkt = String(market || 'INDIA').toUpperCase();
   const reasons = [];
   const isCrypto = mkt === 'CRYPTO' || mkt === 'FUTURES';
@@ -277,7 +292,12 @@ export function regimeGate({ market, side, regime }) {
 // VETO means: the signal may still display, but grade caps at
 // WATCH and the ticket button says WHY.
 export function extensionGuard({ market, side, changePct, rsi, adx }) {
-  const want = String(side || '').toUpperCase() === 'SHORT' ? -1 : 1;
+  // v21.25.0 [NO SILENT LONG]: invalid side = hard veto (never act unknown).
+  const _side = normalizeSide(side);
+  if (!_side) {
+    return { veto: true, downgrade: true, reasons: [`side "${String(side ?? '')}" invalid — direction certificate blocks this signal`] };
+  }
+  const want = _side === 'SHORT' ? -1 : 1;
   const mkt = String(market || 'INDIA').toUpperCase();
   const isCrypto = mkt === 'CRYPTO' || mkt === 'FUTURES';
   const dayLimit = isCrypto ? 8 : 5;      // % day-move beyond which we stop chasing
@@ -314,7 +334,10 @@ export function structureStop({ candles: candlesIn, side, ltp, atr, maxAtrMult =
   // v21.23.12 [L2.5 SEAT GUARD]: trailing-window swing scan — mirrored
   // input LONG swing-high / SHORT swing-low ulti padhta tha. ensureAscending.
   const candles = ensureAscending(candlesIn);
-  const want = String(side || '').toUpperCase() === 'SHORT' ? -1 : 1;
+  // v21.25.0 [NO SILENT LONG]: invalid side = no stop (caller must refuse).
+  const _side = normalizeSide(side);
+  if (!_side) return null;
+  const want = _side === 'SHORT' ? -1 : 1;
   const long = want > 0;
   const a = Number(atr);
   if (!(ltp > 0) || !Number.isFinite(a) || !(a > 0)) return null;

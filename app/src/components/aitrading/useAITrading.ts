@@ -923,6 +923,56 @@ export async function fetchTradePlan(
 }
 
 // ---------------- v21.16.0 MTF SIGNALS BOARD (DUAL-TIMEFRAME) + AUTO-LINK ----------------
+/** v21.25.0 DIRECTION CERTIFICATE — the explicit signal→order contract. */
+export type DirectionSide = 'LONG' | 'SHORT';
+export type DirectionOrderSide = 'buy' | 'sell';
+export interface DirectionCertificateGeometry {
+  side: DirectionSide | null;
+  entry: number | null; stopLoss: number | null;
+  targets: number[]; t1: number | null; t2: number | null;
+  sideValid: boolean; entryValid: boolean; stopLossValid: boolean;
+  targetsPresent: boolean; slOnCorrectSide: boolean;
+  targetsOnCorrectSide: boolean; targetsOrdered: boolean; targetsValid: boolean;
+  geometryValid: boolean;
+  slDistance: number | null; slDistancePct: number | null; reasons: string[];
+}
+export interface DirectionCertificateActivePos {
+  raw: number | null; present: boolean; sign: number;
+  side: DirectionSide | null; source: 'activePos' | 'declared' | 'none';
+  authoritative: boolean; conflict: boolean; reason: string;
+}
+export interface DirectionCertificate {
+  version: string;
+  symbol: string | null; market: string | null; source: string | null;
+  side: DirectionSide | null; signalSide: DirectionSide | null;
+  declaredSide: DirectionSide | null; rawSide: unknown;
+  sideSign: number | null; oppositeSide: DirectionSide | null;
+  orderSide: DirectionOrderSide | null; orderSideLabel: string;
+  orderSideSupplied: string | null;
+  activePos: DirectionCertificateActivePos;
+  geometry: DirectionCertificateGeometry;
+  checks: {
+    sideValid: boolean; orderSideMapped: boolean; orderSideAligned: boolean;
+    activePosChecked: boolean; activePosAligned: boolean;
+    geometryValid: boolean; stopLossValid: boolean; targetsValid: boolean;
+  };
+  ok: boolean; blocked: boolean; mismatch: boolean;
+  activePosMismatch: boolean; orderMismatch: boolean;
+  conflicts: string[]; directionVerified: boolean; pakka: boolean;
+  verdict: 'INVALID_SIDE' | 'ORDER_MAP_FAILED' | 'ORDER_SIDE_MISMATCH' | 'ACTIVE_POS_MISMATCH' | 'INVALID_GEOMETRY' | 'CONFLICT' | 'PAKKA' | 'WAIT' | string;
+  verificationStatus: string; reasons: string[]; label: string;
+  extra: Record<string, unknown> | null; asOf: number;
+}
+export interface DirectionIntegrityIssue {
+  symbol: string | null; verdict: string; reasons: string[];
+}
+export interface DirectionIntegrity {
+  version: string; status: 'EMPTY' | 'OK' | 'ATTENTION' | string;
+  ok: boolean; total: number; valid: number; blocked: number;
+  uncertified: number; mismatches: number; conflicts: number; pakka: number;
+  long: number; short: number; buy: number; sell: number;
+  allValid: boolean; label: string; issues: DirectionIntegrityIssue[]; asOf: number;
+}
 export interface MtfDualRow {
   ok: boolean; error?: string | null;
   symbol: string; market: string; assetClass?: 'CRYPTO' | 'METALS' | 'EQUITY_SIM' | 'INDIA' | string; mode: TradePlanModeId; label?: string;
@@ -979,6 +1029,11 @@ export interface MtfDualRow {
     liveNote?: string | null;
   } | null;
   side: 'LONG' | 'SHORT' | null; dir?: number | null;
+  /** v21.25.0 — explicit direction certificate (signal → exchange order side). */
+  orderSide?: DirectionOrderSide | null;
+  orderSideLabel?: string | null;
+  directionVerdict?: string | null;
+  directionCertificate?: DirectionCertificate | null;
   grade?: 'A' | 'B' | 'C' | null; bias?: string | null;
   trendDir?: number | null; triggerDir?: number | null; extendedDir?: number | null;
   htfBias?: 'BULLISH' | 'BEARISH' | 'NEUTRAL' | string | null;
@@ -1066,7 +1121,9 @@ export interface MtfDualBoardView {
   // v21.23.1: `avgWinRatePct` ab nullable — missing rows pe fabricated 88 nahi milta.
   worldIndicatorsInfo?: { count: number; names: string[]; targetWinRatePct: number | null; avgWinRatePct: number | null };
   ollamaTrio?: { reachable: boolean; base?: string; fastModel: string; deepModel: string; sentinelModel: string; models: string[]; count: number; keepAlive?: string };
-  counts?: { rows: number; overBar: number; eligible: number; strong: number; fired: number; earlyRadar?: number; unavailable: number; metalsEligible?: number; equitySimEligible?: number };
+  counts?: { rows: number; overBar: number; eligible: number; strong: number; fired: number; earlyRadar?: number; unavailable: number; metalsEligible?: number; equitySimEligible?: number; directionBlocked?: number };
+  /** v21.25.0 — board-wide signal→order integrity (certified / blocked / mismatches). */
+  directionIntegrity?: DirectionIntegrity | null;
   quoteCcy?: 'USDT' | 'USD' | 'INR' | null; fx?: number | null;
   rows?: MtfDualRow[];
   metalsRows?: MtfDualRow[];
@@ -1187,17 +1244,27 @@ export interface MtfAutoStatus {
   activeLeverage?: number;
   feeAwareReversalExit?: boolean;
   deepMonitorEnabled?: boolean;
+  /** v21.25.0 — auto-engine direction integrity (book + deep monitor). */
+  directionIntegrity?: DirectionIntegrity | null;
+  directionBlockedCount?: number;
   deepMonitor?: {
     activeCount: number;
     trailingActiveCount: number;
     tp1LockedCount: number;
     reversalAlertCount: number;
+    /** v21.25.0 — deep-monitor direction integrity (manual LIVE rows included). */
+    directionIntegrity?: DirectionIntegrity | null;
+    directionBlockedCount?: number;
     trades: Array<{
       symbol: string | null;
       market: string;
       execMarket?: string;
       ccy: string;
-      side: string;
+      side: DirectionSide | null;
+      /** v21.25.0 — exchange order side + per-trade direction certificate. */
+      orderSide?: DirectionOrderSide | null;
+      directionCertificate?: DirectionCertificate | null;
+      directionBlocked?: boolean;
       entry: number;
       ltp: number;
       initialStopLoss: number;
@@ -1237,7 +1304,7 @@ export interface MtfAutoStatus {
     checkedAt: number;
   };
   day?: string | null; dayCount: number; openCount: number; openNotionalINR: number;
-  book?: Array<{ paperId: number | null; liveOrderId?: string | null; executionMode?: string; symbol: string; market: string; execMarket?: string; ccy?: 'USDT' | 'INR'; fxUsed?: number | null; side: string; score: number; tier: string; mode?: string; holdMin?: number; entry: number; stopLoss: number; t1: number; t2: number; qty: number; leverage?: number; walletINR?: number; feeBreakevenPrice?: number | null; marginINR?: number; marginUsdt?: number | null; riskINR: number; riskUsdt?: number | null; notional: number; notionalUsdt?: number | null; openedAt: number; status: string; closeReason?: string | null; closedAt?: number | null; pnl?: number | null; drivers?: string[] }>;
+  book?: Array<{ paperId: number | null; liveOrderId?: string | null; executionMode?: string; symbol: string; market: string; execMarket?: string; ccy?: 'USDT' | 'INR'; fxUsed?: number | null; side: string; orderSide?: DirectionOrderSide | null; directionCertificate?: DirectionCertificate | null; directionBlocked?: boolean; score: number; tier: string; mode?: string; holdMin?: number; entry: number; stopLoss: number; t1: number; t2: number; qty: number; leverage?: number; walletINR?: number; feeBreakevenPrice?: number | null; marginINR?: number; marginUsdt?: number | null; riskINR: number; riskUsdt?: number | null; notional: number; notionalUsdt?: number | null; openedAt: number; status: string; closeReason?: string | null; closedAt?: number | null; pnl?: number | null; drivers?: string[] }>;
   events?: Array<{ at: number; kind: string; text: string }>;
   lastTick?: { at: number; opened: number; closed: number; skipped: string[] } | null;
   paperOnly?: boolean; note?: string;
@@ -1314,7 +1381,7 @@ export async function fetchMtfAutoPreview(): Promise<MtfAutoPreview | null> {
 }
 
 // v21.17.0 — 🧪 manual paper entry straight from a dual-board card.
-export interface MtfBoardPaperResult { ok: boolean; trade?: { id: number; symbol: string; direction: string; entry: number; qty: number; stopLoss: number; target1?: number | null; target2?: number | null; market?: string }; ccy?: 'USDT' | 'INR'; fx?: number | null; error?: string; row?: { symbol: string; side: string | null; superScore: number | null; tier: string; tfFit?: string | null; autoEligible?: boolean; blockers?: string[] } }
+export interface MtfBoardPaperResult { ok: boolean; trade?: { id: number; symbol: string; direction: string; entry: number; qty: number; stopLoss: number; target1?: number | null; target2?: number | null; market?: string }; ccy?: 'USDT' | 'INR'; fx?: number | null; error?: string; orderSide?: DirectionOrderSide | null; signalToOrder?: string; directionCertificate?: DirectionCertificate | null; row?: { symbol: string; side: string | null; superScore: number | null; tier: string; tfFit?: string | null; autoEligible?: boolean; blockers?: string[]; orderSide?: DirectionOrderSide | null; signalToOrder?: string; directionVerdict?: string | null; directionCertificate?: DirectionCertificate | null } }
 
 export async function openMtfBoardPaper(symbol: string, market: MarketKind, mode?: TradePlanModeId, holdMin?: number): Promise<MtfBoardPaperResult | null> {
   try {
@@ -1340,6 +1407,12 @@ export interface MtfBoardLiveResult {
   filled?: { qty: number; price: number; notionalUSDT?: number | null; notionalINR?: number | null; leverage: number; marginUSDT?: number | null; stopLoss?: number | null; t1?: number | null; t2?: number | null };
   error?: string;
   reason?: string;
+  /** v21.25.0 — explicit signal→order mapping from the server certificate. */
+  side?: string | null;
+  orderSide?: DirectionOrderSide | null;
+  signalToOrder?: string;
+  directionCertificate?: DirectionCertificate | null;
+  signalCertificate?: DirectionCertificate | null;
 }
 
 export async function openMtfBoardLive(

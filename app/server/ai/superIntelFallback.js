@@ -29,6 +29,8 @@
 //   `super-intel-deterministic`.
 // ============================================================
 
+import { normalizeSide } from './directionCertificate.js';
+
 const r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
 const sgn = (v) => (v == null ? '?' : `${v > 0 ? '+' : ''}${v}`);
@@ -154,14 +156,19 @@ function coinTicket(s, opts = {}) {
   const bp = s.blueprint || {};
   // entry zone: blueprint zone → live ATR band from stop distance →
   // entry point fallback (a collapsed "x – x" zone is noise, widen it)
-  const long = String(s.side || 'LONG').toUpperCase() !== 'SHORT';
+  // v21.25.0 [NO SILENT LONG]: missing/unknown side is NOT a LONG ticket.
+  const canonicalSide = normalizeSide(s.side);
+  if (!canonicalSide) {
+    return `⛔ ${s.symbol || 'symbol'}: direction certificate blocked — invalid side "${String(s.side ?? '')}" (LONG/BUY ya SHORT/SELL required; koi ticket nahi).`;
+  }
+  const long = canonicalSide === 'LONG';
   const rdist = p.entry != null && p.stopLoss != null ? Math.abs(p.entry - p.stopLoss) : null;
   let zone = bp.entryZone;
   if (!zone && p.entry != null && rdist > 0) zone = long ? [p.entry - 0.35 * rdist, p.entry + 0.1 * rdist] : [p.entry - 0.1 * rdist, p.entry + 0.35 * rdist];
   if (zone && zone[0] != null && zone[0] === zone[1] && rdist > 0) zone = long ? [zone[0] - 0.35 * rdist, zone[1] + 0.1 * rdist] : [zone[0] - 0.1 * rdist, zone[1] + 0.35 * rdist];
   const L = [];
   const N = () => `${L.length + 1}.`;
-  L.push(`${N()} **${s.symbol} ${s.side}** — ${futures ? 'FUTURES (USDT perp)' : 'SPOT (INR)'}${opts.sim ? ' · SIM desk — execution paper/notify only' : ''}`);
+  L.push(`${N()} **${s.symbol} ${canonicalSide}** — ${futures ? 'FUTURES (USDT perp)' : 'SPOT (INR)'}${opts.sim ? ' · SIM desk — execution paper/notify only' : ''}`);
   L.push(`${N()} Entry zone: **${zone && zone[0] != null ? `${fmt(zone[0], cur)} – ${fmt(zone[1], cur)}` : '?'}**${bp.entryTiming?.note ? ` · ${bp.entryTiming.note}` : ''}`);
   L.push(`${N()} Stop-loss: **${fmt(p.stopLoss, cur)}**${p.riskPct != null ? ` (${r2(p.riskPct)}% risk distance${p.planStyle ? `, ${p.planStyle}` : ''})` : ''}`);
   const r1 = p.stopLoss != null && p.entry != null && Math.abs(p.entry - p.stopLoss) > 0

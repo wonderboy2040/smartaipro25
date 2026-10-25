@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadMtfAutoConfig, computeEffectiveRiskCaps } from './mtfAutoLink.js';
+import { normalizeSide } from './directionCertificate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
@@ -261,6 +262,7 @@ export function buildPhase0Audit({ fresh = false, now = Date.now() } = {}) {
   const slMismatches = [];
   const missingMirrors = [];
   const stopViolations = [];
+  const directionViolations = [];
   const overRiskPositions = [];
   let liveOpen = 0;
   let mirrored = 0;
@@ -270,8 +272,10 @@ export function buildPhase0Audit({ fresh = false, now = Date.now() } = {}) {
     const entry = num(b.entry) || 0;
     const initialSl = num(b.initialStopLoss ?? b.stopLoss) || 0;
     const currentSl = num(b.trailedStopLoss ?? b.stopLoss) || 0;
-    const side = String(b.side || 'LONG').toUpperCase();
-    if (!(currentSl > 0)) {
+    const side = normalizeSide(b.side);
+    if (!side) {
+      directionViolations.push({ symbol: b.symbol, reason: 'invalid/missing side — direction certificate blocked', rawSide: b.side ?? null });
+    } else if (!(currentSl > 0)) {
       stopViolations.push({ symbol: b.symbol, reason: 'missing stopLoss' });
     } else if (initialSl > 0) {
       const eps = Math.max(1e-9, entry * 1e-6);
@@ -340,6 +344,7 @@ export function buildPhase0Audit({ fresh = false, now = Date.now() } = {}) {
   if (ledgerUnresolved > 0) warnings.push(`MTF row-ledger ${ledgerUnresolved}/${rowLedger.length} unresolved`);
   if (learning.length < 30) warnings.push(`learning loop sirf ${learning.length} settled outcome(s)`);
   if (stopViolations.length > 0) warnings.push(`${stopViolations.length} stop-integrity violation(s)`);
+  if (directionViolations.length > 0) warnings.push(`${directionViolations.length} open book row(s) with invalid/missing side — direction certificate blocked`);
 
   const out = {
     ok: true,
@@ -416,12 +421,14 @@ export function buildPhase0Audit({ fresh = false, now = Date.now() } = {}) {
       slMismatches: slMismatches.length,
       missingMirrors: missingMirrors.length,
       stopViolations: stopViolations.length,
+      directionViolations: directionViolations.length,
       overRiskPositions: overRiskPositions.length,
       examples: {
         qtyMismatches: qtyMismatches.slice(0, 3),
         slMismatches: slMismatches.slice(0, 3),
         missingMirrors: missingMirrors.slice(0, 3),
         stopViolations: stopViolations.slice(0, 3),
+        directionViolations: directionViolations.slice(0, 3),
         overRiskPositions: overRiskPositions.slice(0, 3),
       },
     },

@@ -33,6 +33,7 @@ import { coindcxConnected } from '../mcp/coindcx.js';
 import { getTick } from '../liveFeed.js';
 import { walletLeverageForEquityINR, feeBreakevenFloor } from '../exec/sizing.js';
 import { acquireDirectionLock, checkDirectionLock } from './directionLock.js';
+import { normalizeSide } from './directionCertificate.js';
 import { walletSnapshot, executeFuturesSignal, closeFuturesPosition, fetchUsdInr, inrOfUsdt as _inrOfUsdt } from './futures.js';
 import {
   loadConfig, loadJournal, dailyStats as _dailyStats, todayIST,
@@ -686,8 +687,15 @@ async function moveAgentSlToBreakeven(posId) {
     if (!pos || (pos.status !== 'OPEN' && pos.status !== 'UNKNOWN')) return false;
     const entry = Number(pos.entryPrice);
     if (!(entry > 0)) return false;
-    const isLong = /^(L|B)/i.test(String(pos.side || ''));
-    const feeBe = feeBreakevenFloor({ entry, side: isLong ? 'LONG' : 'SHORT', market: pos.market || 'FUTURES' }) || entry;
+    // v21.25.0 [NO SILENT SIDE]: unknown side ko pehle SHORT maan liya jaata
+    // tha — ab strict normalize, invalid = koi journal write nahi.
+    const posSide = normalizeSide(pos.side);
+    if (!posSide) {
+      log('error', `breakeven-lock skipped ${pos.pair || pos.id}: stored side "${String(pos.side ?? '')}" invalid (LONG/SHORT required)`);
+      return false;
+    }
+    const isLong = posSide === 'LONG';
+    const feeBe = feeBreakevenFloor({ entry, side: posSide, market: pos.market || 'FUTURES' }) || entry;
     const sl = Number(pos.sl);
     const improves = !Number.isFinite(sl) || (isLong ? sl < feeBe : sl > feeBe);
     if (!improves) return false;
@@ -1263,14 +1271,20 @@ Ye fix hote hi futures auto-entries phir se chalegi.`);
   // read the SAME truth, never two different scans). ----
   const oppositeQualifying = new Map(); // pair → signal
   for (const p of openManagedPositions(j, cfg)) {
-    const posSide = /^(L|B)/i.test(String(p.side || '')) ? 'BUY' : 'SELL';
+    // v21.25.0 [NO SILENT SIDE]: unknown stored side ko pehle SELL maan
+    // liya jaata tha. Ab invalid = flip/extension pass skip (safe).
+    const posSide = normalizeSide(p.side);
+    if (!posSide) {
+      maybeLogSkip('pos-side-invalid', `${p.pair || '?'} — stored position side "${String(p.side ?? '')}" invalid — opposite-signal scan SKIPPED`);
+      continue;
+    }
     const pair = String(p.pair || '');
     for (const board of scans) {
       if (!board?.ok) continue;
       for (const s of (board.signals || [])) {
         if (pairOfSignal(s) !== pair) continue;
-        const raw = String(s.side || '').toUpperCase();
-        const sSide = raw === 'SHORT' || raw === 'SELL' ? 'SELL' : 'BUY';
+        const sSide = normalizeSide(s.side);
+        if (!sSide) continue;
         if (sSide !== posSide && qualifies(s)) { oppositeQualifying.set(pair, s); break; }
       }
       if (oppositeQualifying.has(pair)) break;
@@ -1335,7 +1349,10 @@ Ye fix hote hi futures auto-entries phir se chalegi.`);
           // opposite-side block so the candidate flow can't instantly
           // re-enter the side the thesis just flipped away from.
           _state.flipBlock = _state.flipBlock || {};
-          _state.flipBlock[p.pair] = { side: /^(L|B)/i.test(String(p.side || '')) ? 'LONG' : 'SHORT', at: Date.now() };
+          const flippedAwaySide = normalizeSide(p.side);
+          if (flippedAwaySide) {
+            _state.flipBlock[p.pair] = { side: flippedAwaySide, at: Date.now() };
+          }
           log('exit', `CONVICTION-FLIP EXIT ${p.pair} — ensemble flipped ${c.side} (score ${c.currentScore}, entry ${Number.isFinite(entryScore) ? entryScore : '?'}) → cut at ₹${r2(totalPnl)} BEFORE the stop (thesis invalidated)`);
           if (_state.entryMeta) delete _state.entryMeta[p.pair];
           if (_state.conviction) delete _state.conviction[p.pair];
@@ -1460,8 +1477,13 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
     const flipped = oppositeQualifying.get(String(p.pair || '')) || null;
     if (!flipped) continue;
     const pair = String(p.pair || '');
-    const posSideLong = /^(L|B)/i.test(String(p.side || ''));
-    const posSide = posSideLong ? 'LONG' : 'SHORT';
+    const posSide = normalizeSide(p.side);
+    // v21.25.0 [NO REGEX GUESS]: pehle /^(L|B)/ unknown side ko SHORT maan
+    // leta tha (flip-block + notify wrong side). Unknown = skip flip handling.
+    if (!posSide) {
+      log('error', `flip-check skipped ${pair}: stored side "${String(p.side ?? '')}" invalid (LONG/SHORT required)`);
+      continue;
+    }
     // v12.7: stamp the per-pair flip memory BEFORE any branch — the
     // opposite-side re-entry block applies whether we close, alert, or
     // skip (the guard must never depend on the close succeeding).
@@ -1473,7 +1495,11 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
       // alert per flip episode (side change or 60-min re-arm) — never a
       // per-tick Telegram storm while the board keeps printing the
       // opposite side.
-      const flipSide = String(flipped.side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+      const flipSide = normalizeSide(flipped.side);
+      if (!flipSide) {
+        maybeLogSkip('flip-side-invalid', `trend-flip SKIPPED ${pair} — opposite signal side "${String(flipped.side ?? '')}" invalid`);
+        continue;
+      }
       const lastAlert = _state.flipAlert?.[pair];
       const episodeArmed = !lastAlert
         || lastAlert.side !== flipSide
@@ -1623,7 +1649,13 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
         const fb = _state.flipBlock?.[fbPair];
         const fbWindowMs = (Number(cfg.flipReentryBlockMin) || 240) * 60_000;
         if (fb && (Date.now() - (Number(fb.at) || 0)) < fbWindowMs) {
-          const candSide = String(s.side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+          // v21.25.0 [NO SILENT SIDE]: unknown candidate side pehle LONG ban
+          // jaata tha. Ab invalid = entry BLOCKED (flip guard ko guess nahi).
+          const candSide = normalizeSide(s.side);
+          if (!candSide) {
+            maybeLogSkip('cand-side-invalid', `${fbPair} — signal side "${String(s.side ?? '')}" invalid — entry BLOCKED (flip-churn guard)`);
+            continue;
+          }
           if (candSide !== fb.side) {
             maybeLogSkip('flip-block', `${fbPair} opposite-side (${candSide}) entry BLOCKED — ${Math.ceil((fbWindowMs - (Date.now() - fb.at)) / 60_000)}m baaki (flip-churn guard, v12.7)`);
             continue;
@@ -1900,6 +1932,11 @@ ${convictionTightened.map(c => `• ${c.pair} — delta ${c.delta}, in profit: r
         ? null // equity SIM — no CoinDCX book to walk
         : await readDepth(best.market === 'INDIA' ? 'INDIA' : best.market, best.symbol, { ltp: ltpNow, levels: 20 }).catch(() => null);
       const { level, basis } = pullbackLevelFor({ side: best.side, ltp: ltpNow, entry: entryAnchor, depth: depth?.ok ? depth : null });
+      // v21.25.0 [NO SILENT SIDE]: invalid side = no resting order (guess nahi).
+      if (!(Number(level) > 0)) {
+        log('error', `PATIENT ENTRY BLOCKED ${best.symbol} — side "${String(best.side ?? '')}" invalid (${basis}); koi order place nahi kiya`);
+        return;
+      }
       _state.patient = {
         symbol: best.symbol, market: best.market, pair: pairOfSignal(best), side: best.side,
         level, basis, createdAt: Date.now(),

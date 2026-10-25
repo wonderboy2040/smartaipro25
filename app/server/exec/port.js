@@ -26,6 +26,8 @@
 // memory + rejects duplicates.
 // ============================================================
 
+import { normalizeSide } from '../ai/directionCertificate.js';
+
 const r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
 
 /**
@@ -264,8 +266,12 @@ export class PaperPort {
     if (!Array.isArray(positions)) return;
     for (const raw of positions) {
       if (!raw || typeof raw !== 'object' || !raw.id || !raw.pair) continue;
+      // v21.25.0 [NO SILENT LONG]: a restored position with a missing/unknown
+      // side is unmanageable (wrong-side SL/target math) — skip it honestly.
+      const side = normalizeSide(raw.side);
+      if (!side) continue;
       const p = {
-        id: String(raw.id), pair: String(raw.pair), side: String(raw.side || 'LONG').toUpperCase(),
+        id: String(raw.id), pair: String(raw.pair), side,
         qty: Number(raw.qty) || 0, avgPrice: Number(raw.avgPrice) || 0,
         leverage: Math.max(1, Number(raw.leverage) || 1), liqPrice: Number(raw.liqPrice) || null,
         sl: raw.sl != null ? Number(raw.sl) : null, tp: raw.tp != null ? Number(raw.tp) : null,
@@ -417,7 +423,7 @@ export class BrowserCdpPort {
         const pairGuess = String(p?.pair || cells[0] || '').trim();
         const nums = Array.isArray(p?.nums) ? p.nums : [];
         const sideGuess = /long|buy/i.test(String(p?.text || '')) ? 'LONG'
-          : (/short|sell/i.test(String(p?.text || '')) ? 'SHORT' : String(p?.side || '').toUpperCase());
+          : (/short|sell/i.test(String(p?.text || '')) ? 'SHORT' : normalizeSide(p?.side));
         return {
           id: String(p?.id || pairGuess || `browser-${i}`),
           pair: pairGuess,

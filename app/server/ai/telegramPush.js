@@ -36,6 +36,7 @@ import { getPaperSummary } from '../intraday/paperTrading.js';
 // (SL/T1/T2, MANUAL tagged). manualTrades imports store/backup/liveFeed/
 // blackScholes/positionConviction — none import telegramPush → acyclic.
 import { manualTradesToPositionRows, listManualTrades } from './manualTrades.js';
+import { normalizeSide } from './directionCertificate.js'; // v21.25.0: strict side
 
 const TICK_ACTIVE_MS = 5000;   // open positions on the book
 const TICK_IDLE_MS = 15000;    // nothing open — watch for agent-opened entries
@@ -129,11 +130,14 @@ export function paperTradesToPositionRows(summary) {
   for (const t of (Array.isArray(summary?.open) ? summary.open : [])) {
     if (!t || (t.status !== 'OPEN' && t.status !== 'PARTIAL')) continue;
     if (String(t.market || '').toUpperCase() !== 'INDIA') continue;
+    // v21.25.0 [NO SILENT LONG]: unknown direction pe row skip (guess nahi).
+    const side = normalizeSide(t.direction);
+    if (!side) continue;
     rows.push({
       id: `paper:${t.id}`,
       pair: t.label || t.symbol,
       market: 'INDIA',
-      side: t.direction === 'SHORT' ? 'SHORT' : 'LONG',
+      side,
       status: 'OPEN',
       ltp: Number(t.lastPrice),
       sl: t.stopLoss,

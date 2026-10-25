@@ -186,9 +186,9 @@ describe('v21.23.8 S1 — deriveUcFlipReverseTicket (pure reverse-ticket math)',
     expect(t.src).toBe('synthetic');
   });
 
-  it('invalid ltp → null; side normalize (garbage → LONG)', () => {
+  it('invalid ltp → null; invalid side → null (no silent LONG)', () => {
     expect(deriveUcFlipReverseTicket({ side: 'SHORT', ltp: 0, boardRow: null })).toBeNull();
-    expect(deriveUcFlipReverseTicket({ side: 'x', ltp: 100, boardRow: null }).side).toBe('LONG');
+    expect(deriveUcFlipReverseTicket({ side: 'x', ltp: 100, boardRow: null })).toBeNull();
   });
 
   it('T1/T2 geometry har case me valid: LONG me SL < entry < T1 < T2; SHORT me ulta', () => {

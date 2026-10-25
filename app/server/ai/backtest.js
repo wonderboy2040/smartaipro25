@@ -21,6 +21,7 @@
 // ============================================================
 import { computeIndicatorsFromCandles } from './lib/indicators.js';
 import { ensureAscending } from './lib/candles.js'; // v21.23.12 [L2.5]: simulateSymbol mirror-guard
+import { normalizeSide } from './directionCertificate.js';
 import { fetchCoinDcxCandles } from './data.js';
 import { runQuantModels } from './models.js';
 import { aggregateVotes, buildTradePlan, applyRegimeWeights, classifyRegimeFromCandles } from './ensemble.js';
@@ -106,7 +107,7 @@ export function simulateSymbol({ symbol, market, candles: candlesIn, minGrade = 
   // ka "walk-forward replay" jhootha lagta tha live trades ke against).
   const candles = ensureAscending(candlesIn);
   if (!Array.isArray(candles) || candles.length < WARMUP + 20) return null;
-  const long = side => String(side).toUpperCase() !== 'SHORT';
+  const long = side => normalizeSide(side) === 'LONG';
   const trades = [];
   let i = WARMUP;
   let openTrade = null;
@@ -226,7 +227,9 @@ export function simulateSymbol({ symbol, market, candles: candlesIn, minGrade = 
 }
 
 function finish(t, trades, exitPrice, reason, exitBar) {
-  const isLong = String(t.side).toUpperCase() !== 'SHORT';
+  const tradeSide = normalizeSide(t.side);
+  if (!tradeSide) return; // unknown side — no honest R-multiple to record
+  const isLong = tradeSide === 'LONG';
   const rMult = ((isLong ? exitPrice - t.entry : t.entry - exitPrice) / t.risk);
   const pnlINR = t.qty > 0 ? rMult * t.risk * t.qty : 0;
   trades.push({

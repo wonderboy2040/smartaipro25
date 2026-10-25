@@ -38,6 +38,7 @@
 // import cycles by construction.
 // ============================================================
 import { liveInvalidationCheck } from './superIntel.js';
+import { normalizeSide } from './directionCertificate.js';
 import { getActiveAutoTradesDeepMonitor } from './mtfAutoLink.js';
 
 export const RECHECK_TICK_MS = 15_000;
@@ -115,12 +116,18 @@ export function selectWatchlist(boards) {
 export function recheckRow(row, liveLtp) {
   const px = _num(liveLtp);
   if (!row || !(px > 0)) return { state: 'PENDING', reason: 'live price unavailable', ltp: null, movePct: null };
-  const long = String(row.side || 'LONG').toUpperCase() !== 'SHORT';
+  // v21.25.0 [NO SILENT LONG]: an unknown side used to be evaluated as LONG,
+  // which could mark a real SHORT as INVALIDATED/TARGET on the wrong side.
+  const rowSide = normalizeSide(row.side);
+  if (!rowSide) {
+    return { state: 'INVALID_SIDE', reason: `direction certificate blocked — invalid side "${String(row.side ?? '')}"`, ltp: px, movePct: null };
+  }
+  const long = rowSide === 'LONG';
 
   // 1) the canonical SL check (superIntel's exported copy — the SAME
   //    rule the frontend mirror runs on every SSE tick)
   const inv = liveInvalidationCheck({
-    side: row.side, liveLtp: px, stopLoss: row.stopLoss,
+    side: rowSide, liveLtp: px, stopLoss: row.stopLoss,
     entryZoneLow: null, entryZoneHigh: null, atr: row.atr,
   });
   if (inv?.status === 'invalidated') {

@@ -12,6 +12,7 @@
 // ============================================================
 
 import { pRound, pRoundLadder, MAX_STOP_FRACTION } from './lib/priceRound.js';
+import { normalizeSide } from './directionCertificate.js';
 
 // v21.3.0 (Issue-3): sub-noise stop floor — the swing-structure stop may
 // tighten the ATR baseline stop at most to this fraction of ONE ATR. A
@@ -1008,7 +1009,10 @@ export function computeLeverageView({ side, entry, stopLoss, target2, marginINR,
   const margin = Number(marginINR);
   const L = Math.max(1, Math.floor(Number(leverage) || 1));
   if (!(e > 0) || !(margin > 0) || !(sl > 0)) return null;
-  const long = String(side).toUpperCase() !== 'SHORT';
+  // v21.25.0 [NO SILENT LONG]: unknown side used to fall into the LONG branch.
+  const canonicalSide = normalizeSide(side);
+  if (!canonicalSide) return null;
+  const long = canonicalSide === 'LONG';
   if (long !== (sl < e)) return null; // SL on the wrong side — unusable
 
   const notionalINR = margin * L;

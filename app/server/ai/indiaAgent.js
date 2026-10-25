@@ -822,6 +822,11 @@ async function _tick(deps, sendTelegram) {
     if (classifyEntry({ ltp: ltpNow, entry: entryAnchor, atr: atrUnits }) === 'extended') {
       const depth = await readDepth('INDIA', best.symbol, { ltp: ltpNow }).catch(() => null);
       const { level, basis } = pullbackLevelFor({ side: best.side, ltp: ltpNow, entry: entryAnchor, depth: depth?.ok ? depth : null });
+      // v21.25.0 [NO SILENT SIDE]: invalid side = no resting order (guess nahi).
+      if (!(Number(level) > 0)) {
+        log('error', `PATIENT ENTRY BLOCKED ${best.symbol} — side "${String(best.side ?? '')}" invalid (${basis}); koi order place nahi kiya`);
+        return;
+      }
       _state.patient = {
         symbol: best.symbol, market: 'INDIA', pair: best.symbol, side: best.side,
         level, basis, createdAt: Date.now(),

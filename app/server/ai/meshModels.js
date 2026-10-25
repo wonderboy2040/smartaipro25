@@ -62,6 +62,7 @@ import { meshQuery } from '../mcp/mesh.js';
 import { __ledgerRaw } from './ledger.js';
 // v21.12.0 master accuracy switch (see accuracySuite.js header)
 import { accuracySuiteEnabled, legacyFlagEnabled } from './accuracySuite.js';
+import { normalizeSide } from './directionCertificate.js';
 
 const clamp = (v, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, v));
 const r1 = (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
@@ -507,9 +508,12 @@ const _winRate = (rows) => (rows.length > 0
  * can't lose it, tamper-evident chain feeds it.
  */
 export function meshModelAccountability({ settled = _settledEntries() } = {}) {
+  // v21.25.0 [NO SILENT LONG]: unknown-side settled rows cannot be attributed
+  // (they used to count as LONG). Skip them honestly.
+  const knownSettled = (Array.isArray(settled) ? settled : []).filter(e => normalizeSide(e?.side) != null);
   const models = MESH_MODEL_SEATS.map(seat => {
-    const voted = settled.filter(e => e.votes?.[seat.id] && e.votes[seat.id].dir !== 0);
-    const abstained = settled.filter(e => !e.votes?.[seat.id] || e.votes[seat.id].dir === 0);
+    const voted = knownSettled.filter(e => e.votes?.[seat.id] && e.votes[seat.id].dir !== 0);
+    const abstained = knownSettled.filter(e => !e.votes?.[seat.id] || e.votes[seat.id].dir === 0);
     const whenVotedWR = _winRate(voted);
     const whenAbstainedWR = _winRate(abstained);
     const edge = (whenVotedWR != null && whenAbstainedWR != null) ? Math.round((whenVotedWR - whenAbstainedWR) * 10) / 10 : null;
@@ -518,7 +522,7 @@ export function meshModelAccountability({ settled = _settledEntries() } = {}) {
     let wins = 0, losses = 0;
     for (const e of voted) {
       const win = (e.outcome.r ?? 0) > 0;
-      const alignedWithSide = (e.votes[seat.id].dir > 0) === (e.side !== 'SHORT');
+      const alignedWithSide = (e.votes[seat.id].dir > 0) === (normalizeSide(e.side) === 'LONG');
       if (alignedWithSide === win) wins++; else losses++;
     }
     const n = wins + losses;
@@ -729,7 +733,9 @@ export function meshModelsStatusView() {
  */
 export function meshModelWeek({ now = Date.now(), days = 7 } = {}) {
   const since = now - days * 86_400_000;
-  const settled = _settledEntries().filter(e => (e.outcome.ts || e.ts || 0) >= since);
+  const settled = _settledEntries()
+    .filter(e => (e.outcome.ts || e.ts || 0) >= since)
+    .filter(e => normalizeSide(e?.side) != null);
   const allTime = meshModelAccountability();
   const week = {};
   for (const seat of MESH_MODEL_SEATS) {
@@ -738,7 +744,7 @@ export function meshModelWeek({ now = Date.now(), days = 7 } = {}) {
       const v = e.votes?.[seat.id];
       if (!v || v.dir === 0) continue;
       const win = (e.outcome.r ?? 0) > 0;
-      const alignedWithSide = (v.dir > 0) === (e.side !== 'SHORT');
+      const alignedWithSide = (v.dir > 0) === (normalizeSide(e.side) === 'LONG');
       if (alignedWithSide === win) wins++; else losses++;
     }
     const n = wins + losses;

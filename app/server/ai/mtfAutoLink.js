@@ -72,6 +72,12 @@ import {
 } from './volTrail.js';
 // v21.24.0 SMART TRAIL v2: noise-aware ratchet + rolling TP2 (shadow default; SMART_TRAIL_V2=enforce to act).
 import { smartTrailMode, smartTrailConfig, smartTrailPlan, smartExtendTarget } from './smartTrail.js';
+// v21.25.0 DIRECTION CERTIFICATE — strict side vocabulary + explicit
+// LONG→buy / SHORT→sell certificate shared with board/live routes/UI.
+import {
+  normalizeSide, oppositeSideOf, resolveActivePosSide,
+  buildDirectionCertificate, summarizeBoardDirectionIntegrity,
+} from './directionCertificate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
@@ -509,9 +515,65 @@ function _snapshotRowFor(symbol, now) {
   };
 }
 
+function _blockedDirectionDeepEval({ trade, cert, entry, initialSl, currentSl, t1, t2, ltp, market, ccy }) {
+  const reason = cert.reasons[0] || cert.verdict || 'invalid direction';
+  const peak = Number(trade.peakPrice) > 0 ? Number(trade.peakPrice) : entry;
+  return {
+    symbol: trade.symbol || null,
+    market,
+    ccy,
+    side: cert.side,
+    orderSide: cert.orderSide,
+    entry,
+    ltp,
+    initialStopLoss: initialSl,
+    previousStopLoss: currentSl,
+    // NEVER trail a blocked row — a wrong-side SL would otherwise be pushed
+    // to the exchange and instantly stop the position out.
+    trailedStopLoss: currentSl,
+    slTrailed: false,
+    t1,
+    t2,
+    tp1Hit: Boolean(trade.t1Hit || trade.tp1Hit),
+    tp2Hit: false,
+    peakPrice: +peak.toFixed(6),
+    currentR: 0,
+    peakR: 0,
+    movePctFromEntry: 0,
+    mfePct: 0,
+    roePct: 0,
+    directionFollowing: false,
+    followThroughVerdict: `⛔ DIRECTION BLOCKED — ${reason}`,
+    peakGivebackPct: 0,
+    feeBreakevenPrice: null,
+    feeCovered: false,
+    peakCoveredFee: false,
+    grossPnl: 0,
+    distToTp1Pct: null,
+    distToTp2Pct: null,
+    stageCode: 'STAGE_DIRECTION_BLOCKED',
+    stageLabel: '⛔ Direction Certificate Blocked — no trail / no auto-exit',
+    trendStatus: `⛔ DIRECTION BLOCKED (${cert.verdict}): ${reason}`,
+    reversalDetected: false,
+    shouldBookProfitNow: false,
+    shouldExitDefensiveSl: false,
+    shouldClose: false,
+    exitReason: null,
+    directionBlocked: true,
+    directionCertificate: cert,
+    volClass: null,
+    momentumState: MOMENTUM.UNKNOWN,
+    atrPct: Number(trade.atrPct) > 0 ? Number(trade.atrPct) : null,
+    t1ClosePct: Number(trade.t1ClosePct) > 0 ? Number(trade.t1ClosePct) : 0.5,
+    trailEngine: 'blocked',
+    t2Extended: false,
+    t2Extensions: Number(trade.t2Extensions) || 0,
+    smartTrail: null,
+    checkedAt: Date.now(),
+  };
+}
+
 export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
-  const side = String(trade.side || trade.direction || 'LONG').toUpperCase();
-  const isLong = side !== 'SHORT';
   const entry = Number(trade.entry ?? trade.entryPrice) || 0;
   const initialSl = Number(trade.initialStopLoss ?? trade.stopLoss ?? trade.sl) || 0;
   const currentSl = Number(trade.trailedStopLoss ?? trade.stopLoss ?? trade.sl) || initialSl;
@@ -521,6 +583,31 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const qty = Number(trade.qty) || 1;
   const market = String(trade.execMarket || trade.market || 'FUTURES').toUpperCase();
   const ccy = trade.ccy || (market === 'INDIA' ? 'INR' : 'USDT');
+  // v21.25.0 [NO SILENT LONG]: pehle missing/unknown side `|| 'LONG'` se LONG
+  // ban jaata tha aur ek SHORT position ko ULTA manage karta tha (SL/target
+  // polarity inverted). Ab certificate hard-block deta hai — koi action nahi.
+  const directionCertificate = buildDirectionCertificate({
+    symbol: trade.symbol,
+    market,
+    side: trade.side ?? trade.direction,
+    activePos: trade.activePos ?? trade.positionAmt,
+    entry,
+    stopLoss: initialSl,
+    t1,
+    t2: t2Base,
+    // Deep-monitor rows may legitimately run without a native TP (manual live
+    // position). SL polarity + side integrity are still mandatory.
+    requireTargets: false,
+    directionVerified: trade.directionVerified === true,
+    source: 'deep-monitor',
+  });
+  if (!directionCertificate.ok) {
+    return _blockedDirectionDeepEval({
+      trade, cert: directionCertificate, entry, initialSl, currentSl, t1, t2: t2Base, ltp, market, ccy,
+    });
+  }
+  const side = directionCertificate.side;
+  const isLong = side === 'LONG';
   const risk = Math.max(1e-8, Math.abs(entry - initialSl) || Math.abs(t1 - entry) || entry * 0.008);
 
   const prevPeak = Number(trade.peakPrice) > 0 ? Number(trade.peakPrice) : entry;
@@ -682,7 +769,7 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const oppSide = isLong ? 'SHORT' : 'LONG';
   const boardFlipped = Boolean(
     boardRow && (
-      (String(boardRow.side || '').toUpperCase() === oppSide && (boardRow.triggerFired || Number(boardRow.superScore) >= 65))
+      (normalizeSide(boardRow.side) === oppSide && (boardRow.triggerFired || Number(boardRow.superScore) >= 65))
       || (boardRow.context?.dir != null && ((isLong && boardRow.context.dir < 0 && boardRow.triggerDir < 0) || (!isLong && boardRow.context.dir > 0 && boardRow.triggerDir > 0)))
     )
   );
@@ -777,6 +864,9 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     market,
     ccy,
     side,
+    orderSide: directionCertificate.orderSide,
+    directionCertificate,
+    directionBlocked: false,
     entry,
     ltp,
     initialStopLoss: initialSl,
@@ -1205,20 +1295,40 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
     if (!sym || !(qty > 0) || !(entry > 0)) continue;
 
     activeSymSet.add(sym);
-    const side = String(pos.side || (Number(pos.activePos) < 0 ? 'SHORT' : 'LONG')).toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
-    const isLong = side !== 'SHORT';
+    // v21.25.0 [ACTIVEPOS AUTHORITY]: exchange position sign is the truth.
+    // Declared `pos.side` is secondary; a conflict is logged and the sign
+    // wins. Unknown/missing side is NEVER coerced to LONG — adoption skips.
+    const posSide = resolveActivePosSide({
+      activePos: pos.activePos ?? pos.positionAmt,
+      side: pos.side,
+    });
+    if (!posSide.side) {
+      _logEvent('direction-block', `⛔ COINDCX ADOPTION SKIP ${sym}: ${posSide.reason} — position exchange par hai par side certify nahi ho sakti (no silent LONG)`);
+      continue;
+    }
+    if (posSide.conflict) {
+      _logEvent('direction-mismatch', `⚠️ COINDCX SIDE MISMATCH ${sym}: ${posSide.reason} — activePos sign authoritative, declared side discarded`);
+    }
+    const side = posSide.side;
+    const isLong = side === 'LONG';
     const leverage = Math.max(1, Number(pos.leverage) || computeMtfWalletLeverage(cfg.walletAmountINR, cfg));
     const ltp = Number(pos.ltp ?? pos.markPrice ?? entry) || entry;
     const defaultRiskPct = 0.012; // 1.2% protective stop if position had no SL set
-    const initialSl = Number(pos.stopLoss ?? pos.sl) > 0
-      ? Number(pos.stopLoss ?? pos.sl)
+    const rawPosSl = Number(pos.stopLoss ?? pos.sl) > 0 ? Number(pos.stopLoss ?? pos.sl) : null;
+    // v21.25.0: exchange-supplied levels must obey the authoritative side;
+    // a wrong-side SL/TP is ignored (synthesized protective level instead).
+    const posSlValid = rawPosSl != null && (isLong ? rawPosSl < entry : rawPosSl > entry);
+    const initialSl = posSlValid
+      ? rawPosSl
       : +(isLong ? entry * (1 - defaultRiskPct) : entry * (1 + defaultRiskPct)).toFixed(6);
     const riskUnit = Math.max(entry * 0.004, Math.abs(entry - initialSl));
-    const t1 = Number(pos.t1 ?? pos.tp1 ?? pos.tp) > 0
-      ? Number(pos.t1 ?? pos.tp1 ?? pos.tp)
+    const rawPosT1 = Number(pos.t1 ?? pos.tp1 ?? pos.tp) > 0 ? Number(pos.t1 ?? pos.tp1 ?? pos.tp) : null;
+    const t1 = rawPosT1 != null && (isLong ? rawPosT1 > entry : rawPosT1 < entry)
+      ? rawPosT1
       : +(isLong ? entry + 1.25 * riskUnit : entry - 1.25 * riskUnit).toFixed(6);
-    const t2 = Number(pos.t2 ?? pos.tp2 ?? pos.tp) > 0
-      ? Number(pos.t2 ?? pos.tp2 ?? pos.tp)
+    const rawPosT2 = Number(pos.t2 ?? pos.tp2 ?? pos.tp) > 0 ? Number(pos.t2 ?? pos.tp2 ?? pos.tp) : null;
+    const t2 = rawPosT2 != null && (isLong ? rawPosT2 > t1 : rawPosT2 < t1)
+      ? rawPosT2
       : +(isLong ? entry + 2.4 * riskUnit : entry - 2.4 * riskUnit).toFixed(6);
 
     const existing = st.book.find(b => b.status === 'OPEN' && b.symbol === sym && b.market === 'CRYPTO');
@@ -1238,11 +1348,50 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
       existing.entry = entry;
       existing.leverage = leverage;
       if (ltp > 0) existing.ltp = ltp;
-      if (!(existing.stopLoss > 0)) existing.stopLoss = initialSl;
+      // v21.25.0 [SIDE-SYNC CORRECTION]: agar book row ka stored side exchange
+      // ke activePos sign se ulta hai to row ko correct karo — warna SHORT
+      // position LONG ki tarah trail hoti hai (SL-hit logic inverted).
+      if (existing.side !== side) {
+        _logEvent('direction-mismatch', `⚠️ BOOK SIDE CORRECTED ${sym}: ${existing.side || 'unknown'} → ${side} (activePos ${posSide.rawActivePos ?? '—'} authoritative)`);
+        existing.side = side;
+        existing.peakPrice = isLong ? Math.max(entry, ltp) : Math.min(entry, ltp);
+        existing.deepMonitorStage = 'STAGE_0_INITIAL_GUARD';
+        existing.deepMonitorLabel = 'Stage 0 · Initial SL Guard (side re-synced)';
+        existing.trendStatus = `📡 ${isLong ? 'BULLISH' : 'BEARISH'} SIDE RE-SYNCED (${side})`;
+        existing.t1Hit = false;
+        existing.trailedStopLoss = initialSl;
+        existing.lastExchangeSl = null;
+        existing.slSyncPending = false;
+      }
+      // Polarity repair: a level on the wrong side of entry can never be a
+      // valid SL/target — replace with the exchange-derived protective levels.
+      const slWrong = !(existing.stopLoss > 0) || (isLong ? existing.stopLoss >= entry : existing.stopLoss <= entry);
+      if (slWrong) {
+        existing.stopLoss = initialSl;
+        existing.initialStopLoss = initialSl;
+        existing.trailedStopLoss = initialSl;
+      }
       if (!(existing.initialStopLoss > 0)) existing.initialStopLoss = initialSl;
+      const initSlWrong = isLong ? existing.initialStopLoss >= entry : existing.initialStopLoss <= entry;
+      if (initSlWrong) existing.initialStopLoss = existing.stopLoss;
       if (!(existing.trailedStopLoss > 0)) existing.trailedStopLoss = existing.stopLoss;
-      if (!(existing.t1 > 0)) existing.t1 = t1;
-      if (!(existing.t2 > 0)) existing.t2 = t2;
+      const t1Wrong = !(existing.t1 > 0) || (isLong ? existing.t1 <= entry : existing.t1 >= entry);
+      if (t1Wrong) existing.t1 = t1;
+      const t2Wrong = !(existing.t2 > 0) || (isLong ? existing.t2 <= existing.t1 : existing.t2 >= existing.t1);
+      if (t2Wrong) existing.t2 = t2;
+      existing.activePos = posSide.rawActivePos;
+      existing.directionCertificate = buildDirectionCertificate({
+        symbol: sym,
+        market: 'CRYPTO',
+        side,
+        activePos: posSide.rawActivePos,
+        entry,
+        stopLoss: existing.initialStopLoss ?? existing.stopLoss,
+        t1: existing.t1,
+        t2: existing.t2,
+        requireTargets: true,
+        source: 'coindcx-adoption',
+      });
       // v21.23.10 [ADOPTED-VOL-STAMP]: paper/manual row LIVE adopt hote waqt
       // vol stamps missing the → NORMAL-tight trail; SL-distance proxy se stamp.
       if (!(existing.atrPct > 0) && entry > 0 && initialSl > 0) {
@@ -1290,6 +1439,20 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
       ccy: 'USDT',
       fxUsed: fxRate,
       side,
+      orderSide: side === 'LONG' ? 'buy' : 'sell',
+      activePos: posSide.rawActivePos,
+      directionCertificate: buildDirectionCertificate({
+        symbol: sym,
+        market: 'CRYPTO',
+        side,
+        activePos: posSide.rawActivePos,
+        entry,
+        stopLoss: initialSl,
+        t1,
+        t2,
+        requireTargets: true,
+        source: 'coindcx-adoption',
+      }),
       score: Number(pos.superScore ?? pos.score) || 86,
       tier: pos.tier || 'ELITE',
       mode: pos.mode || cfg.mode || 'INTRADAY',
@@ -1379,7 +1542,10 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
  * stale/absurd plan levels kabhi reverse ticket me leak nahi hote.
  */
 export function deriveUcFlipReverseTicket({ side, ltp, boardRow = null, fallbackRiskPct = 0.012 } = {}) {
-  const s = String(side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  // v21.25.0 [NO SILENT LONG]: unknown side par reverse ticket bilkul nahi —
+  // pehle `!== 'SHORT'` har garbage ko LONG reverse bana deta tha.
+  const s = normalizeSide(side);
+  if (!s) return null;
   const px = Number(ltp) || 0;
   if (!(px > 0)) return null;
   const isLong = s === 'LONG';
@@ -1458,7 +1624,13 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     const sym = String(b.symbol || '').toUpperCase();
     const execMarket = String(b.execMarket || b.market || 'FUTURES').toUpperCase();
     const isSim = execMarket === 'GLOBALFUTURES';
-    const side = b.side === 'LONG' ? 'SHORT' : 'LONG';
+    // v21.25.0 [STRICT OPPOSITE]: invalid stored side par reverse entry nahi
+    // (pehle har non-LONG side ko LONG maan liya jata tha).
+    const side = oppositeSideOf(b.side);
+    if (!side) {
+      _logEvent('flip-skip', `⛔ UC FLIP-REVERSE SKIP ${sym}: stored side "${b.side ?? ''}" invalid — reverse side derive nahi ho sakti`);
+      return null;
+    }
     // Reverse ka mode purane trade ke mode se hi mirror hota hai. PAPER trade
     // ke liye site-live hone se relaxed live quota / LIVE order dono galat hain.
     const priorWasLive = b.executionMode === 'LIVE' || Boolean(b.livePositionId) || Boolean(b.liveOrderId);
@@ -1476,6 +1648,7 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     // counter-trend / vetoed rows can exit the old trade but never open one.
     const reverseReady = Boolean(
       boardRow
+      && normalizeSide(boardRow.side) === side
       && boardRow.directionVerified === true
       && boardRow.ensembleSignalAvailable !== false
       && boardRow.autoEligible === true
@@ -1845,10 +2018,10 @@ export async function mtfAutoTick(p = {}) {
         if (priceRatio <= 0.35 || priceRatio >= 2.85) continue;
       }
 
-      const oppSide = b.side === 'LONG' ? 'SHORT' : 'LONG';
+      const oppSide = oppositeSideOf(b.side);
       const revByRow = Boolean(
-        effRow && (
-          (String(effRow.side || '').toUpperCase() === oppSide && (effRow.triggerFired || Number(effRow.superScore) >= 65))
+        oppSide && effRow && (
+          (normalizeSide(effRow.side) === oppSide && (effRow.triggerFired || Number(effRow.superScore) >= 65))
           || (effRow.context?.dir != null && ((b.side === 'LONG' && effRow.context.dir < 0 && effRow.triggerDir < 0) || (b.side === 'SHORT' && effRow.context.dir > 0 && effRow.triggerDir > 0)))
         )
       );
@@ -2659,6 +2832,19 @@ export async function mtfAutoTick(p = {}) {
         openedInLiveMode: Boolean(wantLiveOrder),
         symbol: sym, market, execMarket, ccy: isSimRow ? 'USDC' : (isUsd ? 'USDT' : 'INR'), fxUsed: isUsd ? fxRate : null,
         side: row.side,
+        orderSide: row.side === 'LONG' ? 'buy' : 'sell',
+        directionCertificate: buildDirectionCertificate({
+          symbol: sym,
+          market,
+          side: row.side,
+          entry: finalEntry,
+          stopLoss: finalSl,
+          t1: finalT1,
+          t2: finalT2,
+          requireTargets: true,
+          directionVerified: row.directionVerified === true,
+          source: 'mtf-auto-entry',
+        }),
         score: row.superScore, tier: row.tier, mode: row.mode, holdMin: row.holdMin,
         entry: finalEntry, stopLoss: finalSl, initialStopLoss: finalSl, trailedStopLoss: finalSl, peakPrice: finalEntry,
         t1: finalT1, t2: finalT2, qty: finalQty,
@@ -2825,6 +3011,8 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
     trailingActiveCount: rows.filter(r => r.slTrailed || r.stageCode !== 'STAGE_0_INITIAL_GUARD').length,
     tp1LockedCount: rows.filter(r => r.tp1Hit).length,
     reversalAlertCount: rows.filter(r => r.reversalDetected).length,
+    directionBlockedCount: rows.filter(r => r.directionBlocked === true || r.directionCertificate?.ok === false).length,
+    directionIntegrity: summarizeBoardDirectionIntegrity(rows),
     trades: rows,
     checkedAt: Date.now(),
   };
@@ -2903,6 +3091,7 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
     feeAwareReversalExit: cfg.feeAwareReversalExit !== false,
     deepMonitorEnabled: cfg.deepMonitorEnabled !== false,
     deepMonitor,
+    directionIntegrity: deepMonitor.directionIntegrity,
     ccyMode: 'crypto rows USDT (paper = FUTURES desk domain) · india rows ₹',
     day: st.day,
     dayCount: st.dayCount,
@@ -2936,14 +3125,24 @@ export function recordLiveMtfBoardTrade(item = {}) {
   // v21.23.13 [SIDE HONESTY — "pakka LONG/SHORT" doctrine]: deep-monitor rows
   // pe silent `|| 'LONG'` default = wrong-side book-keeping ka vector (ek
   // missing side poora SHORT trade LONG ki tarah manage hota — SL polarity
-  // inverted). Dual-vocab normalize + unknown pe LOUD THROW. Board rows LONG/
-  // SHORT hi speak karte hain (SIDEABLE gate) aur teeno callers fresh row.side
-  // pass karte hain — throw sirf genuine contract break pe lagega.
-  const SIDE_ALIAS_BOARD = { BUY: 'LONG', SELL: 'SHORT', LONG: 'LONG', SHORT: 'SHORT' };
-  const sideNorm = SIDE_ALIAS_BOARD[String(item.side || '').toUpperCase()] || null;
+  // inverted). v21.25.0: shared strict vocabulary + unknown pe LOUD THROW.
+  const sideNorm = normalizeSide(item.side);
   if (!sideNorm) {
     throw new Error(`recordLiveMtfBoardTrade: invalid side "${item.side}" for ${sym} - LONG/SHORT (ya BUY/SELL) required; silent default v21.23.13 se mana hai (direction-honesty)`);
   }
+  const directionCertificate = buildDirectionCertificate({
+    symbol: sym,
+    market: item.market || 'CRYPTO',
+    side: sideNorm,
+    activePos: item.activePos ?? item.positionAmt,
+    entry: item.entry,
+    stopLoss: item.stopLoss,
+    t1: item.t1,
+    t2: item.t2,
+    requireTargets: false,
+    directionVerified: item.directionVerified === true,
+    source: 'record-live-board-trade',
+  });
   const rawBookMarket = String(item.market || 'CRYPTO').toUpperCase();
   const isSimBook = rawBookMarket === 'GLOBALFUTURES' || rawBookMarket === 'EQUITY_SIM';
   const isUsdBook = !isSimBook && rawBookMarket !== 'INDIA';
@@ -3014,6 +3213,20 @@ export function recordLiveMtfBoardTrade(item = {}) {
     if (Number(item.walletINR) > 0) existing.walletINR = Math.round(Number(item.walletINR));
     if (Number(item.deployedWalletINR) > 0) existing.deployedWalletINR = Number(item.deployedWalletINR);
     if (Number(item.buyingPowerINR) > 0) existing.buyingPowerINR = Number(item.buyingPowerINR);
+    existing.orderSide = sideNorm === 'LONG' ? 'buy' : 'sell';
+    existing.directionCertificate = buildDirectionCertificate({
+      symbol: sym,
+      market: bookMarket,
+      side: sideNorm,
+      activePos: item.activePos ?? item.positionAmt,
+      entry: existing.entry,
+      stopLoss: existing.initialStopLoss ?? existing.stopLoss,
+      t1: existing.t1,
+      t2: existing.t2,
+      requireTargets: false,
+      directionVerified: item.directionVerified === true,
+      source: 'record-live-board-trade',
+    });
     _persistState();
     return existing;
   }
@@ -3048,6 +3261,9 @@ export function recordLiveMtfBoardTrade(item = {}) {
     ccy: bookCcy,
     fxUsed: isUsdBook ? fxRate : null,
     side: sideNorm,
+    orderSide: sideNorm === 'LONG' ? 'buy' : 'sell',
+    activePos: item.activePos ?? item.positionAmt ?? null,
+    directionCertificate,
     score: item.superScore ?? 85,
     tier: item.tier || 'ELITE',
     mode: item.mode || cfg.mode || 'INTRADAY',

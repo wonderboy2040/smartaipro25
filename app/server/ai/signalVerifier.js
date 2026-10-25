@@ -40,6 +40,8 @@
 // fields score their neutral band, never silently zero.
 // ============================================================
 
+import { normalizeSide } from './directionCertificate.js'; // v21.25.0: strict side, never silent LONG
+
 const num = (v) => {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : null;
@@ -83,10 +85,27 @@ const STATUS_PTS = { PASS: 1, WARN: 0.5, FAIL: 0 };
  * }}
  */
 export function verifySignal(sig, { now = Date.now() } = {}) {
-  const side = String(sig?.side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
-  const opposite = side === 'LONG' ? 'SHORT' : 'LONG';
   const market = String(sig?.market || 'CRYPTO').toUpperCase();
   const symbol = String(sig?.symbol || '?').toUpperCase();
+  // v21.25.0 [NO SILENT LONG]: unknown/missing side ko pehle LONG maan kar
+  // poora checklist chala diya jaata tha. Ab honest NO_TRADE — direction
+  // certificate ke bina koi verdict nahi.
+  const side = normalizeSide(sig?.side);
+  if (!side) {
+    return {
+      agent: 'SVA-v1',
+      symbol, market, side: null,
+      finalCall: 'NO_TRADE', action: 'STAND_ASIDE',
+      score: 0, flipScore: null, veto: true,
+      verdict: `⛔ NO TRADE — signal side "${String(sig?.side ?? '')}" invalid/missing hai (LONG/SHORT required); direction certificate ne block kiya`,
+      proNote: '🛡 SVA-v1 final: NO TRADE · invalid side. Direction guess nahi hoti — signal ko LONG/SHORT ke bina execute mat karo.',
+      sizeHint: 0,
+      checklist: [],
+      invalidSide: true,
+      checkedAt: now,
+    };
+  }
+  const opposite = side === 'LONG' ? 'SHORT' : 'LONG';
 
   const voters = num(sig?.voters ?? sig?.participating);
   const totalModels = num(sig?.totalModels);

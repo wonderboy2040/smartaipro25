@@ -33,6 +33,8 @@
 //   • momentum multipliers clamped (kabhi bhi unbounded loose nahi)
 // ============================================================
 
+import { normalizeSide } from './directionCertificate.js'; // v21.25.0: strict side, no silent LONG
+
 /** ATR% volatility class boundaries (user spec: <0.8 / <1.8 / <3.5 / ≥3.5). */
 export const VOL_CLASS = {
   LOW: 'LOW',
@@ -135,10 +137,14 @@ export const MOMENTUM = {
 export function momentumStateOf(side, boardRow) {
   const trig = boardRow?.trigger || null;
   if (!trig) return MOMENTUM.UNKNOWN;
+  // v21.25.0 [NO SILENT LONG]: unknown side pehle +1 (LONG) ban jaata tha.
+  // Momentum UNKNOWN = neutral, koi direction guess nahi.
+  const normalized = normalizeSide(side);
+  if (!normalized) return MOMENTUM.UNKNOWN;
   const roc1 = Number(trig.roc1);
   const roc3 = Number(trig.roc3);
   const volRatio = Number(trig.volRatio);
-  const dirSign = String(side || '').toUpperCase() === 'SHORT' ? -1 : 1;
+  const dirSign = normalized === 'SHORT' ? -1 : 1;
   const r1 = Number.isFinite(roc1) ? roc1 * dirSign : null;
   const r3 = Number.isFinite(roc3) ? roc3 * dirSign : null;
   const vr = Number.isFinite(volRatio) ? volRatio : null;

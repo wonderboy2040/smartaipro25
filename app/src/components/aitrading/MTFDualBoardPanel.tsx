@@ -357,6 +357,12 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       notify(false, `${row.symbol}: directional signal (LONG/SHORT) required`);
       return;
     }
+    // v21.25.0 DIRECTION CERTIFICATE: hard-block when signal→order is not clean.
+    const cert = row.directionCertificate || null;
+    if (cert && cert.ok !== true) {
+      notify(false, `⛔ ${row.symbol}: direction certificate ${cert.verdict} — ${cert.reasons[0] || 'signal/order direction invalid'}`);
+      return;
+    }
     setPaperOrdering(row.symbol);
     const targetMkt = (row.assetClass === 'METALS' ? 'METALS' : row.assetClass === 'EQUITY_SIM' ? 'GLOBALFUTURES' : row.market === 'INDIA' ? 'INDIA' : market) as MarketKind;
     const r = await openMtfBoardPaper(row.symbol, targetMkt, mode, row.holdMin ?? holdMin);
@@ -422,6 +428,12 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   const onLiveOrder = useCallback(async (row: MtfDualRow) => {
     if (row.side !== 'LONG' && row.side !== 'SHORT') {
       notify(false, `${row.symbol}: directional signal (LONG/SHORT) required`);
+      return;
+    }
+    // v21.25.0 DIRECTION CERTIFICATE: LIVE never fires on an invalid/ambiguous side.
+    const cert = row.directionCertificate || null;
+    if (cert && cert.ok !== true) {
+      notify(false, `⛔ ${row.symbol}: LIVE blocked — direction certificate ${cert.verdict} (${cert.reasons[0] || 'signal/order direction invalid'})`);
       return;
     }
     if (row.trapVeto || row.zoneWallVeto || row.reversalRisk || row.trigger?.opposingFlow || row.trigger?.postPeakTrap) {
@@ -714,6 +726,44 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
         {note && <div className="mt-1.5 text-[10px] font-bold text-slate-300">{note}</div>}
       </div>
 
+      {/* ================= v21.25.0 DIRECTION CERTIFICATE INTEGRITY STRIP ================= */}
+      {board?.directionIntegrity && (
+        <div
+          data-testid="mtf-direction-integrity"
+          className={`mt-2 rounded-xl border px-3 py-1.5 flex items-center justify-between gap-2 flex-wrap text-[9px] font-mono ${
+            board.directionIntegrity.ok
+              ? 'border-emerald-500/40 bg-emerald-500/10'
+              : 'border-red-500/50 bg-red-500/10'
+          }`}
+        >
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`font-black tracking-wider ${board.directionIntegrity.ok ? 'text-emerald-300' : 'text-red-300'}`}>
+              🧭 DIRECTION CERTIFICATE
+            </span>
+            <span className="text-slate-200">{board.directionIntegrity.label}</span>
+            <span className="px-1.5 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 font-black">
+              LONG → BUY
+            </span>
+            <span className="px-1.5 py-0.5 rounded border border-rose-500/40 bg-rose-500/10 text-rose-200 font-black">
+              SHORT → SELL
+            </span>
+            {board.directionIntegrity.pakka > 0 && (
+              <span className="px-1.5 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/10 text-cyan-200 font-black">
+                🔒 PAKKA {board.directionIntegrity.pakka}
+              </span>
+            )}
+            {(board.directionIntegrity.mismatches > 0 || (counts?.directionBlocked ?? 0) > 0) && (
+              <span className="px-1.5 py-0.5 rounded border border-red-500/50 bg-red-500/15 text-red-200 font-black">
+                ⛔ {board.directionIntegrity.mismatches} mismatch · {counts?.directionBlocked ?? board.directionIntegrity.blocked} blocked
+              </span>
+            )}
+          </div>
+          <span className="text-[8px] text-slate-400">
+            Har row ka signal side ↔ exchange order side certificate server se verified · invalid side = entry BLOCKED
+          </span>
+        </div>
+      )}
+
       {/* ================= SINGLE ONE-CLICK LIVE AUTO-TRADE INTELLIGENCE BAR (User Spec #1, #2, #3, #5) ================= */}
       <div className={`mt-2 border rounded-xl px-3 py-2.5 transition-all ${isLiveAuto ? 'border-emerald-500/50 bg-gradient-to-r from-emerald-950/40 via-emerald-900/20 to-cyan-950/30 shadow-lg shadow-emerald-950/30' : 'border-slate-500/30 bg-slate-900/40'}`}>
         <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -734,6 +784,23 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             <div className="mt-1 text-[9px] font-mono text-slate-400">
               {statusLine}
             </div>
+            {auto?.directionIntegrity && (
+              <div
+                data-testid="mtf-auto-direction-integrity"
+                className={`mt-1 inline-flex items-center gap-2 flex-wrap text-[9px] font-mono px-1.5 py-0.5 rounded border ${
+                  auto.directionIntegrity.ok
+                    ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200'
+                    : 'border-red-500/45 bg-red-500/10 text-red-200'
+                }`}
+                title={auto.directionIntegrity.issues.map(i => `${i.symbol || '?'}: ${i.verdict} ${i.reasons[0] || ''}`).join(' · ') || 'Auto book + deep monitor direction certificate clean'}
+              >
+                <span className="font-black">🧭 AUTO BOOK + DEEP MONITOR</span>
+                <span>{auto.directionIntegrity.label}</span>
+                {(auto.directionBlockedCount ?? auto.directionIntegrity.blocked) > 0 && (
+                  <span className="font-black text-red-200">⛔ {auto.directionBlockedCount ?? auto.directionIntegrity.blocked} blocked</span>
+                )}
+              </div>
+            )}
             {(liveWarnWhy || (!isLiveAuto && armBlockWhy)) && (
               <div className="mt-1 text-[9px] font-bold text-amber-300" data-testid="mtf-live-warning">
                 ⚠ {liveWarnWhy || armBlockWhy}
@@ -833,6 +900,22 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                 <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[9px]">
                   {activeTradedRows.length} Active Traded · {auto?.deepMonitor?.trailingActiveCount ?? 0} SL Trailed · {auto?.deepMonitor?.tp1LockedCount ?? 0} TP1 Hit
                 </span>
+                {auto?.deepMonitor?.directionIntegrity && (
+                  <span
+                    data-testid="mtf-deep-direction-integrity"
+                    className={`px-1.5 py-0.5 rounded border text-[9px] font-mono ${
+                      auto.deepMonitor.directionIntegrity.ok
+                        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                        : 'bg-red-500/20 border-red-500/50 text-red-200'
+                    }`}
+                    title={auto.deepMonitor.directionIntegrity.issues.map(i => `${i.symbol || '?'}: ${i.verdict} ${i.reasons[0] || ''}`).join(' · ') || 'All active trades certified'}
+                  >
+                    🧭 {auto.deepMonitor.directionIntegrity.valid}/{auto.deepMonitor.directionIntegrity.total} certified
+                    {(auto.deepMonitor.directionBlockedCount ?? auto.deepMonitor.directionIntegrity.blocked) > 0
+                      ? ` · ⛔ ${auto.deepMonitor.directionBlockedCount ?? auto.deepMonitor.directionIntegrity.blocked} blocked`
+                      : ' · LONG→BUY / SHORT→SELL ✓'}
+                  </span>
+                )}
               </div>
               <span className="text-[9px] font-mono text-slate-400">
                 ⚡ 3s Ultra-Fast Auto SL Trail + Live Direction Follow-Through Verification
@@ -855,6 +938,18 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                         <span className={`px-1.5 py-0.5 rounded text-[9px] font-black ${isLong ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
                           {t.side} · {t.leverage || activeLeverage}x · {t.walletDeployPct || walletDeployPct}% Wallet
                         </span>
+                        {t.orderSide && (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-black font-mono bg-cyan-500/15 text-cyan-200 border border-cyan-500/40"
+                            title="Direction certificate: signal side → actual exchange order side">
+                            🧭 {t.side} → {t.orderSide.toUpperCase()}
+                          </span>
+                        )}
+                        {t.directionBlocked && (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-red-500/30 text-red-100 border border-red-400/70"
+                            title={t.directionCertificate?.reasons.join(' · ') || 'direction certificate blocked this trade — no SL trail / no profit-book action'}>
+                            ⛔ DIRECTION BLOCKED{t.directionCertificate?.verdict ? ` · ${t.directionCertificate.verdict}` : ''}
+                          </span>
+                        )}
                         <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-emerald-500/15 text-emerald-200 border border-emerald-500/35">
                           🔒 FULL CONTROL
                         </span>
@@ -992,10 +1087,15 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                 : 'bg-slate-500/15 text-slate-400 border border-slate-500/40';
             const p = r.plan || null;
             const wp = r.signals?.board?.winProb || null;
+            // v21.25.0 DIRECTION CERTIFICATE — explicit signal → order side.
+            const dirCert = r.directionCertificate || null;
+            const dirBlocked = Boolean(dirCert && dirCert.ok !== true);
+            const orderSide = dirCert?.orderSide ?? r.orderSide ?? null;
+            const dirVerdict = dirCert?.verdict ?? r.directionVerdict ?? null;
             const scorePct = Math.max(2, Math.min(100, Number(r.superScore) || 0));
             const key = `${r.symbol}-${r.mode}`;
             const open = !!expanded[key];
-            const canPaper = r.ok && (r.side === 'LONG' || r.side === 'SHORT') && p?.entry && p?.stopLoss && p?.t1
+            const canPaper = r.ok && !dirBlocked && (r.side === 'LONG' || r.side === 'SHORT') && p?.entry && p?.stopLoss && p?.t1
               && !r.counterHtf && !r.counterTrend && r.ensembleSignalAvailable !== false
               && r.directionVerified === true && r.triggerFired === true && r.autoEligible === true
               && Number(r.superScore ?? 0) >= 65;
@@ -1021,7 +1121,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             const isPakka = Boolean(r.directionVerified ?? r.worldIndicators?.directionVerified);
             const oppBoardSide = r.boardSide || r.signals?.board?.side || null;
             const hasBoardConflict = Boolean(r.boardSideConflict || (oppBoardSide && r.side && oppBoardSide !== r.side));
-            const rowLiveReady = canPaper && !!r.directionVerified && !r.counterTrend && !r.counterHtf && !hasBoardConflict && !r.svaConflict && !r.councilConflict
+            const rowLiveReady = canPaper && !dirBlocked && !!r.directionVerified && !r.counterTrend && !r.counterHtf && !hasBoardConflict && !r.svaConflict && !r.councilConflict
               && r.assetClass !== 'EQUITY_SIM' && r.market !== 'GLOBALFUTURES' && Number(r.superScore ?? 0) >= 65;
             return (
               <div key={key} data-testid={`mtf-card-${r.symbol}`} className="quantum-panel rounded-2xl p-3 border border-violet-500/15">
@@ -1036,6 +1136,31 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                       <span className={`px-1.5 py-0.5 rounded-md text-[9px] font-black tracking-wider ${sideCls}`}>
                         {r.side ?? 'WAIT'} {r.triggerFired ? '· ⚡ FIRED' : r.side ? '· ⏸ PENDING' : ''}
                       </span>
+                      {dirCert && (
+                        <span
+                          data-testid={`mtf-dir-cert-${r.symbol}`}
+                          className={`px-1.5 py-0.5 rounded-md text-[9px] font-black border font-mono ${
+                            dirBlocked
+                              ? 'bg-red-500/25 text-red-100 border-red-400/70'
+                              : dirCert.pakka
+                                ? 'bg-emerald-500/20 text-emerald-100 border-emerald-400/60'
+                                : 'bg-cyan-500/15 text-cyan-200 border-cyan-500/45'
+                          }`}
+                          title={`Direction certificate ${dirCert.version}: ${dirCert.label} · ${dirCert.reasons.join(' · ') || 'side + order + geometry verified'}`}
+                        >
+                          🧭 {r.side && orderSide ? `${r.side} → ${orderSide.toUpperCase()}` : (dirVerdict || 'NO DIRECTION')}
+                          {dirCert.pakka ? ' 🔒 PAKKA' : dirBlocked ? ' ⛔' : ''}
+                        </span>
+                      )}
+                      {dirBlocked && (
+                        <span
+                          data-testid={`mtf-dir-blocked-${r.symbol}`}
+                          className="px-1.5 py-0.5 rounded-md text-[9px] font-black bg-red-500/30 text-red-100 border border-red-400/70"
+                          title={dirCert?.reasons.join(' · ') || 'direction certificate blocked this row'}
+                        >
+                          ⛔ DIRECTION BLOCKED · {dirVerdict}
+                        </span>
+                      )}
                       {isPakka && (r.side === 'LONG' || r.side === 'SHORT') && (
                         <span className={`px-1.5 py-0.5 rounded-md text-[9px] font-black border ${long ? 'bg-emerald-500/25 text-emerald-100 border-emerald-400/60' : 'bg-rose-500/25 text-rose-100 border-rose-400/60'}`}
                           title="Pakka Verified Direction Lock: Deep Context TF + Action Trigger TF + 8 Institutional Indicators Aligned + Zero Trap/Wall Veto + Cross-Engine Direction Match">
@@ -1281,6 +1406,13 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
               <span className={b.status === 'OPEN' ? 'text-emerald-300' : 'text-slate-500'}>{b.status}</span>
               <span className="font-bold text-slate-200">{b.symbol}</span>
               <span className={b.side === 'LONG' ? 'text-emerald-300' : 'text-red-300'}>{b.side}</span>
+              {b.orderSide && (
+                <span className={`px-1 rounded border text-[8px] font-black ${b.orderSide === 'buy' ? 'border-emerald-500/40 text-emerald-300' : 'border-rose-500/40 text-rose-300'}`}
+                  title="Direction certificate: signal side → exchange order side">
+                  → {b.orderSide.toUpperCase()}
+                </span>
+              )}
+              {b.directionBlocked && <span className="px-1 rounded border border-red-500/50 bg-red-500/20 text-red-200 text-[8px] font-black">⛔ BLOCKED</span>}
               <span className="text-slate-300">{b.score} {b.tier}</span>
               <span className="text-slate-400">qty {b.qty} · risk ₹{fmt(b.riskINR, 0)}{b.ccy === 'USDT' ? ` ($${fmt(b.riskUsdt, 2)})` : ''} · e {b.ccy === 'USDT' ? '$' : '₹'}{fmt(b.entry)} · sl {fmt(b.stopLoss)}</span>
               <span className="text-slate-500">{b.holdMin}m window · {fmtAge(b.openedAt)} ago{b.closeReason ? ` · ${b.closeReason}` : ''}{b.pnl != null ? ` · ${b.ccy === 'USDT' ? '$' : '₹'}${fmt(b.pnl, 2)}` : ''}</span>

@@ -38,6 +38,7 @@
 import crypto from 'node:crypto';
 import { loadJSON, saveJSON } from '../lib/store.js';
 import { durablePut } from '../mcp/durable.js';
+import { normalizeSide } from './directionCertificate.js'; // v21.25.0: strict side
 
 const LEDGER_FILE = 'ai-signal-ledger.json';
 // v21.11.0: 400 → 1200 — 3× learning window (see header). Env-tunable.
@@ -302,12 +303,16 @@ export function modelStats() {
   const stats = {};
   for (const e of l.entries) {
     if (!e.outcome || !e.votes) continue;
+    // v21.25.0 [NO SILENT LONG]: unknown trade side = skip attribution
+    // (pehle `e.side !== 'SHORT'` har garbage ko LONG maan leta tha).
+    const tradeSide = normalizeSide(e.side);
+    if (!tradeSide) continue;
     const win = (e.outcome.r ?? 0) > 0;
     for (const [modelId, v] of Object.entries(e.votes)) {
       if (!v || v.dir === 0) continue;
       stats[modelId] = stats[modelId] || { model: modelId, aligned: 0, wins: 0, losses: 0 };
       const s = stats[modelId];
-      const alignedWithSide = (v.dir > 0) === (e.side !== 'SHORT');
+      const alignedWithSide = (v.dir > 0) === (tradeSide === 'LONG');
       s.aligned++;
       // credit: model said what the trade did AND trade won → win;
       // model opposed the trade and it lost → also a win (it was right);

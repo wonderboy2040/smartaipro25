@@ -19,6 +19,7 @@
 // ============================================================
 import { nn, prepareShared, finishShared } from '../core/features.js';
 import { makeSnapshot, r4, missingFeatures } from './contract.js';
+import { normalizeSide } from '../../ai/directionCertificate.js';
 
 export const ENSEMBLE_ADAPTER_DEFAULTS = {
   stopAtr: 1.5,
@@ -92,7 +93,13 @@ export function makeEnsembleAdapter(signalLog = [], overrides = {}) {
       const cPrev = nn(rows[i - 1]?.bar?.close) ?? nn(bar.open); // decision uses PRIOR close (shift(1))
       const atr = nn(row.atr);
       if (cPrev == null || atr == null || !(atr > 0)) return null;
-      const side = String(sig.side || 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+      const side = normalizeSide(sig.side);
+      // v21.25.0 [NO SILENT LONG]: unknown signal side is not a LONG hint —
+      // the adapter refuses the candidate instead of backtesting a fake trade.
+      if (!side) {
+        ctx.state?.droppedByNaN?.push?.({ i, miss: `invalid signal side "${String(sig.side ?? '')}"` });
+        return null;
+      }
       const dir = side === 'LONG' ? 1 : -1;
       const stop = cPrev - dir * cfg.stopAtr * atr;
       const stopDist = Math.abs(cPrev - stop);

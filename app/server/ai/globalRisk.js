@@ -27,6 +27,7 @@
 // ============================================================
 import { loadJournal } from './coindcxOrders.js';
 import { fetchUsdInr } from './futures.js';
+import { normalizeSide } from './directionCertificate.js'; // v21.25.0: strict side
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const _num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
@@ -60,14 +61,18 @@ export function globalRiskEnabled() {
 export function deskExposure(journal, usdInr = 84) {
   const fx = usdInr > 0 ? usdInr : 84;
   const open = (journal?.positions || []).filter(p => p && (p.status === 'OPEN' || p.status === 'UNKNOWN'));
-  const desks = { crypto: { open: 0, riskINR: 0, unpriced: 0, long: 0, short: 0 }, india: { open: 0, riskINR: 0, unpriced: 0, long: 0, short: 0 } };
+  const desks = { crypto: { open: 0, riskINR: 0, unpriced: 0, unknownSide: 0, long: 0, short: 0 }, india: { open: 0, riskINR: 0, unpriced: 0, unknownSide: 0, long: 0, short: 0 } };
   for (const p of open) {
     // India positions always carry market:'INDIA' (indiaOrders contract);
     // crypto rows carry CRYPTO/FUTURES/GLOBALFUTURES or legacy undefined
     const desk = String(p.market || '').toUpperCase() === 'INDIA' ? desks.india : desks.crypto;
     desk.open += 1;
-    const long = /^(L|B)/i.test(String(p.side || ''));
-    if (long) desk.long += 1; else desk.short += 1;
+    // v21.25.0 [NO SILENT SIDE]: unknown side pehle SHORT count hota tha.
+    // Ab alag counter — bias kabhi guess se nahi banta.
+    const posSide = normalizeSide(p.side);
+    if (posSide === 'LONG') desk.long += 1;
+    else if (posSide === 'SHORT') desk.short += 1;
+    else desk.unknownSide += 1;
     const entry = _num(p.entryPrice);
     const sl = _num(p.sl);
     const qty = _num(p.qty);
@@ -85,6 +90,7 @@ export function deskExposure(journal, usdInr = 84) {
     open: desks.crypto.open + desks.india.open,
     riskINR: Math.round((desks.crypto.riskINR + desks.india.riskINR) * 100) / 100,
     unpriced: desks.crypto.unpriced + desks.india.unpriced,
+    unknownSide: desks.crypto.unknownSide + desks.india.unknownSide,
     netDirBias: (desks.crypto.long + desks.india.long) - (desks.crypto.short + desks.india.short),
   };
   return { desks, total };

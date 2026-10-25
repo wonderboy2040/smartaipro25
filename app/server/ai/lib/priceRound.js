@@ -24,6 +24,8 @@
 //   smaller        → 8 decimals   (PEPE-class)
 // ============================================================
 
+import { normalizeSide } from '../directionCertificate.js';
+
 export function pricePrecision(p) {
   const v = Math.abs(Number(p) || 0);
   if (!Number.isFinite(v) || v === 0) return 2;
@@ -65,16 +67,29 @@ const _bump = (p) => (p >= 8 ? 12 : p === 2 ? 4 : p + 2);
 export function pRoundLadder({ side, entry, stopLoss, targets = [] }) {
   // v21.23.10 [SIDE-VOCAB]: 'SELL' bhi SHORT hai — pehle `!== 'SHORT'`
   // default-long 'SELL' ladders ko ULTA order karta tha (futuresOrderBody
-  // fix ki hi class). LONG/BUY → long; SHORT/SELL → short; khali → long
-  // (legacy docstring default, callers hamesha LONG/SHORT dete hain).
-  const s = String(side || '').toUpperCase();
-  const long = !(s === 'SHORT' || s === 'SELL');
+  // fix ki hi class).
+  // v21.25.0 [NO SILENT LONG]: missing/unknown side ab `valid:false` ladder
+  // deta hai — caller ko reject/fallback karna hai. Pehle khali side LONG
+  // ban jaati thi (SHORT ticket ka SL/target geometry ulta).
+  const s = normalizeSide(side);
   const e = Number(entry), sl = Number(stopLoss);
   const ts = (Array.isArray(targets) ? targets : []).map(Number);
   const round = (v, p) => Number(Number(v).toFixed(p));
   const allFinite = Number.isFinite(e) && Number.isFinite(sl) && ts.every(Number.isFinite);
+  if (!s) {
+    return {
+      valid: false,
+      side: null,
+      reason: `invalid side "${String(side ?? '')}" — LONG/BUY or SHORT/SELL required`,
+      entry: allFinite ? round(e, pricePrecision(e)) : pRound(e),
+      stopLoss: allFinite ? round(sl, pricePrecision(e)) : pRound(sl),
+      targets: allFinite ? ts.map((t) => round(t, pricePrecision(e))) : ts.map((t) => pRound(t)),
+      precision: allFinite ? pricePrecision(e) : pricePrecision(e),
+    };
+  }
+  const long = s === 'LONG';
   if (!allFinite) {
-    return { entry: pRound(e), stopLoss: pRound(sl), targets: ts.map((t) => pRound(t)), precision: pricePrecision(e) };
+    return { valid: true, side: s, entry: pRound(e), stopLoss: pRound(sl), targets: ts.map((t) => pRound(t)), precision: pricePrecision(e) };
   }
   const ordered = (er, slr, trs) => {
     if (long) {
@@ -92,10 +107,10 @@ export function pRoundLadder({ side, entry, stopLoss, targets = [] }) {
   for (let i = 0; i < 6; i++) {
     const er = round(e, prec), slr = round(sl, prec);
     const trs = ts.map((t) => round(t, prec));
-    if (ordered(er, slr, trs)) return { entry: er, stopLoss: slr, targets: trs, precision: prec };
+    if (ordered(er, slr, trs)) return { valid: true, side: s, entry: er, stopLoss: slr, targets: trs, precision: prec };
     prec = _bump(prec);
   }
-  return { entry: round(e, 12), stopLoss: round(sl, 12), targets: ts.map((t) => round(t, 12)), precision: 12 };
+  return { valid: true, side: s, entry: round(e, 12), stopLoss: round(sl, 12), targets: ts.map((t) => round(t, 12)), precision: 12 };
 }
 
 /** Max sane stop distance as a fraction of price — a stop further than

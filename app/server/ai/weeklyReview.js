@@ -33,6 +33,7 @@ import { meshQuery } from '../mcp/mesh.js';
 // number that answers "did adding Quiver/TradingCentral/etc. actually
 // help?" with settled outcomes, not hope.
 import { meshModelWeek } from './meshModels.js';
+import { normalizeSide } from './directionCertificate.js'; // v21.25.0: strict side
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -90,8 +91,8 @@ export function computeAiDeskWeek(journal, { days = 7, now = Date.now() } = {}) 
     };
   };
   const byDirection = {
-    LONG: dirBucket(closedPositions.filter(p => /^(L|B)/i.test(String(p.side || '')))),
-    SHORT: dirBucket(closedPositions.filter(p => /^(S|SELL)/i.test(String(p.side || '')) || String(p.side || '').toUpperCase() === 'SELL')),
+    LONG: dirBucket(closedPositions.filter(p => normalizeSide(p.side) === 'LONG')),
+    SHORT: dirBucket(closedPositions.filter(p => normalizeSide(p.side) === 'SHORT')),
   };
   // entry-hour buckets (IST hour of openedAt): 09-10, 10-11, … — the
   // "first-15-min entries lose" / "post-lunch chop" pattern detector
@@ -195,7 +196,10 @@ export function computeCouncilWeek({ now = Date.now() } = {}) {
   const agents = {};
   for (const e of weekEntries) {
     const win = (e.outcome.r ?? 0) > 0;
-    const tradeLong = !/^(S|SELL)/i.test(String(e.side || ''));
+    // v21.25.0 [NO SILENT LONG]: unknown side row attribution me skip.
+    const tradeSide = normalizeSide(e.side);
+    if (!tradeSide) continue;
+    const tradeLong = tradeSide === 'LONG';
     for (const [role, v] of Object.entries(e.council.agents || {})) {
       if (!v || v.dir === 0) continue;
       const s = agents[role] = agents[role] || { role, wins: 0, losses: 0 };
@@ -265,7 +269,7 @@ export function computeCouncilWeek({ now = Date.now() } = {}) {
  */
 export async function nearMissOutcomeScan({ now = Date.now() } = {}) {
   const cutoff = now - 24 * 60 * 60_000;
-  const rows = nearMissList(40).filter(e => Number(e.ts) < cutoff && e.plan?.entry && (e.side === 'LONG' || e.side === 'SHORT')).slice(0, 15);
+  const rows = nearMissList(40).filter(e => Number(e.ts) < cutoff && e.plan?.entry && normalizeSide(e.side)).slice(0, 15);
   if (rows.length === 0) return { checked: 0, wouldWin: 0, wouldLose: 0, inFlight: 0, unknown: 0 };
   const prices = new Map();
   const india = rows.filter(r => r.market === 'INDIA').map(r => r.symbol);
@@ -288,7 +292,7 @@ export async function nearMissOutcomeScan({ now = Date.now() } = {}) {
     if (p == null) { unknown += 1; continue; }
     const entry = Number(r.plan.entry), stop = Number(r.plan.stopLoss), t1 = Number(r.plan.target1);
     if (!Number.isFinite(entry)) { unknown += 1; continue; }
-    const long = r.side === 'LONG';
+    const long = normalizeSide(r.side) === 'LONG';
     if (Number.isFinite(stop) && (long ? p <= stop : p >= stop)) wouldLose += 1;
     else if (Number.isFinite(t1) && (long ? p >= t1 : p <= t1)) wouldWin += 1;
     else inFlight += 1;

@@ -23,6 +23,7 @@ import { durablePut } from '../mcp/durable.js';
 import { fetchCoinDcxTickers, lastTickerSource } from '../cryptoStream.js';
 import { computeTrailSl } from './ensemble.js';
 import { pRound } from './lib/priceRound.js';
+import { normalizeSide } from './directionCertificate.js';
 import { validateTick, wickJournalEntry } from './wickFilter.js';
 import { recordExecution, settlePositionOutcome, markPartialOutcome, __setLedgerForTests } from './ledger.js';
 // v20.9.1 [H1]: 200-wrapped rejection detector — futures desk me v20.7.12
@@ -645,9 +646,13 @@ export async function executeSignal(opts) {
   // LONG — an unspecified request inherits the fresh signal's side (the
   // client always sends side; a missing side is a malformed call, and
   // minting a LONG from nothing was a free directional bias).
-  const _reqRaw = String(side || '').toUpperCase();
-  const reqSide = _reqRaw === 'SHORT' || _reqRaw === 'LONG' ? _reqRaw
-    : (signal.side === 'SHORT' || signal.side === 'LONG' ? signal.side : 'LONG');
+  const reqSide = normalizeSide(side) ?? normalizeSide(signal.side);
+  if (!reqSide) {
+    return reject(
+      `Direction unresolved: requested side "${String(side ?? '')}" invalid aur fresh signal side "${String(signal.side ?? '')}" bhi LONG/SHORT nahi — entry blocked (no silent LONG).`,
+      `Direction unresolved: requested "${String(side ?? '')}" / signal "${String(signal.side ?? '')}" — no silent side`,
+    );
+  }
   const sideConflict = signal.side !== 'FLAT' && signal.side !== reqSide;
   const belowFloor = signal.grade !== 'STRONG' && signal.grade !== 'ACTION';
   if (sideConflict) {
@@ -811,7 +816,7 @@ export async function executeSignal(opts) {
   // v6.6 liquidation estimate stored on the position (paper watcher simulates
   // liquidation at this level; live positions carry it for display + watch)
   const liquidation = lev > 1 && effectiveSignal.plan?.stopLoss != null
-    ? pRound(effectiveSignal.side !== 'SHORT' ? price * (1 - 0.95 / lev) : price * (1 + 0.95 / lev))
+    ? pRound(reqSide !== 'SHORT' ? price * (1 - 0.95 / lev) : price * (1 + 0.95 / lev))
     : null;
 
   // --- FINAL MUTATION — under the journal lock with a FRESH copy ---

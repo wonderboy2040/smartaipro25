@@ -38,6 +38,7 @@ import {
 import { futuresPairFor, fetchFuturesPrices, fetchFuturesCandles, METALS_BASES } from './futures.js';
 import { computeIndicatorsFromCandles } from './lib/indicators.js';
 import { smcVote } from './lib/smc.js';
+import { normalizeSide } from './directionCertificate.js';
 // v20.9.3 FIX (M): the 8th factor (Structure/Fib/VP, weight 0.09) was DEAD
 // on this desk — _runScan never computed structurePro, so expertScoreFactors
 // always got structure:null → constant 50 → a permanent +4.5 on every score
@@ -535,7 +536,11 @@ function smcAlignedValue(smv, side) {
  */
 export function buildExpertBlueprint({ side, ltp, atr, score, market, ema20 = null, maxLeverageCap = 10, atrPctLtp = null }) {
   if (!(ltp > 0)) return null;
-  const long = String(side || 'LONG').toUpperCase() !== 'SHORT';
+  // v21.25.0 [NO SILENT LONG]: unknown/missing side used to be treated as LONG
+  // (`side || 'LONG'`). A blueprint without a proven direction is refused.
+  const canonicalSide = normalizeSide(side);
+  if (!canonicalSide) return null;
+  const long = canonicalSide === 'LONG';
   const a = (atr != null && atr > 0) ? atr : ltp * 0.012; // 1.2% fallback ATR
   const sgn = long ? 1 : -1;
 
@@ -593,7 +598,7 @@ export function buildExpertBlueprint({ side, ltp, atr, score, market, ema20 = nu
     : { label: 'SWING', hours: 72, note: 'Volatility sane — 1-3 din ka swing hold kar sakte ho' };
 
   return {
-    side: long ? 'LONG' : 'SHORT',
+    side: canonicalSide,
     entry: entryR,
     entryZone: [pR(zoneLo), pR(zoneHi)],
     stopLoss: slR,

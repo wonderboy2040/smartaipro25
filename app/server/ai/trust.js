@@ -29,6 +29,7 @@
 // ============================================================
 import { __ledgerRaw, modelStats } from './ledger.js';
 import { MODELS } from './models.js'; // names only — no cycle (models never imports trust)
+import { normalizeSide } from './directionCertificate.js';
 
 const MONTHS_BACK = 6;
 const MIN_SETTLED = 10;
@@ -166,8 +167,8 @@ export function trustReport() {
     };
   };
   const direction = {
-    LONG: dirSplit(settled.filter(e => /^(L|B)/i.test(String(e.side || '')))),
-    SHORT: dirSplit(settled.filter(e => String(e.side || '').toUpperCase() === 'SHORT' || /^S/i.test(String(e.side || '')))),
+    LONG: dirSplit(settled.filter(e => normalizeSide(e.side) === 'LONG')),
+    SHORT: dirSplit(settled.filter(e => normalizeSide(e.side) === 'SHORT')),
   };
 
   return {
@@ -241,7 +242,8 @@ export function mtfABReport() {
     // aligned rows: the arm's dir matched the trade actually taken
     const rows = settled.filter(e => {
       const v = e.votes?.[key];
-      return v && Number(v.dir) !== 0 && (Number(v.dir) > 0) === (e.side !== 'SHORT');
+      const side = normalizeSide(e.side);
+      return side != null && v && Number(v.dir) !== 0 && (Number(v.dir) > 0) === (side === 'LONG');
     });
     const wins = rows.filter(e => (e.outcome.r ?? 0) > 0);
     const losses = rows.filter(e => (e.outcome.r ?? 0) <= 0);
@@ -314,12 +316,14 @@ export function modelPerformanceWindows({ windows = [30, 90], now = Date.now() }
     for (const e of settled) {
       const ts = e.outcome?.ts || e.ts || 0;
       if (ts < since) continue;
+      const tradeSide = normalizeSide(e.side);
+      if (!tradeSide) continue;
       const win = (e.outcome.r ?? 0) > 0;
       for (const [modelId, v] of Object.entries(e.votes || {})) {
         if (!v || v.dir === 0) continue;
         const s = stats[modelId] = stats[modelId] || { model: modelId, aligned: 0, wins: 0, losses: 0 };
         s.aligned++;
-        const alignedWithSide = (v.dir > 0) === (e.side !== 'SHORT');
+        const alignedWithSide = (v.dir > 0) === (tradeSide === 'LONG');
         const calledItRight = alignedWithSide === win;
         if (calledItRight) s.wins++; else s.losses++;
       }
@@ -354,7 +358,9 @@ export function councilAgentStats() {
   const stats = {};
   for (const e of settled) {
     const win = (e.outcome.r ?? 0) > 0;
-    const tradeLong = !/^(S|SELL)/i.test(String(e.side || ''));
+    const tradeSide = normalizeSide(e.side);
+    if (!tradeSide) continue;
+    const tradeLong = tradeSide === 'LONG';
     for (const [role, v] of Object.entries(e.council.agents || {})) {
       if (!v || v.dir === 0) continue;
       const s = stats[role] = stats[role] || { role, aligned: 0, wins: 0, losses: 0, longWins: 0, longN: 0, shortWins: 0, shortN: 0 };

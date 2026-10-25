@@ -219,6 +219,9 @@ import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 // v21.16.0 + v21.20.0 MTF SIGNALS BOARD (Dual-Timeframe) + AUTO-LINK engine
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, mtfProEntryGate, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
 import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced } from './mtfAutoLink.js';
+// v21.25.0 DIRECTION CERTIFICATE — every manual board PAPER/LIVE order proves
+// signal side → exchange order side before touching a broker.
+import { buildDirectionCertificate, normalizeSide } from './directionCertificate.js';
 import { buildPhase0Audit, getPhase0Summary } from './phase0Audit.js';
 // v21.23.1: cross-engine direction-lock release-on-close sweeper (directionLock.js)
 import { acquireDirectionLock, checkDirectionLock, reconcileDirectionLocks } from './directionLock.js';
@@ -1039,6 +1042,39 @@ export function registerAITradingRoutes(app, deps) {
         const htfMsg = `${symbol}: PAPER ${row.side} blocked — 1d+4h HTF bias ${row.htfBias || 'opposite'} is against this side (counter-HTF, capped WATCH)`;
         return res.status(409).json({ ok: false, blocked: true, error: htfMsg, reason: htfMsg });
       }
+      // v21.25.0 EXPLICIT DIRECTION CERTIFICATE — the paper ticket must prove
+      // LONG→buy / SHORT→sell, SL/target polarity and no activePos conflict
+      // before it is registered anywhere.
+      const rowSide = normalizeSide(row.side);
+      const directionCertificate = buildDirectionCertificate({
+        symbol: row.symbol || symbol,
+        market,
+        side: rowSide,
+        entry: row.plan?.entry,
+        stopLoss: row.plan?.stopLoss,
+        t1: row.plan?.t1,
+        t2: row.plan?.t2,
+        requireTargets: true,
+        directionVerified: row.directionVerified === true,
+        conflictFlags: {
+          boardSideConflict: row.boardSideConflict === true,
+          svaConflict: row.svaConflict === true,
+          councilConflict: row.councilConflict === true,
+          trapVeto: row.trapVeto === true,
+          zoneWallVeto: row.zoneWallVeto === true,
+          reversalRisk: row.reversalRisk === true,
+          counterTrend: row.counterTrend === true,
+          counterHtf: row.counterHtf === true,
+        },
+        source: 'mtf-dual-paper',
+      });
+      if (!directionCertificate.ok) {
+        const certMsg = `${symbol}: PAPER ${rowSide || 'UNKNOWN'} blocked — direction certificate ${directionCertificate.verdict}: ${directionCertificate.reasons[0] || 'invalid direction'}`;
+        return res.status(409).json({
+          ok: false, blocked: true, error: certMsg, reason: certMsg,
+          directionCertificate, orderSide: directionCertificate.orderSide,
+        });
+      }
       const isUsd = market === 'CRYPTO' || market === 'FUTURES' || market === 'METALS' || market === 'GLOBALFUTURES';
       const execMarket = market === 'GLOBALFUTURES' ? 'GLOBALFUTURES' : isUsd ? 'FUTURES' : 'INDIA';
       const baseSym = normalizeLinkSymbol(row.symbol, market) || symbol;
@@ -1049,7 +1085,7 @@ export function registerAITradingRoutes(app, deps) {
       // actually exists (release stays with the paper close/60s sweeper).
       const paperLock = checkDirectionLock(baseSym, row.side);
       if (!paperLock.allowed) {
-        const lockMsg = `${symbol}: PAPER ${row.side} blocked - ${paperLock.reason}`;
+        const lockMsg = `${symbol}: PAPER ${rowSide} blocked - ${paperLock.reason}`;
         return res.status(409).json({ ok: false, blocked: true, error: lockMsg, reason: lockMsg, directionLock: paperLock });
       }
       if (!isUsd) {
@@ -1073,7 +1109,7 @@ export function registerAITradingRoutes(app, deps) {
       const minQty = isUsd ? 0.0001 : 1;
       if (!(qty >= minQty)) return jsonError(res, 400, `${baseSym}: qty caps ke baad chhoti pad gayi (SL ${riskPerUnit.toFixed(4)})`);
       const r0 = openPaperTradeExec({
-        symbol: baseSym, direction: row.side, entry, qty, stopLoss: sl, target1: t1, target2: t2,
+        symbol: baseSym, direction: rowSide, entry, qty, stopLoss: sl, target1: t1, target2: t2,
         market: execMarket,
         source: 'mtf-board-ui',
         sourceMeta: {
@@ -1081,6 +1117,16 @@ export function registerAITradingRoutes(app, deps) {
           directionVerified: row.directionVerified === true, triggerFired: row.triggerFired === true,
           htfBias: row.htfBias ?? null, mainSignalSide: mainSignal?.side ?? null,
           mainSignalGrade: mainSignal?.grade ?? null, mainSignalConfidence: mainSignal?.confidence ?? null,
+          orderSide: directionCertificate.orderSide,
+          directionVerdict: directionCertificate.verdict,
+          directionCertificate: {
+            version: directionCertificate.version,
+            side: directionCertificate.side,
+            orderSide: directionCertificate.orderSide,
+            verdict: directionCertificate.verdict,
+            ok: directionCertificate.ok,
+            label: directionCertificate.label,
+          },
           entryGate: 'PRO_V1',
         },
         label: `MTF BOARD · ${row.tier} ${row.superScore} · ${row.label} ${row.holdMin}m · ${isUsd ? 'USDT' : '₹'}`,
@@ -1088,7 +1134,7 @@ export function registerAITradingRoutes(app, deps) {
       if (r0?.error) return jsonError(res, 400, r0.error);
       try {
         acquireDirectionLock({
-          symbol: baseSym, side: row.side, source: 'mtf-board-paper',
+          symbol: baseSym, side: rowSide, source: 'mtf-board-paper',
           cooldownMin: Number(cfg.flipReentryBlockMin) || 240,
         });
       } catch { /* lock is best-effort - an already-open paper position must stay manageable */ }
@@ -1100,7 +1146,7 @@ export function registerAITradingRoutes(app, deps) {
           paperId: r0.trade?.id ?? `PAPER_${baseSym}_${Date.now()}`,
           symbol: baseSym,
           market,
-          side: row.side,
+          side: rowSide,
           entry,
           stopLoss: sl,
           t1,
@@ -1115,7 +1161,16 @@ export function registerAITradingRoutes(app, deps) {
       } catch { /* non-fatal */ }
       res.json({
         ok: true, trade: r0.trade, ccy: isUsd ? 'USDT' : 'INR', fx: isUsd ? fxRate : null,
-        row: { symbol, side: row.side, superScore: row.superScore, tier: row.tier, tfFit: row.tfFit, autoEligible: row.autoEligible, blockers: row.autoBlockers },
+        orderSide: directionCertificate.orderSide,
+        signalToOrder: `${rowSide} → ${directionCertificate.orderSideLabel}`,
+        directionCertificate,
+        row: {
+          symbol, side: rowSide, orderSide: directionCertificate.orderSide,
+          signalToOrder: `${rowSide} → ${directionCertificate.orderSideLabel}`,
+          directionVerdict: directionCertificate.verdict,
+          directionCertificate,
+          superScore: row.superScore, tier: row.tier, tfFit: row.tfFit, autoEligible: row.autoEligible, blockers: row.autoBlockers,
+        },
       });
     } catch (e) {
       jsonError(res, 500, 'mtf board paper failed', e);
@@ -1150,13 +1205,17 @@ export function registerAITradingRoutes(app, deps) {
       if (!row || !row.ok) {
         return jsonError(res, 404, `MTF Dual Board row not found for ${symbol}`);
       }
-      const requestedSide = body.side ? String(body.side).toUpperCase() : null;
-      const freshRowSide = row.side ? String(row.side).toUpperCase() : null;
+      const requestedRawSide = body.side ?? null;
+      const requestedSide = normalizeSide(requestedRawSide);
+      if (requestedRawSide != null && !requestedSide) {
+        return jsonError(res, 400, `${symbol}: invalid requested side "${String(requestedRawSide)}" — LONG/BUY ya SHORT/SELL required`);
+      }
+      const freshRowSide = normalizeSide(row.side);
       if (requestedSide && freshRowSide && requestedSide !== freshRowSide) {
         const flipMsg = `${symbol}: signal direction flipped from ${requestedSide} to ${freshRowSide} on live recheck — anti-reversal guard blocked stale entry`;
         return res.status(409).json({ ok: false, blocked: true, error: flipMsg, reason: flipMsg });
       }
-      const side = freshRowSide || requestedSide || '';
+      const side = freshRowSide || requestedSide;
       if (side !== 'LONG' && side !== 'SHORT') {
         return jsonError(res, 400, `${symbol}: directional signal (LONG/SHORT) required`);
       }
@@ -1193,6 +1252,38 @@ export function registerAITradingRoutes(app, deps) {
           const polMsg = `${symbol}: invalid SL polarity (${side} entry ${pEntry} vs SL ${pSl}) — order blocked`;
           return res.status(409).json({ ok: false, blocked: true, error: polMsg, reason: polMsg });
         }
+      }
+      // v21.25.0 EXPLICIT DIRECTION CERTIFICATE — signal side, exchange order
+      // side, SL/target geometry and activePos consistency are proven BEFORE
+      // the broker call. Any inversion is a hard block, never a silent LONG.
+      const directionCertificate = buildDirectionCertificate({
+        symbol: row.symbol || symbol,
+        market,
+        side,
+        entry: row.plan?.entry,
+        stopLoss: row.plan?.stopLoss,
+        t1: row.plan?.t1,
+        t2: row.plan?.t2,
+        requireTargets: true,
+        directionVerified: row.directionVerified === true,
+        conflictFlags: {
+          boardSideConflict: row.boardSideConflict === true,
+          svaConflict: row.svaConflict === true,
+          councilConflict: row.councilConflict === true,
+          trapVeto: row.trapVeto === true,
+          zoneWallVeto: row.zoneWallVeto === true,
+          reversalRisk: row.reversalRisk === true,
+          counterTrend: row.counterTrend === true,
+          counterHtf: row.counterHtf === true,
+        },
+        source: 'mtf-dual-live',
+      });
+      if (!directionCertificate.ok) {
+        const certMsg = `${symbol}: LIVE ${side} blocked — direction certificate ${directionCertificate.verdict}: ${directionCertificate.reasons[0] || 'invalid direction'}`;
+        return res.status(409).json({
+          ok: false, blocked: true, error: certMsg, reason: certMsg,
+          directionCertificate, orderSide: directionCertificate.orderSide,
+        });
       }
 
       const isUsd = market === 'CRYPTO' || market === 'FUTURES' || market === 'METALS';
@@ -1289,7 +1380,17 @@ export function registerAITradingRoutes(app, deps) {
           orderId: liveOut.orderId,
           position: liveOut.position,
           filled: liveOut.filled,
-          row: { symbol: baseSym, side, superScore: row.superScore, tier: row.tier, mode: row.mode },
+          orderSide: liveOut.orderSide || directionCertificate.orderSide,
+          signalToOrder: `${side} → ${(liveOut.orderSide || directionCertificate.orderSide || 'no-order').toUpperCase()}`,
+          directionCertificate: liveOut.directionCertificate || directionCertificate,
+          signalCertificate: directionCertificate,
+          row: {
+            symbol: baseSym, side, orderSide: liveOut.orderSide || directionCertificate.orderSide,
+            signalToOrder: `${side} → ${(liveOut.orderSide || directionCertificate.orderSide || 'no-order').toUpperCase()}`,
+            directionVerdict: directionCertificate.verdict,
+            directionCertificate,
+            superScore: row.superScore, tier: row.tier, mode: row.mode,
+          },
         });
       }
 
@@ -1348,7 +1449,19 @@ export function registerAITradingRoutes(app, deps) {
         mode: row.mode || mode,
         holdMin: row.holdMin || holdMin,
       });
-      return res.json({ ok: true, mode: 'live', ...outIndia });
+      return res.json({
+        ok: true, mode: 'live', ...outIndia,
+        orderSide: directionCertificate.orderSide,
+        signalToOrder: `${side} → ${directionCertificate.orderSideLabel}`,
+        directionCertificate,
+        row: {
+          symbol: baseSym, side, orderSide: directionCertificate.orderSide,
+          signalToOrder: `${side} → ${directionCertificate.orderSideLabel}`,
+          directionVerdict: directionCertificate.verdict,
+          directionCertificate,
+          superScore: row.superScore, tier: row.tier, mode: row.mode,
+        },
+      });
     } catch (e) {
       jsonError(res, 500, 'mtf board live order failed', e);
     }

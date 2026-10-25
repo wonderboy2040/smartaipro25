@@ -36,6 +36,9 @@
 //   the module enforces.
 // ============================================================
 
+// v21.25.0: one shared strict side vocabulary (no silent LONG defaults).
+import { normalizeSide } from '../ai/directionCertificate.js';
+
 const r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -304,12 +307,15 @@ export function defaultRoundTripFeePct(market = 'FUTURES') {
  * Exact price level at which a trade covers 100% of its round-trip
  * exchange fees + taxes (zero net loss).
  */
-export function feeBreakevenFloor({ entry, side = 'LONG', market = 'FUTURES', roundTripFeePct = null } = {}) {
+export function feeBreakevenFloor({ entry, side = null, market = 'FUTURES', roundTripFeePct = null } = {}) {
   const e = Number(entry);
   if (!(e > 0)) return null;
-  const s = String(side || 'LONG').toUpperCase();
+  // v21.25.0 DIRECTION HONESTY: unknown/missing side must NEVER default LONG
+  // (a SHORT trade would get a fee floor ABOVE entry and instantly "cover").
+  const s = normalizeSide(side);
+  if (!s) return null;
   const feePct = Number(roundTripFeePct) > 0 ? Number(roundTripFeePct) : defaultRoundTripFeePct(market);
-  const mult = s === 'SHORT' || s === 'SELL' ? (1 - feePct / 100) : (1 + feePct / 100);
+  const mult = s === 'SHORT' ? (1 - feePct / 100) : (1 + feePct / 100);
   const raw = e * mult;
   // Adaptive precision so sub-$1 coins keep exact decimals
   const a = Math.abs(e);
@@ -323,7 +329,7 @@ export function feeBreakevenFloor({ entry, side = 'LONG', market = 'FUTURES', ro
  * net P&L after round-trip fees is >= 0 ("loss ke bina").
  */
 export function evaluateFeeAwareReversalExit({
-  side = 'LONG',
+  side = null,
   entry,
   ltp,
   stopLoss = null,
@@ -340,7 +346,15 @@ export function evaluateFeeAwareReversalExit({
   const e = Number(entry);
   const p = Number(ltp);
   const q = Math.max(0, Number(qty) || 0);
-  const s = String(side || 'LONG').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+  // v21.25.0 DIRECTION HONESTY: invalid side = NO action (never guess LONG).
+  const s = normalizeSide(side);
+  if (!s) {
+    return {
+      shouldExit: false, bookPartial: false, stage: 'INVALID_SIDE', feeCovered: false,
+      feeBePrice: null, netTotalPnl: 0,
+      reason: `invalid side "${String(side ?? '')}" — LONG/BUY or SHORT/SELL required`,
+    };
+  }
   if (!(e > 0) || !(p > 0) || !(q > 0)) {
     return { shouldExit: false, bookPartial: false, stage: 'INVALID', feeCovered: false, feeBePrice: null, netTotalPnl: 0, reason: 'invalid price/qty' };
   }

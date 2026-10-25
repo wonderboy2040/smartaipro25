@@ -40,6 +40,7 @@ import { durablePut } from '../mcp/durable.js';
 import { recordExecution, settlePositionOutcome, markPartialOutcome } from './ledger.js';
 import { computeTrailSl, maxSaneLeverage, fitPlanToRiskCap, evaluateExecutionGate } from './ensemble.js';
 import { pRound } from './lib/priceRound.js';
+import { normalizeSide } from './directionCertificate.js';
 import { withJournalLock, pushEntry, todayIST, dailyStats, loadProTraderConfig } from './coindcxOrders.js';
 import { computeIndicatorsFromCandles } from './lib/indicators.js';
 import { canonicalizeCandles } from './lib/candles.js'; // v21.23.12: USDC candle-quote leg mirror-proof
@@ -889,9 +890,13 @@ export async function executeGlobalSignal(opts) {
   // LONG — an unspecified request inherits the fresh signal's side (the
   // client always sends side; a missing side is a malformed call, and
   // minting a LONG from nothing was a free directional bias).
-  const _reqRaw = String(side || '').toUpperCase();
-  const reqSide = _reqRaw === 'SHORT' || _reqRaw === 'LONG' ? _reqRaw
-    : (signal.side === 'SHORT' || signal.side === 'LONG' ? signal.side : 'LONG');
+  const reqSide = normalizeSide(side) ?? normalizeSide(signal.side);
+  if (!reqSide) {
+    return reject(
+      `Direction unresolved: requested side "${String(side ?? '')}" invalid aur fresh signal side "${String(signal.side ?? '')}" bhi LONG/SHORT nahi — entry blocked (no silent LONG).`,
+      `Direction unresolved: requested "${String(side ?? '')}" / signal "${String(signal.side ?? '')}" — no silent side`,
+    );
+  }
   const sideConflict = signal.side !== 'FLAT' && signal.side !== reqSide;
   if (sideConflict || signal.side === 'FLAT' || !signal.plan) {
     const { buildTradePlan } = await import('./ensemble.js');
@@ -998,7 +1003,7 @@ export async function executeGlobalSignal(opts) {
   const marginUsed = r2(notionalUSD / lev);
   if (marginUsed < 1) return { ok: false, error: `Margin ₹${inrOfUsd(marginUsed, usdInr)} too small for ${pair} — increase the order size` };
   const liquidation = lev > 1 && effectiveSignal.plan?.stopLoss != null
-    ? pRound(effectiveSignal.side !== 'SHORT' ? price * (1 - 0.95 / lev) : price * (1 + 0.95 / lev))
+    ? pRound(reqSide !== 'SHORT' ? price * (1 - 0.95 / lev) : price * (1 + 0.95 / lev))
     : null;
 
   // --- FINAL MUTATION under the journal lock (fresh copy) ---

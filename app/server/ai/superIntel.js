@@ -355,7 +355,12 @@ export function liveInvalidationCheck({ side, liveLtp, stopLoss, entryZoneLow = 
   const px = Number(liveLtp);
   const sl = Number(stopLoss);
   if (!(px > 0) || !Number.isFinite(sl)) return { status: 'ok', reason: '' };
-  const long = String(side || '').toUpperCase() !== 'SHORT';
+  // v21.25.0 [NO SILENT LONG]: unknown side pehle LONG maan liya jaata tha
+  // (a real SHORT could be marked INVALIDATED on the wrong side). Ab honest
+  // invalid-side status — caller direction certificate se block karta hai.
+  const sgn = sideSignOf(side);
+  if (!sgn) return { status: 'invalid-side', reason: `side "${String(side ?? '')}" invalid — LONG/SHORT required (direction certificate)` };
+  const long = sgn === 1;
   if (long ? px <= sl : px >= sl) {
     return { status: 'invalidated', reason: 'live price already through stop-loss — plan is stale, do not enter' };
   }

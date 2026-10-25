@@ -43,7 +43,10 @@
 // WATCH cap + conf cap; SOFT → haircut), on BOTH the board and the
 // deep path the execution gate reads.
 // ============================================================
-import { loadJSON, saveJSON } from '../lib/store.js';
+import {
+  loadJSON, saveJSON,
+} from '../lib/store.js';
+import { normalizeSide } from './directionCertificate.js'; // v21.25.0: strict side
 import {
   entryTimingRead, CHASE_HARD_CONF_CAP, CHASE_SOFT_CONF_PENALTY,
   QUALITY_PULLBACK_CONF_BOOST, QUALITY_EXTENDED_CONF_PENALTY,
@@ -137,7 +140,7 @@ export function remember(market, symbol, { side, confidence, grade, ltp } = {}) 
     prevSide: null, flippedAt: null, flips: [],
     lastDirSide: null, lastDirSeenAt: null, lastDirGrade: null, lastDirConf: null,
   };
-  const normalizedSide = side === 'LONG' || side === 'SHORT' ? side : null;
+  const normalizedSide = normalizeSide(side);
   // The flip baseline is the last DIRECTIONAL side (rec.side is null
   // while FLAT — a FLAT gap must not turn the NEXT directional view
   // into a "flip from null"; LONG→FLAT→LONG resumes, LONG→FLAT→SHORT
@@ -234,7 +237,7 @@ export function normSym(s) {
 export function applySignalTrustGuards({ market, symbol, consensus, ctx, ltf } = {}) {
   try {
     if (!consensus || typeof consensus !== 'object') return consensus || null;
-    const side = consensus.side === 'LONG' || consensus.side === 'SHORT' ? consensus.side : null;
+    const side = normalizeSide(consensus.side);
 
     // RSI: LTF (trading timeframe) first — it is what the entry rides on.
     const rsiCandidates = [ltf?.rsi, ctx?.__ltfInd?.rsi, ctx?.ind?.rsi];
@@ -369,7 +372,10 @@ export function holdingPositions(market) {
   const out = [];
   const push = (p, via) => {
     if (!p) return;
-    const side = String(p.side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+    // v21.25.0 [NO SILENT LONG]: unknown side pehle LONG pin ho jaata tha.
+    // Ab invalid side = koi holding card nahi (guess nahi).
+    const side = normalizeSide(p.side);
+    if (!side) return;
     const symbol = normSym(p.symbol || p.pair || '');
     if (!symbol) return;
     out.push({
@@ -398,7 +404,7 @@ export function holdingPositions(market) {
       if (String(t.market || '').toUpperCase() !== mkt) continue;
       push({
         symbol: t.symbol, pair: t.symbol,
-        side: String(t.side || '').toUpperCase() === 'SELL' ? 'SHORT' : 'LONG',
+        side: t.side,
         entryPrice: t.entryPrice, qty: t.qty, mode: 'manual', source: 'manual',
         openedAt: t.entryTime || t.createdAt || null,
       }, 'manual');

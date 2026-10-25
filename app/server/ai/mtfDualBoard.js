@@ -49,6 +49,11 @@ import { ollamaStatus, evaluateMtfRowWithOllamaTrio, getOllamaTrioModels } from 
 import { feeBreakevenFloor, defaultRoundTripFeePct } from '../exec/sizing.js';
 import { fetchFuturesPrices } from './futures.js';
 import { resolveDirection, checkDirectionLock } from './directionLock.js';
+// v21.25.0 DIRECTION CERTIFICATE — one strict shared contract for signal side
+// → exchange order side, SL/target geometry and activePos mismatch.
+import {
+  buildDirectionCertificate, normalizeSide, summarizeBoardDirectionIntegrity,
+} from './directionCertificate.js';
 import { recordMtfBoardScanRow, resolveMtfBoardScanOutcomes, computeMtfDirectionScorecard } from './signalLedger.js';
 
 /** v21.18.0 USER SPEC: sirf 2 dual-timeframe modes on the integrated board:
@@ -80,7 +85,7 @@ function dirOfBias(bias) {
  *  modeId       'INTRADAY' | 'SWING' | 'SCALP'
  */
 export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap = null, modeId = 'INTRADAY' }) {
-  const side = plan?.side ?? null;
+  const side = normalizeSide(plan?.side);
   const dir = side === 'LONG' ? 1 : side === 'SHORT' ? -1 : 0;
   const boardSideMatches = !boardSig?.side || !side || String(boardSig.side).toUpperCase() === side;
   const baseScore = (() => {
@@ -335,9 +340,41 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
     netRR_T2: plan?.plan?.netRR?.t2 ?? 1.5,
   });
 
+  const finalDirectionVerified = Boolean(directionVerified && !boardOpposes && !svaOpposes && !councilHardNo && !lockOpposes && !dirResolution.mtf6Opposes);
+
+  // v21.25.0 EXPLICIT DIRECTION CERTIFICATE — hard integrity (valid side,
+  // LONG→buy / SHORT→sell mapping, SL/target polarity, no activePos conflict)
+  // is SEPARATE from PAKKA verification (dual-TF + 8-indicator + conflicts).
+  // A structurally valid row can still be WAIT/CONFLICT, never the reverse.
+  const directionCertificate = buildDirectionCertificate({
+    symbol,
+    market,
+    side,
+    entry: plan?.plan?.entry,
+    stopLoss: plan?.plan?.stopLoss,
+    t1: plan?.plan?.t1,
+    t2: plan?.plan?.t2,
+    requireTargets: Boolean(plan?.ok),
+    directionVerified: finalDirectionVerified,
+    conflictFlags: {
+      boardSideConflict: boardOpposes,
+      svaConflict: svaOpposes,
+      councilConflict: councilHardNo,
+      directionLockConflict: lockOpposes,
+      mtf6Conflict: dirResolution.mtf6Opposes,
+      trapVeto,
+      zoneWallVeto,
+      reversalRisk,
+      counterTrend: Boolean(plan?.counterTrend),
+      counterHtf,
+    },
+    source: 'mtf-dual-board',
+  });
+
   // ---- auto-link eligibility (pure) ----
   const blockers = [];
   const autoMin = Number(SUPER_TIERS.ACTION); // 65 floor; the 75 bar is enforced by the auto-link config
+  if (!directionCertificate.ok) blockers.push(`direction certificate ${directionCertificate.verdict}: ${directionCertificate.reasons[0] || 'blocked'}`);
   if (!plan?.ok) blockers.push('plan unavailable');
   if (side !== 'LONG' && side !== 'SHORT') blockers.push('no clean side (WAIT/NEUTRAL)');
   if (!plan?.triggerFired) blockers.push('trigger fire pending');
@@ -378,8 +415,6 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
     { id: 'priceAction', label: '8. Price Action (HH-HL / Candles)', aligned: !reversalRisk && dualAligned },
   ];
 
-  const finalDirectionVerified = Boolean(directionVerified && !boardOpposes && !svaOpposes && !councilHardNo && !lockOpposes && !dirResolution.mtf6Opposes);
-
   return {
     symbol, market, mode: modeId,
     superScore: score, tier,
@@ -388,6 +423,10 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
     heuristicConfluencePct,
     pWinCalibrated,
     directionVerified: finalDirectionVerified,
+    directionCertificate,
+    directionVerdict: directionCertificate.verdict,
+    orderSide: directionCertificate.orderSide,
+    orderSideLabel: directionCertificate.orderSideLabel,
     boardSideConflict: boardOpposes,
     boardSide: boardSideRaw || null,
     svaConflict: svaOpposes,
@@ -632,9 +671,9 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
         councilNote: boardSig?.aiCouncil?.note || boardSig?.aiCouncil?.analysis || fuse.ollamaTrio?.liveNote || null,
       };
     })(),
-    feeProtection: plan?.ok && plan.plan?.entry > 0 ? {
+    feeProtection: plan?.ok && plan.plan?.entry > 0 && normalizeSide(fuse.side) ? {
       roundTripFeePct: defaultRoundTripFeePct(isUsdtPerp ? 'FUTURES' : 'INDIA'),
-      feeBreakevenPrice: feeBreakevenFloor({ entry: plan.plan.entry, side: fuse.side || 'LONG', market: isUsdtPerp ? 'FUTURES' : 'INDIA' }),
+      feeBreakevenPrice: feeBreakevenFloor({ entry: plan.plan.entry, side: fuse.side, market: isUsdtPerp ? 'FUTURES' : 'INDIA' }),
       zeroLossRule: 'T1/T2 auto profit book + dynamic SL trail + confirmed reversal exit above round-trip fees',
     } : null,
     leverageRule: { below10k: 10, above10k: 5, thresholdINR: 10000, walletDeployPct: 95 },
@@ -915,6 +954,10 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
     recordMtfBoardScanRow(r, { now });
   }
   const directionScorecard = computeMtfDirectionScorecard({ windowDays: 30, now });
+  // v21.25.0: explicit LONG→BUY / SHORT→SELL integrity strip for the whole board.
+  const directionIntegrity = summarizeBoardDirectionIntegrity([
+    ...trimmed, ...metalsRows, ...equitySimRows,
+  ]);
 
   // v21.23.1 HONEST avg: sirf finite measured values ka average — missing rows
   // ab 88 se FABRICATE nahi hote (null → UI "—" dikhata hai).
@@ -931,6 +974,7 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
     topDeepTrendLimit: TOP_DEEP_TREND_LIMIT,
     scannedCount: rows.length,
     directionScorecard,
+    directionIntegrity,
     liveFeed24x7: {
       active: true,
       cadenceMs: BOARD_TTL_MS,
@@ -967,6 +1011,7 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
       fired: trimmed.filter(r => r.triggerFired).length,
       earlyRadar: earlyRadar.length,
       unavailable: trimmed.filter(r => !r.ok).length,
+      directionBlocked: trimmed.filter(r => r.directionCertificate?.ok === false).length,
       metalsEligible: metalsRows.filter(r => r.autoEligible).length,
       equitySimEligible: equitySimRows.filter(r => r.autoEligible).length,
     },

@@ -29,6 +29,8 @@
 // ship-last per the plan, A/B-able against the immediate baseline).
 // ============================================================
 
+import { normalizeSide } from './directionCertificate.js'; // v21.25.0: strict side, no silent LONG
+
 /** Feature flag (env OR agent knob). OFF by default. */
 export function patientEntryEnabled(cfg) {
   if (['true', '1', 'on', 'yes'].includes(String(process.env.AI_ENABLE_PATIENT_ENTRY || '').trim().toLowerCase())) return true;
@@ -69,7 +71,11 @@ export function classifyEntry({ ltp, entry, atr } = {}) {
  * @returns {{ level:number, basis:'bid-wall'|'ask-wall'|'anchor' }}
  */
 export function pullbackLevelFor({ side, ltp, entry, depth } = {}) {
-  const isLong = !/SHORT|SELL/i.test(String(side || ''));
+  // v21.25.0 [NO SILENT LONG]: unknown side pehle LONG maan liya jaata tha.
+  // Ab level hi nahi dete — caller order place na kare.
+  const normalized = normalizeSide(side);
+  if (!normalized) return { level: null, basis: 'invalid-side' };
+  const isLong = normalized === 'LONG';
   const p = Number(ltp);
   const anchor = Number(entry);
   const walls = isLong ? depth?.bidWalls : depth?.askWalls;
@@ -95,7 +101,9 @@ export function levelTouched({ side, level, ltp } = {}) {
   const l = Number(level);
   const p = Number(ltp);
   if (!(l > 0) || !(p > 0)) return false;
-  const isLong = !/SHORT|SELL/i.test(String(side || ''));
+  const normalized = normalizeSide(side);
+  if (!normalized) return false; // unknown side = never a fill
+  const isLong = normalized === 'LONG';
   return isLong ? p <= l : p >= l;
 }
 
@@ -110,6 +118,7 @@ export function levelTouched({ side, level, ltp } = {}) {
  */
 export function patientPendingAction({ pending, ltp, now = Date.now() } = {}) {
   if (!pending || !(Number(pending.level) > 0)) return { action: 'expire' };
+  if (!normalizeSide(pending.side)) return { action: 'expire' }; // unknown side = cancel, never fill
   if (Number(now) >= Number(pending.expiresAt)) return { action: 'expire' };
   if (levelTouched({ side: pending.side, level: pending.level, ltp })) return { action: 'fill' };
   return { action: 'wait' };

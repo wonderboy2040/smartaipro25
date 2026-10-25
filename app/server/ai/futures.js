@@ -40,6 +40,8 @@ import { recordExecution, settlePositionOutcome, markPartialOutcome } from './le
 import { isAmbiguousTransportError } from './coindcxOrders.js'; // v20.3: ambiguous-retry guard (v18.9 spot fix, ported)
 import { computeTrailSl, maxSaneLeverage, fitPlanToRiskCap, evaluateExecutionGate } from './ensemble.js';
 import { pRound } from './lib/priceRound.js';
+// v21.25.0 DIRECTION CERTIFICATE — strict side + explicit signal→order mapping.
+import { normalizeSide, resolveActivePosSide, buildDirectionCertificate } from './directionCertificate.js';
 import { withJournalLock, pushEntry, todayIST, dailyStats, ratchetSl, exitStageOf, loadProTraderConfig } from './coindcxOrders.js';
 import { validateTick, wickJournalEntry } from './wickFilter.js';
 import { futBookSnapshot } from './cxBookState.js';
@@ -1542,7 +1544,11 @@ export async function exitFuturesPosition(positionId) {
  *  OPPOSITE-side market order for the fraction (the exchange nets it
  *  against the open position, shrinking it to the runner qty). */
 export async function partialFuturesExit({ pair, qty, side, leverage }) {
-  const opposite = String(side).toUpperCase() === 'SHORT' ? 'LONG' : 'SHORT';
+  // v21.25.0 [NO SILENT SHORT]: unknown side pe opposite derive karna
+  // impossible hai — exit order bhejna hi galat hoga.
+  const posSide = normalizeSide(side);
+  if (!posSide) return { orderId: null, error: `partialFuturesExit: invalid side "${String(side ?? '')}" — LONG/SHORT ya BUY/SELL required` };
+  const opposite = posSide === 'LONG' ? 'SHORT' : 'LONG';
   return createFuturesOrder({
     pair, side: opposite, qty,
     leverage: Math.max(1, Math.floor(Number(leverage) || 1)),
@@ -1686,9 +1692,12 @@ export async function executeFuturesSignal(opts) {
   // LONG — an unspecified request inherits the fresh signal's side (the
   // client always sends side; a missing side is a malformed call, and
   // minting a LONG from nothing was a free directional bias).
-  const _reqRaw = String(side || '').toUpperCase();
-  const reqSide = _reqRaw === 'SHORT' || _reqRaw === 'LONG' ? _reqRaw
-    : (signal.side === 'SHORT' || signal.side === 'LONG' ? signal.side : 'LONG');
+  // v21.25.0: agar requested side bhi invalid aur signal side bhi invalid/FLAT
+  // ho to LOUD reject — koi silent LONG nahi.
+  const reqSide = normalizeSide(side) ?? normalizeSide(signal.side);
+  if (!reqSide) {
+    return reject(`Direction unresolved: requested side "${String(side ?? '')}" invalid aur fresh signal side "${String(signal.side ?? '')}" bhi LONG/SHORT nahi — order blocked (no silent LONG)`);
+  }
   const sideConflict = signal.side !== 'FLAT' && signal.side !== reqSide;
   const belowFloor = signal.grade !== 'STRONG' && signal.grade !== 'ACTION';
   if (wantMode !== 'live' && (sideConflict || signal.side === 'FLAT' || !signal.plan)) {
@@ -1861,7 +1870,7 @@ export async function executeFuturesSignal(opts) {
   const marginUsed = r2(notionalUSDT / lev);
   if (marginUsed < 2) return { ok: false, error: `Margin ₹${inrOfUsdt(marginUsed, usdInr)} too small for ${pair} — increase the order size` };
   const liquidation = lev > 1 && effectiveSignal.plan?.stopLoss != null
-    ? pRound(effectiveSignal.side !== 'SHORT' ? price * (1 - 0.95 / lev) : price * (1 + 0.95 / lev))
+    ? pRound(reqSide !== 'SHORT' ? price * (1 - 0.95 / lev) : price * (1 + 0.95 / lev))
     : null;
 
   // --- FINAL MUTATION under the journal lock (fresh copy) ---
@@ -2371,7 +2380,14 @@ export async function executeMtfDualLiveOrder(opts = {}) {
         // v21.23.14 [SIDE-HONESTY]: same pair is NOT the same trade. A user's
         // manual/journaled LONG on the pair must never make a requested SHORT
         // return ok:true (callers then book a phantom opposite-side LIVE row).
-        const exchSide = Number(sameActiveExch.activePos) > 0 ? 'LONG' : 'SHORT';
+        // v21.25.0 [EXCHANGE SIGN AUTHORITATIVE]: activePos sign = truth.
+        // Zero/unreadable sign pe koi guess nahi — entry honestly blocked.
+        const activePosN = Number(sameActiveExch.activePos);
+        const exchSide = normalizeSide(activePosN);
+        if (!exchSide) {
+          const msg = `Exchange activePos for ${pair} unreadable (${String(sameActiveExch.activePos)}) — ${reqSide} entry blocked (no direction guess)`;
+          return { ok: false, blocked: true, reason: msg, error: msg, requestedSide: reqSide };
+        }
         if (exchSide !== reqSide) {
           const msg = `Opposite ${exchSide} position already active on ${pair} - ${reqSide} entry blocked (1 session = 1 direction)`;
           return { ok: false, blocked: true, reason: msg, error: msg, existingSide: exchSide, requestedSide: reqSide };
@@ -2585,6 +2601,19 @@ export async function executeMtfDualLiveOrder(opts = {}) {
         mode: 'live',
         orderId: orderId || position.id,
         position,
+        orderSide: reqSide === 'LONG' ? 'buy' : 'sell',
+        directionCertificate: buildDirectionCertificate({
+          symbol: base,
+          market: 'FUTURES',
+          side: reqSide,
+          entry: price,
+          stopLoss: sl,
+          t1: tp1,
+          t2: tp2,
+          requireTargets: true,
+          directionVerified: true,
+          source,
+        }),
         filled: {
           orderId: orderId || position.id,
           marginCurrency,
@@ -2668,21 +2697,26 @@ export async function syncCoinDcxActivePositionsForControl({ force = false } = {
       const pair = String(ex.pair || '').toUpperCase();
       const sym = pair.replace(/^B-/, '').replace(/_USDT$/i, '');
       const jPos = byPairJournal.get(pair) || null;
-      const side = Number(ex.activePos) < 0 ? 'SHORT' : 'LONG';
+      // v21.25.0 [ACTIVEPOS AUTHORITY]: sign wins over journal side; conflict
+      // is surfaced (never silently ignored). Zero/NaN sign + missing journal
+      // side = direction blocked, not LONG.
+      const posSide = resolveActivePosSide({ activePos: ex.activePos, side: jPos?.side });
+      const side = posSide.side;
+      const directionBlocked = !side;
       const entry = Number(ex.avgPrice) || Number(ex.markPrice) || Number(jPos?.entryPrice) || 0;
       const qty = Math.abs(Number(ex.activePos) || 0);
-      const isLong = side !== 'SHORT';
+      const isLong = side === 'LONG';
       const sl = Number(ex.sl) > 0
         ? Number(ex.sl)
-        : (Number(jPos?.sl) > 0 ? Number(jPos.sl) : pRound(isLong ? entry * 0.988 : entry * 1.012));
+        : (Number(jPos?.sl) > 0 ? Number(jPos.sl) : (directionBlocked ? 0 : pRound(isLong ? entry * 0.988 : entry * 1.012)));
       const risk = Math.max(entry * 0.004, Math.abs(entry - sl));
-      const tp1 = Number(jPos?.tp) > 0 ? Number(jPos.tp) : pRound(isLong ? entry + 1.25 * risk : entry - 1.25 * risk);
+      const tp1 = Number(jPos?.tp) > 0 ? Number(jPos.tp) : (directionBlocked ? 0 : pRound(isLong ? entry + 1.25 * risk : entry - 1.25 * risk));
       const tp2 = Number(ex.tp) > 0
         ? Number(ex.tp)
-        : (Number(jPos?.tp2) > 0 ? Number(jPos.tp2) : pRound(isLong ? entry + 2.4 * risk : entry - 2.4 * risk));
+        : (Number(jPos?.tp2) > 0 ? Number(jPos.tp2) : (directionBlocked ? 0 : pRound(isLong ? entry + 2.4 * risk : entry - 2.4 * risk)));
 
       // Arm exchange-native TP/SL if missing on CoinDCX so the active position is 100% protected
-      if (ex.id && !(Number(ex.sl) > 0) && sl > 0) {
+      if (!directionBlocked && ex.id && !(Number(ex.sl) > 0) && sl > 0) {
         createFuturesTpsl({ positionId: ex.id, stopLoss: sl, takeProfit: tp2 }).catch(() => {});
       }
 
@@ -2694,6 +2728,10 @@ export async function syncCoinDcxActivePositionsForControl({ force = false } = {
         pair,
         symbol: sym,
         side,
+        directionBlocked,
+        directionReason: posSide.reason,
+        directionConflict: posSide.conflict,
+        activePos: posSide.rawActivePos,
         qty,
         entry,
         ltp: Number(ex.markPrice) > 0 ? Number(ex.markPrice) : entry,
@@ -2712,6 +2750,7 @@ export async function syncCoinDcxActivePositionsForControl({ force = false } = {
       const exchRow = Array.isArray(allExchRows) ? allExchRows.find(p => String(p.pair || '').toUpperCase() === pair) : null;
       if (ageMs < 120_000 || !exchRow) {
         const sym = jPos.symbol || pair.replace(/^B-/, '').replace(/_USDT$/i, '');
+        const posSide = resolveActivePosSide({ activePos: jPos.activePos ?? exchRow?.activePos, side: jPos.side });
         activePairs.add(pair);
         activeOut.push({
           id: jPos.id,
@@ -2719,7 +2758,11 @@ export async function syncCoinDcxActivePositionsForControl({ force = false } = {
           orderId: jPos.exchangeOrderId || jPos.id,
           pair,
           symbol: sym,
-          side: jPos.side || 'LONG',
+          side: posSide.side,
+          directionBlocked: !posSide.side,
+          directionReason: posSide.reason,
+          directionConflict: posSide.conflict,
+          activePos: posSide.rawActivePos,
           qty: Math.abs(Number(jPos.qty) || 0),
           entry: Number(jPos.entryPrice) || 0,
           ltp: Number(jPos.entryPrice) || 0,
@@ -2735,13 +2778,18 @@ export async function syncCoinDcxActivePositionsForControl({ force = false } = {
     for (const jPos of openLiveJournal) {
       const pair = String(jPos.pair || '').toUpperCase();
       const sym = jPos.symbol || pair.replace(/^B-/, '').replace(/_USDT$/i, '');
+      const posSide = resolveActivePosSide({ activePos: jPos.activePos, side: jPos.side });
       activeOut.push({
         id: jPos.id,
         positionId: jPos.exchangePositionId || jPos.id,
         orderId: jPos.exchangeOrderId || jPos.id,
         pair,
         symbol: sym,
-        side: jPos.side || 'LONG',
+        side: posSide.side,
+        directionBlocked: !posSide.side,
+        directionReason: posSide.reason,
+        directionConflict: posSide.conflict,
+        activePos: posSide.rawActivePos,
         qty: Math.abs(Number(jPos.qty) || 0),
         entry: Number(jPos.entryPrice) || 0,
         ltp: Number(jPos.entryPrice) || 0,

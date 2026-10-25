@@ -76,6 +76,7 @@ import { ema, rsi, atr as atrOf } from './lib/indicators.js';
 // v20.9.2: the LIVE tick store (dependency-free module — the same store
 // cxRtStream/cryptoStream write into and signalRecheck reads from).
 import { getTick as _liveGetTick } from '../liveFeed.js';
+import { normalizeSide } from './directionCertificate.js'; // v21.25.0: strict side, never silent LONG
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const r1 = (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
@@ -324,10 +325,24 @@ export function analyzeUltrafastChart({ candles1m = null, candles5m = null, live
  *             checks?: Array, momentumPct?: number|null, bars?: number }}
  */
 export function verifyUltrafast({ side, symbol = '?', market = 'CRYPTO', analysis = null, aiScore = null, grade = null, now = Date.now() } = {}) {
-  const s = String(side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
-  const opposite = s === 'LONG' ? 'SHORT' : 'LONG';
   const sym = String(symbol || '?').toUpperCase();
   const mkt = String(market || 'CRYPTO').toUpperCase();
+  // v21.25.0 [NO SILENT LONG]: unknown side pehle LONG maan liya jaata tha —
+  // ab REJECTED (direction certificate ke bina koi chart confirmation nahi).
+  const s = normalizeSide(side);
+  if (!s) {
+    return {
+      agent: 'UCV-A1', symbol: sym, market: mkt, side: null,
+      verdict: 'REJECTED', confirmed: false, score: 0, microDirection: 'FLAT',
+      ownScore: null,
+      answer: `✗ SIDE INVALID — signal side "${String(side ?? '')}" LONG/SHORT nahi hai; direction certificate ne block kiya, trade mat lo`,
+      detail: 'invalid side — no direction guess, entry blocked',
+      checks: [], aiScoreAtCheck: aiScore ?? null, gradeAtCheck: grade ?? null,
+      invalidSide: true,
+      checkedAt: now,
+    };
+  }
+  const opposite = s === 'LONG' ? 'SHORT' : 'LONG';
 
   // insufficient data → honest PENDING (never blocks, never lies)
   if (!analysis || analysis.ok !== true) {
@@ -483,9 +498,21 @@ function _tickFor(getTick, market, symbol) {
  * @param {{ getTick?: Function, deadlineMs?: number, now?: number }} [opts]
  */
 export async function verifySignalUltrafast(sig, opts = {}) {
-  const side = String(sig?.side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
   const symbol = String(sig?.symbol || '').toUpperCase();
   const market = String(sig?.market || 'CRYPTO').toUpperCase();
+  // v21.25.0 [NO SILENT LONG]: invalid side pe koi fetch/verdict guess nahi.
+  const side = normalizeSide(sig?.side);
+  if (!side) {
+    return {
+      agent: 'UCV-A1', symbol, market, side: null,
+      verdict: 'REJECTED', confirmed: false, score: 0, microDirection: 'FLAT',
+      ownScore: null,
+      answer: `✗ SIDE INVALID — "${String(sig?.side ?? '')}" LONG/SHORT nahi hai; direction certificate ne block kiya, trade mat lo`,
+      detail: 'invalid side — no direction guess, entry blocked',
+      checks: [], aiScoreAtCheck: sig?.aiScore ?? sig?.superIntel?.aiScore ?? null,
+      gradeAtCheck: sig?.grade ?? null, invalidSide: true, checkedAt: Date.now(),
+    };
+  }
   const key = `${market}:${symbol}:${side}`;
   const hit = _verdictCache.get(key);
   if (hit && Date.now() - hit.at < UC_CACHE_TTL_MS) return hit.out;

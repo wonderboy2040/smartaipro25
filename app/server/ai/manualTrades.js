@@ -260,6 +260,12 @@ export function __resetManualStoreForTests() {
 // ---------------- pure helpers (tested) ----------------
 const _num = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null));
 const _r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null);
+// v21.25.0 [NO SILENT LONG]: canonical direction for a stored manual trade.
+// sideOf() returns BUY/SELL/null; null must NEVER fall through to LONG.
+const _canonSide = (side) => {
+  const s = sideOf(side);
+  return s === 'BUY' ? 'LONG' : s === 'SELL' ? 'SHORT' : null;
+};
 
 /**
  * Entry-price sanity vs live LTP — a typo here silently corrupts every
@@ -285,7 +291,10 @@ export function manualPnlOf(trade, ltp, { usdInr = 84 } = {}) {
   const entry = _num(trade?.entryPrice);
   const px = _num(ltp);
   const isUsd = trade?.market === 'FUTURES' || trade?.market === 'GLOBALFUTURES';
-  const dir = sideOf(trade?.side) === 'SELL' ? -1 : 1;
+  // v21.25.0 [NO SILENT LONG]: invalid side = honest zero, never a LONG guess.
+  const side = _canonSide(trade?.side);
+  if (!side) return { pnlINR: 0, pnlPct: 0, pnlUSDT: isUsd ? 0 : null, currency: isUsd ? 'USDT' : 'INR', invalidSide: true };
+  const dir = side === 'SHORT' ? -1 : 1;
   if (!(entry > 0) || !(px > 0)) {
     return { pnlINR: 0, pnlPct: 0, pnlUSDT: isUsd ? 0 : null, currency: isUsd ? 'USDT' : 'INR' };
   }
@@ -315,7 +324,9 @@ export function manualLevelDistances(trade, ltp) {
   const entry = _num(trade?.entryPrice);
   const px = _num(ltp);
   if (!(entry > 0) || !(px > 0)) return {};
-  const dir = sideOf(trade?.side) === 'SELL' ? -1 : 1;
+  const side = _canonSide(trade?.side);
+  if (!side) return {};
+  const dir = side === 'SHORT' ? -1 : 1;
   const pctTo = (level) => {
     const lv = _num(level);
     if (!(lv > 0)) return null;
@@ -337,7 +348,9 @@ export function manualRiskPct(trade) {
   const o = trade?.origin?.plan || trade?.plan || {};
   const sl = _num(o.stopLoss ?? o.sl);
   if (!(entry > 0) || !(sl > 0)) return null;
-  const dir = sideOf(trade?.side) === 'SELL' ? -1 : 1;
+  const side = _canonSide(trade?.side);
+  if (!side) return null;
+  const dir = side === 'SHORT' ? -1 : 1;
   // SL must be on the ADVERSE side to mean anything; |dir| keeps it a risk
   const dist = Math.abs(entry - sl) / entry * 100;
   if (!Number.isFinite(dist) || dist <= 0) return null;
@@ -358,7 +371,9 @@ export function updateExcursion(trade, ltp) {
   if (!t || !(px > 0)) return t;
   const entry = _num(t.entryPrice);
   if (!(entry > 0)) return t;
-  const dir = sideOf(t.side) === 'SELL' ? -1 : 1;
+  const side = _canonSide(t.side);
+  if (!side) return t;
+  const dir = side === 'SHORT' ? -1 : 1;
   const movePct = ((px - entry) / entry) * 100 * dir; // + = favorable
   if (t.__mfePct == null || movePct > t.__mfePct) t.__mfePct = _r2(movePct);
   if (t.__maePct == null || movePct < t.__maePct) t.__maePct = _r2(movePct);
@@ -472,7 +487,9 @@ export function manualStats(trades) {
 export function stateOfManualTrade({ convictionState, ltp, trade, reversal }) {
   const px = _num(ltp);
   const o = trade?.origin?.plan || trade?.plan || {};
-  const dir = sideOf(trade?.side) === 'SELL' ? -1 : 1;
+  const side = _canonSide(trade?.side);
+  if (!side) return 'STALE'; // v21.25.0: invalid side = honest stale, never LONG
+  const dir = side === 'SHORT' ? -1 : 1;
   // v18.6.4: OPTION trades SKIP the level-reached check — plan targets
   // are underlying-spot domain, premium LTP against them instant
   // false TARGET_HIT (a ₹150 premium vs a ₹24,650 target). Conviction
@@ -516,6 +533,7 @@ export function stateOfManualTrade({ convictionState, ltp, trade, reversal }) {
 export function activateReversalOnManualTrade(t, price, { usdInr = 84, cfg } = {}) {
   if (!cfg?.enabled || t?.status !== 'OPEN') return null;
   if (t.assetKind === 'OPTION') return null; // premium/IV domain — conviction tracking only
+  if (!_canonSide(t?.side)) return null; // v21.25.0: invalid side = no reversal cycle
   const px = _num(price);
   if (!(px > 0)) return null;
   const pnl = manualPnlOf(t, px, { usdInr });
@@ -573,7 +591,7 @@ export function reversalActivationText(tr, { usdInr = 84 } = {}) {
   const pnlNative = isUsd
     ? `$${Math.round(Math.abs(tr.pnlINR / (usdInr || 84)) * 100) / 100}`
     : `₹${Math.round(Math.abs(tr.pnlINR))}`;
-  const side = t.side === 'BUY' ? 'LONG' : 'SHORT';
+  const side = _canonSide(t.side) || '?';
   if (tr.to === 'PROFIT_TARGET') {
     return [
       `✅ <b>REVERSAL AI — ₹ TARGET hit (MANUAL cycle ACTIVE)</b>`,
@@ -624,7 +642,7 @@ export function manualReversalCycles(trades, { usdInr = 84, now = Date.now() } =
     else if (lastClosedAt != null && now - lastClosedAt < windowMs && list.length < maxLegs) state = 'WAITING';
     const legs = list.map(x => ({
       leg: x.reversal?.leg ?? null,
-      side: x.side === 'BUY' ? 'LONG' : 'SHORT',
+      side: _canonSide(x.side),
       qty: x.qty, entryPrice: x.entryPrice,
       status: x.status,
       closePrice: x.exitPrice ?? null,
@@ -638,7 +656,7 @@ export function manualReversalCycles(trades, { usdInr = 84, now = Date.now() } =
       if (px > 0) {
         live = {
           leg: openT.reversal?.leg ?? null,
-          side: openT.side === 'BUY' ? 'LONG' : 'SHORT',
+          side: _canonSide(openT.side),
           price: px,
           pnlINR: manualPnlOf(openT, px, { usdInr }).pnlINR,
           state: openT.reversal?.state || 'ACTIVE',
@@ -647,7 +665,7 @@ export function manualReversalCycles(trades, { usdInr = 84, now = Date.now() } =
     }
     cycles.push({
       cycleId, pair: list[0].symbol, mode: 'manual', legs, legCount: list.length,
-      openLeg: openT ? { leg: openT.reversal?.leg ?? null, side: openT.side === 'BUY' ? 'LONG' : 'SHORT', qty: openT.qty, entryPrice: openT.entryPrice } : null,
+      openLeg: openT ? { leg: openT.reversal?.leg ?? null, side: _canonSide(openT.side), qty: openT.qty, entryPrice: openT.entryPrice } : null,
       netINR, state, lastClosedAt, live,
       plan: openT?.reversal?.flip || [...list].reverse().find(x => x.reversal?.flip)?.reversal?.flip || null,
     });
@@ -727,6 +745,8 @@ export function manualTradesToPositionRows(trades) {
     const o = t?.origin?.plan || t?.plan || {};
     const entry = _num(t.entryPrice);
     if (!(entry > 0)) continue;
+    const side = _canonSide(t.side);
+    if (!side) continue; // v21.25.0: unknown side never becomes a position row
     const ltp = _num(t.__ltp);
     const mkt = String(t.market || 'INDIA').toUpperCase();
     const inrDomain = mkt === 'INDIA' || mkt === 'CRYPTO';
@@ -734,7 +754,7 @@ export function manualTradesToPositionRows(trades) {
       id: `MAN-${t.id}`,
       pair: String(t.symbol || '?'),
       symbol: String(t.symbol || '?'),
-      side: sideOf(t.side) === 'SELL' ? 'SHORT' : 'LONG',
+      side,
       status: 'OPEN',
       market: mkt,
       entryPrice: entry,
@@ -1145,6 +1165,8 @@ async function _push(kind, id, text, cooldownMs, send) {
  */
 export async function evaluateManualTradeAlerts(t, { send, conviction, freshSignal, usdInr, reversal }) {
   const pushed = [];
+  // v21.25.0 [NO SILENT LONG]: invalid side = no alerts, no level math.
+  if (!_canonSide(t?.side)) return pushed;
   const ltp = _num(t.__ltp);
   const plan = t.origin?.plan || {};
   const o = plan.entry ?? t.entryPrice;
@@ -1196,7 +1218,7 @@ export async function evaluateManualTradeAlerts(t, { send, conviction, freshSign
     const text = [
       `🚨 <b>MANUAL TRADE — EXIT NOW</b>`,
       `<b>${t.symbol}</b> ${t.side === 'BUY' ? 'LONG' : 'SHORT'} @ ${_fmtPx(o, t.market)} → live <b>${_fmtPx(ltp, t.market)}</b> (${pnl.pnlPct >= 0 ? '+' : ''}${pnl.pnlPct}%)`,
-      `Ensemble ab <b>${conviction?.side === 'BUY' ? 'LONG' : 'SHORT'}</b> side par hai — thesis invalid ho chuki hai.`,
+      `Ensemble ab <b>${_canonSide(conviction?.side) || 'FLAT'}</b> side par hai - thesis invalid ho chuki hai.`,
       ...whyLines.map(l => `• ${l}`),
       plan.stopLoss ? `SL ${_fmtPx(plan.stopLoss, t.market)} hai${dist.sl != null ? ` (${Math.abs(dist.sl)}% away)` : ''} — judge karo, obey mat karo.` : '',
       `<i>/manualclose ${t.id} se site se close kar sakte ho.</i>`,

@@ -26,6 +26,7 @@ import { dhanConnected, dhanPlaceOrder, dhanCancelOrder, dhanOrderStatus, dhanPo
 import { fetchTVIndiaBatch } from './data.js';
 import { fetchGrowwNseQuote } from './growwQuote.js';
 import { computeTrailSl, evaluateExecutionGate, buildTradePlan, fitPlanToRiskCap } from './ensemble.js';
+import { normalizeSide } from './directionCertificate.js';
 import {
   loadConfig, loadJournal, saveJournal, withJournalLock, pushEntry, todayIST, dailyStats,
 } from './coindcxOrders.js';
@@ -159,9 +160,13 @@ export async function executeIndiaSignal(opts) {
   // LONG — an unspecified request inherits the fresh signal's side (the
   // client always sends side; a missing side is a malformed call, and
   // minting a LONG from nothing was a free directional bias).
-  const _reqRaw = String(side || '').toUpperCase();
-  const reqSide = _reqRaw === 'SHORT' || _reqRaw === 'LONG' ? _reqRaw
-    : (signal.side === 'SHORT' || signal.side === 'LONG' ? signal.side : 'LONG');
+  const reqSide = normalizeSide(side) ?? normalizeSide(signal.side);
+  if (!reqSide) {
+    return reject(
+      `Direction unresolved: requested side "${String(side ?? '')}" invalid aur fresh signal side "${String(signal.side ?? '')}" bhi LONG/SHORT nahi — entry blocked (no silent LONG).`,
+      `Direction unresolved: requested "${String(side ?? '')}" / signal "${String(signal.side ?? '')}" — no silent side`,
+    );
+  }
   const sideConflict = signal.side !== 'FLAT' && signal.side !== reqSide;
   const belowFloor = signal.grade !== 'STRONG' && signal.grade !== 'ACTION';
   if (sideConflict) {
