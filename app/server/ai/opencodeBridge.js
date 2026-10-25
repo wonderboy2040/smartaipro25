@@ -345,6 +345,14 @@ function _spawnCli(argv, { stdinText = null, timeoutMs, maxBufferBytes = _maxBuf
         finish(resolve, { stdout, stderr, code });
         return;
       }
+      // Provider errors (auth, quota, 429) arrive as JSONL `type:"error"`
+      // events on stdout while the CLI exits 1. Parse them BEFORE the
+      // stderr heuristics so a free-limit is not reported as `exit 1`.
+      const ev = _findErrorEvent(stdout);
+      if (ev) {
+        finish(reject, _eventError(ev));
+        return;
+      }
       const tail = _sanitizeError(stderr);
       if (/\b(401|403)\b|unauthor|forbidden|not logged|login required/i.test(tail)) {
         finish(reject, new OpenCodeBridgeError(`opencode auth failed${tail ? `: ${tail}` : ''}`, 'auth'));
@@ -461,7 +469,12 @@ function _recordFailure(model, err, now) {
   const code = String(err?.code || '');
   const msg = String(err?.message || '');
   let cooldownMs = 0;
-  if (code === 'auth' || /\b(401|403)\b|unauthor|forbidden|not logged/i.test(msg)) {
+  if (code === 'free-limit') {
+    // Provider-declared quota window (usually hours). Honor it so we do
+    // not hammer a hard 429; cap at 24h in case of a bad value.
+    const retry = Number(err?.retryAfterMs);
+    cooldownMs = Number.isFinite(retry) && retry > 0 ? Math.min(retry, 24 * 3600_000) : 3600_000;
+  } else if (code === 'auth' || /\b(401|403)\b|unauthor|forbidden|not logged/i.test(msg)) {
     cooldownMs = 900_000;
   } else if (code === 'rate-limited' || /\b429\b|rate limit|too many/i.test(msg)) {
     cooldownMs = 90_000;
@@ -505,6 +518,44 @@ function _extractEventError(ev) {
     || 'unknown error';
 }
 
+/** First JSONL `type:"error"` event in stdout, or null. */
+function _findErrorEvent(stdout) {
+  for (const line of String(stdout || '').split(/\r?\n/)) {
+    const raw = line.trim();
+    if (!raw) continue;
+    try {
+      const ev = JSON.parse(raw);
+      if (ev?.type === 'error') return ev;
+    } catch { /* non-JSON line — the parser skips it too */ }
+  }
+  return null;
+}
+
+/**
+ * Map an OpenCode `type:"error"` event to a bridge error with an honest
+ * code. Provider quota errors arrive as 429 `FreeUsageLimitError` with a
+ * `retryAfterMs` window; without this mapping the CLI's exit 1 looked
+ * like a generic crash.
+ */
+function _eventError(ev) {
+  const err = ev?.error || {};
+  const message = _sanitizeError(_extractEventError(ev));
+  const type = String(err?.type || '').toLowerCase();
+  const status = Number(err?.status || 0);
+  const retryAfterMs = Number(err?.retryAfterMs);
+  const meta = Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? { retryAfterMs } : {};
+  if (type.includes('free-limit') || type.includes('freeusage') || /free usage limit|free tier/i.test(message)) {
+    return new OpenCodeBridgeError(`opencode free-limit: ${message}`, 'free-limit', meta);
+  }
+  if (type.includes('auth') || status === 401 || status === 403) {
+    return new OpenCodeBridgeError(`opencode auth failed: ${message}`, 'auth', meta);
+  }
+  if (status === 429 || /rate limit|too many/i.test(message)) {
+    return new OpenCodeBridgeError(`opencode rate-limited: ${message}`, 'rate-limited', meta);
+  }
+  return new OpenCodeBridgeError(`opencode error: ${message}`, 'opencode-error', meta);
+}
+
 /**
  * Parse `opencode run --format json` output.
  *
@@ -518,7 +569,7 @@ function _extractEventError(ev) {
 export function parseOpenCodeJsonl(stdout) {
   const lines = String(stdout || '').split(/\r?\n/);
   const texts = [];
-  let eventError = null;
+  let errorEvent = null;
   for (const line of lines) {
     const raw = line.trim();
     if (!raw) continue;
@@ -526,7 +577,7 @@ export function parseOpenCodeJsonl(stdout) {
     try { ev = JSON.parse(raw); } catch { continue; }
     if (!ev || typeof ev !== 'object') continue;
     if (ev.type === 'error') {
-      eventError = _extractEventError(ev);
+      errorEvent = ev;
       continue;
     }
     if (ev.type !== 'text') continue;
@@ -535,9 +586,7 @@ export function parseOpenCodeJsonl(stdout) {
       : (typeof ev.part?.text === 'string' ? ev.part.text : '');
     if (text) texts.push(text);
   }
-  if (eventError) {
-    throw new OpenCodeBridgeError(`opencode error: ${_sanitizeError(eventError)}`, 'opencode-error');
-  }
+  if (errorEvent) throw _eventError(errorEvent);
   if (!texts.length) throw new OpenCodeBridgeError('opencode no-text', 'no-text');
   const text = texts.join('\n');
   const json = tryParseJson(text);
@@ -795,12 +844,14 @@ export async function probeOpenCodeSeat(seat, opts = {}) {
       at: Date.now(),
     };
   } catch (e) {
+    const retryAfterMs = Number(e?.retryAfterMs);
     return {
       ok: false,
       seat: s,
       model: full,
       code: e?.code || 'error',
       error: _sanitizeError(e?.message || e),
+      ...(Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? { retryAfterMs } : {}),
     };
   }
 }

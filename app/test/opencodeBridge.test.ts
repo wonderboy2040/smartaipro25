@@ -138,6 +138,23 @@ describe('parseOpenCodeJsonl', () => {
       expect(e.message).not.toContain('\n');
     }
   });
+
+  it('maps a provider free-limit event to code free-limit + retryAfterMs', () => {
+    const stdout = JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'provider.free-limit',
+        message: 'Free usage limit reached. Connect a provider or subscribe to OpenCode Go.',
+        status: 429,
+        retryAfterMs: 7_200_000,
+      },
+    });
+    try { parseOpenCodeJsonl(stdout); } catch (e: any) {
+      expect(e.code).toBe('free-limit');
+      expect(e.retryAfterMs).toBe(7_200_000);
+      expect(e.message).toContain('free-limit');
+    }
+  });
 });
 
 describe('askOpenCode — security + stdin contract', () => {
@@ -232,6 +249,33 @@ describe('askOpenCode — security + stdin contract', () => {
       .rejects.toMatchObject({ code: 'cooldown' });
     expect(spawnFn).toHaveBeenCalledTimes(2);
   });
+
+  it('reports a provider free-limit honestly (not exit 1) and arms the breaker', async () => {
+    const retryAfterMs = 3_600_000;
+    const { spawnFn } = fakeSpawn(({ child }) => {
+      respond(child, JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'provider.free-limit',
+          message: 'Free usage limit reached. Connect a provider or subscribe to OpenCode Go.',
+          status: 429,
+          retryAfterMs,
+        },
+      }) + '\n', { code: 1 });
+    });
+    __setSpawnForTests(spawnFn);
+
+    await expect(askOpenCode('x', { model: 'glm-5.3-flash-free' }))
+      .rejects.toMatchObject({ code: 'free-limit', retryAfterMs });
+    const breaker = opencodeStatus().breaker['glm-5.3-flash-free'];
+    expect(breaker.cooldownRemainSec).toBeGreaterThan(0);
+    expect(breaker.lastError).toContain('free-limit');
+
+    // Breaker is armed: the next call fails fast without spawning.
+    await expect(askOpenCode('x', { model: 'glm-5.3-flash-free' }))
+      .rejects.toMatchObject({ code: 'cooldown' });
+    expect(spawnFn).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('opencodeProbe — cached CLI health', () => {
@@ -310,6 +354,28 @@ describe('per-seat probe', () => {
     expect(out.ok).toBe(false);
     expect(out.code).toBe('bad-seat');
     expect(spawnFn).not.toHaveBeenCalled();
+  });
+
+  it('surfaces free-limit + retryAfterMs on a seat probe', async () => {
+    const { spawnFn } = fakeSpawn(({ child }) => {
+      respond(child, JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'provider.free-limit',
+          message: 'Free usage limit reached.',
+          status: 429,
+          retryAfterMs: 1_800_000,
+        },
+      }) + '\n', { code: 1 });
+    });
+    __setSpawnForTests(spawnFn);
+
+    const out = await probeOpenCodeSeat('fast', {
+      knownModels: ['opencode/glm-5.3-flash-free'],
+    });
+    expect(out.ok).toBe(false);
+    expect(out.code).toBe('free-limit');
+    expect(out.retryAfterMs).toBe(1_800_000);
   });
 });
 

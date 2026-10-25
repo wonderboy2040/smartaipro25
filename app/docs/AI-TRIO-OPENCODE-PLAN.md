@@ -180,6 +180,8 @@ All three calls used stdin prompts, the `signal-verifier` agent, the sandbox cwd
 
 **Limited-time warning:** OpenCode's own docs describe these free models as free "for a limited time." Treat the model IDs as configuration, not as a permanent contract. The seat chains and `opencode models` probe exist so a removed model degrades to the next link instead of breaking the board.
 
+**Free-quota reality (verified 2026-10-25):** repeated probes can exhaust the free tier. The CLI then emits a JSONL `provider.free-limit` event (HTTP 429 `FreeUsageLimitError`) with `retryAfterMs` (observed ~16.5h). The bridge maps this to code `free-limit`, arms the per-model breaker for that window (capped at 24h), and never reports it as a generic `exit 1`. In `hybrid` mode the next chain link (Ollama) wins while the breaker is open.
+
 ### 2.4 What this means for deployment
 
 | Deployment | Free OpenCode CLI | Paid direct API | Local Ollama |
