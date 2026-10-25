@@ -109,6 +109,28 @@ describe('mtfAutoLink — config + status', () => {
     expect(isLiveSessionEntry(null)).toBe(false);
   });
 
+  it('v21.25.1: manual PAPER test rows do not consume the AUTO paper daily quota', async () => {
+    const now = Date.now();
+    const dayKey = dayKeyFor('CRYPTO', new Date(now));
+    const manualPaper = (symbol, id) => ({
+      paperId: id, symbol, market: 'CRYPTO', execMarket: 'FUTURES', side: 'LONG',
+      entry: 50, stopLoss: 49, t1: 51, t2: 52, qty: 1, notional: 50,
+      openedAt: now, dayKey, status: 'CLOSED', closeReason: 'T2_HIT', closedAt: now, pnl: 1,
+      executionMode: 'PAPER', traded: true, openedBy: 'MANUAL',
+    });
+    __resetMtfAutoForTests({
+      config: { enabled: true, executionMode: 'paper', maxTradesPerDay: 1, desks: { india: false, crypto: true } },
+      state: { book: [manualPaper('ADA', 101), manualPaper('ETH', 102), manualPaper('SOL', 103)] },
+    });
+    expect(mtfAutoStatus().dayQuotaCount).toBe(0);
+    const { paper, calls } = fakePaper();
+    const out = await mtfAutoTick({ boards: { CRYPTO: boardFixture('BTCUSDT') }, paper });
+    expect(out.skipped.join(' ')).not.toMatch(/daily quota|desk quota/);
+    expect(calls.opened).toHaveLength(1);
+    // Auto engine's own paper entry is the only row that consumes the quota.
+    expect(mtfAutoStatus().dayQuotaCount).toBe(1);
+  });
+
   it('normalizeLinkSymbol strips venue namespaces + quote suffixes', () => {
     expect(normalizeLinkSymbol('FUT_BTC', 'CRYPTO')).toBe('BTC');
     expect(normalizeLinkSymbol('BTCUSDT', 'CRYPTO')).toBe('BTC');

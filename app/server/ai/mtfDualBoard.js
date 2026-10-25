@@ -940,6 +940,47 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
   const q75 = trimmed.filter(r => r.superScore != null && r.superScore >= Number(minScore));
   const earlyRadar = buildEarlyRadar([...rows, ...metalsRowsRaw, ...equitySimRowsRaw].filter(Boolean), 3);
 
+  // v21.25.1 [NEVER-EMPTY MARKET SCAN]: WATCH+ filter ke baad board khaali
+  // ho sakta hai (choppy market) — user ko "koi coin hi nahi" nahi lagta tha.
+  // Scan universe har scanned symbol ki honest state deta hai (NEUTRAL/WAIT
+  // rows bhi), bina unhe tradeable LONG/SHORT card banae. UI in rows par koi
+  // PAPER/LIVE action nahi dikhata.
+  const scanWatchFloor = Number(SUPER_TIERS.WATCH) || 50;
+  const scanSeen = new Set();
+  const scanRows = [...rows, ...metalsRowsRaw, ...equitySimRowsRaw]
+    .filter(Boolean)
+    .filter(r => {
+      const k = String(r.symbol || '').toUpperCase();
+      if (!k || scanSeen.has(k)) return false;
+      scanSeen.add(k);
+      return true;
+    })
+    .map(r => {
+      const score = Number(r.superScore);
+      const side = SIDEABLE.has(r.side) ? r.side : null;
+      return {
+        symbol: r.symbol,
+        market: r.market,
+        assetClass: r.assetClass ?? null,
+        side,
+        superScore: Number.isFinite(score) ? score : null,
+        tier: r.tier ?? 'NEUTRAL',
+        ltp: Number.isFinite(Number(r.ltp)) && Number(r.ltp) > 0 ? Number(r.ltp) : null,
+        quoteCcy: r.quoteCcy ?? null,
+        tfFit: r.tfFit ?? null,
+        htfBias: r.htfBias ?? null,
+        triggerFired: r.triggerFired === true,
+        directionVerified: r.directionVerified === true,
+        autoEligible: r.autoEligible === true,
+        actionable: Boolean(side && Number.isFinite(score) && score >= scanWatchFloor),
+        directionVerdict: r.directionCertificate?.verdict ?? null,
+        blocker: Array.isArray(r.autoBlockers) && r.autoBlockers.length ? r.autoBlockers[0] : null,
+        ok: r.ok !== false,
+        asOf: r.asOf ?? null,
+      };
+    })
+    .sort((a, b) => (Number(b.superScore) || 0) - (Number(a.superScore) || 0));
+
   // Phase 3 (3.1 / 3.2 / 3.3): Log top-6 scan rows into MTF ledger (deduped 30m),
   // resolve pending outcomes against live LTPs, and attach 30d MTF Direction Scorecard.
   const scanQuoteMap = {};
@@ -1004,6 +1045,7 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
     metalsRows,
     equitySimRows,
     earlyRadar,
+    scanRows,
     counts: {
       rows: trimmed.length, overBar: q75.length,
       eligible: trimmed.filter(r => r.autoEligible).length,

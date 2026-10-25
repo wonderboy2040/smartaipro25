@@ -91,9 +91,9 @@ describe('v21.23.15 recheck — desk scope + safety source pins', () => {
     const ai = read('server/ai/mtfAutoLink.js');
     // v21.23.18: day rows live-scoped hain (PAPER test rows live quota nahi
     // khaate), par day boundary still per-desk UTC/IST hi hai.
-    expect(ai).toContain('const dayRows = isLiveSession ? stDay.book.filter(isLiveSessionEntry) : stDay.book;');
+    expect(ai).toContain('const dayRows = stDay.book.filter(b => isSessionQuotaEntry(b, isLiveSession));');
     expect(ai).toContain('const dayCountAllDesks = dayRows.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;');
-    expect(ai).toContain('const flipDayCount = (flipLiveSession ? stq.book.filter(isLiveSessionEntry) : stq.book)');
+    expect(ai).toContain('const flipDayCount = stq.book.filter(b => isSessionQuotaEntry(b, flipLiveSession))');
     expect(ai).toContain('.filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;');
   });
 

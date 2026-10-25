@@ -1097,6 +1097,27 @@ export interface MtfDirectionScorecardView extends MtfDirectionScorecardBucket {
   conflictBucket?: MtfDirectionScorecardBucket;
 }
 
+export interface MtfScanRow {
+  symbol: string;
+  market?: string | null;
+  assetClass?: string | null;
+  side: 'LONG' | 'SHORT' | null;
+  superScore: number | null;
+  tier: string;
+  ltp?: number | null;
+  quoteCcy?: 'USDT' | 'USD' | 'INR' | null;
+  tfFit?: string | null;
+  htfBias?: string | null;
+  triggerFired?: boolean;
+  directionVerified?: boolean;
+  autoEligible?: boolean;
+  actionable?: boolean;
+  directionVerdict?: string | null;
+  blocker?: string | null;
+  ok?: boolean;
+  asOf?: number | null;
+}
+
 export interface MtfEarlyRadarRow {
   symbol: string; market?: string; side: 'LONG' | 'SHORT';
   superScore?: number | null; tier?: string | null;
@@ -1128,6 +1149,8 @@ export interface MtfDualBoardView {
   rows?: MtfDualRow[];
   metalsRows?: MtfDualRow[];
   equitySimRows?: MtfDualRow[];
+  /** v21.25.1 — every scanned symbol (including NEUTRAL/WAIT) for the never-empty market scan strip. */
+  scanRows?: MtfScanRow[];
   asOf?: number; cached?: boolean; notes?: string[];
 }
 
@@ -1303,7 +1326,11 @@ export interface MtfAutoStatus {
     }>;
     checkedAt: number;
   };
-  day?: string | null; dayCount: number; openCount: number; openNotionalINR: number;
+  day?: string | null; dayCount: number;
+  /** v21.25.1 — session-aware quota count (manual PAPER test rows excluded). */
+  dayQuotaCount?: number;
+  quotaScope?: string;
+  openCount: number; openNotionalINR: number;
   book?: Array<{ paperId: number | null; liveOrderId?: string | null; executionMode?: string; symbol: string; market: string; execMarket?: string; ccy?: 'USDT' | 'INR'; fxUsed?: number | null; side: string; orderSide?: DirectionOrderSide | null; directionCertificate?: DirectionCertificate | null; directionBlocked?: boolean; score: number; tier: string; mode?: string; holdMin?: number; entry: number; stopLoss: number; t1: number; t2: number; qty: number; leverage?: number; walletINR?: number; feeBreakevenPrice?: number | null; marginINR?: number; marginUsdt?: number | null; riskINR: number; riskUsdt?: number | null; notional: number; notionalUsdt?: number | null; openedAt: number; status: string; closeReason?: string | null; closedAt?: number | null; pnl?: number | null; drivers?: string[] }>;
   events?: Array<{ at: number; kind: string; text: string }>;
   lastTick?: { at: number; opened: number; closed: number; skipped: string[] } | null;

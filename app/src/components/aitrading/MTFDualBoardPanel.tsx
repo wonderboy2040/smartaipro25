@@ -245,6 +245,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   const rows = useMemo(() => board?.rows || [], [board?.rows]);
   const metalsRows = useMemo(() => board?.metalsRows || [], [board?.metalsRows]);
   const equitySimRows = useMemo(() => board?.equitySimRows || [], [board?.equitySimRows]);
+  const scanRows = useMemo(() => board?.scanRows || [], [board?.scanRows]);
   const displayedRows = useMemo(() => {
     if (deskFilter === 'METALS') return metalsRows;
     if (deskFilter === 'EQUITY_SIM') return equitySimRows;
@@ -260,6 +261,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     return combined;
   }, [deskFilter, rows, metalsRows, equitySimRows]);
   const armed = !!auto?.enabled;
+  const paperArmed = Boolean(armed && auto?.executionMode === 'paper');
   const isUsdBoard = board?.quoteCcy === 'USDT' || board?.quoteCcy === 'USD';
   const ccyTag = board?.quoteCcy === 'USD' ? '$ · USD' : isUsdBoard ? '$ · USDT' : '₹ · INR';
   const liveFx = Number((liveWallet as unknown as { coindcxInrPerUsdt?: number })?.coindcxInrPerUsdt) > 40
@@ -631,13 +633,16 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     const paperTag = paperCount > 0 ? ` · 🧪 Paper: ${paperCount} (live lock nahi)` : '';
     const staleTag = liveStatusStale ? ' · STATUS STALE' : '';
     const tierDiag = ` · 🎯 ELITE/STRONG ${counts?.strong ?? 0} · trigger-fired ${counts?.fired ?? 0}`;
+    const quotaUsed = Number.isFinite(Number(auto.dayQuotaCount)) ? Number(auto.dayQuotaCount) : auto.dayCount;
     const runTag = liveEntriesPaused
       ? '⏸ LIVE ENTRIES PAUSED (existing positions managed)'
       : isLiveAuto
         ? `🟢 LIVE AUTO-TRADE INTELLIGENCE ON${staleTag}`
-        : '⏸ AUTO-TRADE STANDBY';
-    return `${runTag} · ${walletDeployPct}% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} / ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')} @ ${activeLeverage}x (Buying Power ₹${buyingPower95INR.toLocaleString('en-IN')}) · Active LIVE: ${activeLiveRows.length}${paperTag} · day ${auto.day ?? '—'} · trades ${auto.dayCount}/${auto.maxTradesPerDay}${tierDiag}${warnWhy}${credsWarn}${nearMiss}${skipWhy}`;
-  }, [auto, isLiveAuto, liveEntriesPaused, liveStatusStale, liveWarnWhy, topNearMissBlockers, activeLeverage, walletDeployPct, effectiveWalletINR, deployed95WalletINR, buyingPower95INR, activeTradedRows.length, activeLiveRows.length, counts]);
+        : paperArmed
+          ? '🧪 AUTO-TRADE PAPER ON — REAL ORDERS OFF'
+          : '⏸ AUTO-TRADE STANDBY';
+    return `${runTag} · ${walletDeployPct}% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} / ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')} @ ${activeLeverage}x (Buying Power ₹${buyingPower95INR.toLocaleString('en-IN')}) · Active LIVE: ${activeLiveRows.length}${paperTag} · day ${auto.day ?? '—'} · trades ${quotaUsed}/${auto.maxTradesPerDay}${tierDiag}${warnWhy}${credsWarn}${nearMiss}${skipWhy}`;
+  }, [auto, isLiveAuto, paperArmed, liveEntriesPaused, liveStatusStale, liveWarnWhy, topNearMissBlockers, activeLeverage, walletDeployPct, effectiveWalletINR, deployed95WalletINR, buyingPower95INR, activeTradedRows.length, activeLiveRows.length, counts]);
 
   return (
     <div className="mt-3" aria-label="mtf dual timeframe signals board">
@@ -772,7 +777,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
               <span className={liveEntriesPaused ? 'text-amber-300' : isLiveAuto ? 'text-emerald-300' : 'text-slate-200'}>
                 {liveEntriesPaused
                   ? '⏸ AUTO-TRADE INTELLIGENCE — LIVE ENTRIES PAUSED (SL MANAGEMENT ON)'
-                  : isLiveAuto ? '🟢 AUTO-TRADE INTELLIGENCE — LIVE ON (24×7 REALTIME)' : '⚡ AUTO-TRADE SUPER INTELLIGENCE (ONE-CLICK LIVE)'}
+                  : isLiveAuto ? '🟢 AUTO-TRADE INTELLIGENCE — LIVE ON (24×7 REALTIME)' : paperArmed ? '🧪 AUTO-TRADE INTELLIGENCE — PAPER ON (LIVE OFF)' : '⚡ AUTO-TRADE SUPER INTELLIGENCE (ONE-CLICK LIVE)'}
               </span>
               <span className="px-2 py-0.5 rounded-md bg-cyan-500/15 border border-cyan-500/40 text-[9px] font-mono text-cyan-200">
                 💰 {walletDeployPct}% CoinDCX Wallet: ₹{deployed95WalletINR.toLocaleString('en-IN')} × {activeLeverage}x = ₹{buyingPower95INR.toLocaleString('en-IN')} Buying Power
@@ -804,6 +809,11 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             {(liveWarnWhy || (!isLiveAuto && armBlockWhy)) && (
               <div className="mt-1 text-[9px] font-bold text-amber-300" data-testid="mtf-live-warning">
                 ⚠ {liveWarnWhy || armBlockWhy}
+              </div>
+            )}
+            {paperArmed && (
+              <div className="mt-1 text-[9px] font-bold text-cyan-300" data-testid="mtf-paper-mode-warning">
+                🧪 PAPER MODE ARMED — engine sirf paper trades karega, real CoinDCX orders OFF hain. Real auto-trade ke liye ⚡ LIVE dabao (wallet + CoinDCX keys ready).
               </div>
             )}
             {auto?.riskCaps && (
@@ -1074,8 +1084,12 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       {!boardBusy && !displayedRows.length && (
         <div className="quantum-panel rounded-2xl p-6 text-center mt-2">
           <div className="text-2xl mb-1">😌</div>
-          <div className="text-[11px] font-bold text-amber-400">Board par abhi koi high-confidence directional setup nahi</div>
-          <div className="text-[10px] text-slate-500 mt-1">Sirf WATCH+ LONG/SHORT rows dikhte hain — NEUTRAL, counter-HTF aur data-down rows honest khaali rehte hain (fake signal nahi).</div>
+          <div className="text-[11px] font-bold text-amber-400">Board par abhi koi WATCH+ trade-ready directional setup nahi</div>
+          <div className="text-[10px] text-slate-500 mt-1">
+            {scanRows.length > 0
+              ? `${scanRows.length} coins scan hue — neeche FULL MARKET SCAN me sabki honest state hai. NEUTRAL/WAIT rows non-tradeable hain (fake signal nahi).`
+              : 'Sirf WATCH+ LONG/SHORT rows dikhte hain — NEUTRAL, counter-HTF aur data-down rows honest khaali rehte hain (fake signal nahi).'}
+          </div>
         </div>
       )}
       {displayedRows.length > 0 && (
@@ -1389,6 +1403,56 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* ================= v21.25.1 FULL MARKET SCAN — never-empty coin universe ================= */}
+      {scanRows.length > 0 && (
+        <div data-testid="mtf-market-scan" className="mt-2 rounded-xl border border-slate-500/25 bg-slate-950/60 px-3 py-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="text-[10px] font-black text-slate-200 tracking-wider">
+              🔍 FULL MARKET SCAN — {scanRows.length} coins
+            </span>
+            <span className="text-[8px] text-slate-500">
+              {scanRows.filter(s => s.actionable).length} WATCH+ · {scanRows.filter(s => !s.actionable).length} NEUTRAL/WAIT · action sirf WATCH+ cards par
+            </span>
+          </div>
+          <div className="mt-1.5 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-1.5">
+            {scanRows.map(s => {
+              const sLong = s.side === 'LONG';
+              const sCcy = s.quoteCcy === 'USDT' || s.quoteCcy === 'USD' ? '$' : '₹';
+              return (
+                <div
+                  key={`scan-${s.symbol}`}
+                  data-testid={`mtf-scan-${s.symbol}`}
+                  className={`rounded-lg border px-2 py-1.5 ${s.actionable ? 'border-slate-500/40 bg-slate-900/60' : 'border-slate-700/40 bg-black/30'}`}
+                  title={[s.blocker, s.directionVerdict ? `cert ${s.directionVerdict}` : null, s.htfBias ? `HTF ${s.htfBias}` : null].filter(Boolean).join(' · ') || 'Scanned — no blocker detail'}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[10px] font-black text-slate-100">{s.symbol}</span>
+                    <span className="text-[9px] font-mono text-slate-400">{s.superScore ?? '—'}</span>
+                  </div>
+                  <div className="mt-0.5 flex items-center gap-1 flex-wrap">
+                    {s.actionable ? (
+                      <span className={`px-1 py-0.5 rounded text-[8px] font-black border ${sLong ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40' : 'bg-red-500/15 text-red-300 border-red-500/40'}`}>
+                        {s.side}
+                      </span>
+                    ) : (
+                      <span className="px-1 py-0.5 rounded text-[8px] font-black border border-slate-600/50 text-slate-400 bg-slate-800/40">WAIT</span>
+                    )}
+                    <span className={`px-1 py-0.5 rounded text-[8px] font-black ${tierCls(s.tier)}`}>{s.tier}</span>
+                    {s.autoEligible && (
+                      <span className="px-1 py-0.5 rounded text-[8px] font-black border border-emerald-500/40 bg-emerald-500/15 text-emerald-200">AUTO</span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 flex items-center justify-between gap-1 text-[8px] font-mono text-slate-500">
+                    <span>{s.ltp != null ? `${sCcy}${fmt(s.ltp)}` : '—'}</span>
+                    <span>{s.triggerFired ? 'trigger ✓' : s.directionVerified ? 'waiting' : 'scan'}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

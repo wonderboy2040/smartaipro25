@@ -1115,6 +1115,27 @@ export function isLiveSessionEntry(b) {
   return false;
 }
 
+/**
+ * v21.25.1 [MANUAL PAPER != AUTO QUOTA]: sirf AUTO engine ki entries daily
+ * trades quota consume karti hain. Manual board ke 🧪 PAPER clicks practice
+ * hain (real-money budget nahi) — unhe quota me ginne se 3 paper tests poora
+ * din auto engine ko block kar dete the, chahe ek bhi auto trade na hua ho.
+ *
+ * LIVE rows hamesha quota count karte hain (real exchange execution). PAPER
+ * rows sirf tab jab unhe auto engine ne khola ho (`openedBy:'AUTO'`/autoTrade)
+ * — manual paper rows monitoring me rehte hain, par quota nahi khaate.
+ */
+export function isAutoQuotaEntry(b) {
+  if (!b) return false;
+  if (isLiveSessionEntry(b)) return true;
+  return b.openedBy === 'AUTO' || b.autoTrade === true || b.autoEngine === true;
+}
+
+/** Session-aware quota row filter shared by the tick and UC flip-reverse. */
+export function isSessionQuotaEntry(b, isLiveSession = false) {
+  return isLiveSession ? isLiveSessionEntry(b) : isAutoQuotaEntry(b);
+}
+
 export function purgeUntradedBookEntries() {
   const st = _loadState();
   let purged = 0;
@@ -1690,7 +1711,7 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     // UTC crypto session cannot be blocked/shortened by the IST rollover.
     const stq = _rollDayIfNeeded();
     const flipQuota = Number(cfg.maxTradesPerDay) || 5;
-    const flipDayCount = (flipLiveSession ? stq.book.filter(isLiveSessionEntry) : stq.book)
+    const flipDayCount = stq.book.filter(b => isSessionQuotaEntry(b, flipLiveSession))
       .filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;
     if (flipDayCount >= flipQuota) {
       _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: daily quota ${flipDayCount}/${flipQuota} done`);
@@ -1817,6 +1838,10 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
       traded: true,
       fullControl: Boolean(liveOrderResult?.ok),
       openedInLiveMode: Boolean(wantLiveOrder),
+      // v21.25.1: quota provenance — sirf AUTO engine ki entries quota count
+      // karti hain; manual board clicks `openedBy:'MANUAL'` rehte hain.
+      openedBy: 'AUTO',
+      autoTrade: true,
       symbol: sym, market: b.market, execMarket, ccy: isSim ? 'USDC' : (isUsd ? 'USDT' : 'INR'),
       fxUsed: isUsd ? fxRate : null,
       side,
@@ -2423,7 +2448,10 @@ export async function mtfAutoTick(p = {}) {
     const stDay = _loadState(); // day counters (rolled above)
     // v21.23.18: LIVE session me day quota sirf LIVE rows ka — PAPER test
     // trades real live quota ko consume nahi karte.
-    const dayRows = isLiveSession ? stDay.book.filter(isLiveSessionEntry) : stDay.book;
+    // v21.25.1: PAPER session me bhi sirf AUTO-opened rows quota count karti
+    // hain — manual 🧪 PAPER test clicks auto engine ko din bhar block nahi
+    // kar sakte.
+    const dayRows = stDay.book.filter(b => isSessionQuotaEntry(b, isLiveSession));
     // budget / quota gates (market-wise counters use the SAME day bucket)
     const deskDay = dayKeyFor(market === 'INDIA' ? 'INDIA' : 'CRYPTO');
     const dayCountForDesk = dayRows.filter(b => b.market === market && b.dayKey === deskDay).length;
@@ -2830,6 +2858,9 @@ export async function mtfAutoTick(p = {}) {
         traded: true,
         fullControl: Boolean(liveOrderResult?.ok),
         openedInLiveMode: Boolean(wantLiveOrder),
+        // v21.25.1: auto-engine entry — daily quota counts this row.
+        openedBy: 'AUTO',
+        autoTrade: true,
         symbol: sym, market, execMarket, ccy: isSimRow ? 'USDC' : (isUsd ? 'USDT' : 'INR'), fxUsed: isUsd ? fxRate : null,
         side: row.side,
         orderSide: row.side === 'LONG' ? 'buy' : 'sell',
@@ -3046,6 +3077,14 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
   const deepMonitor = getActiveAutoTradesDeepMonitor(liveQuotes, {
     allowTpExtension: Boolean(liveQuotes && Object.keys(liveQuotes).length),
   });
+  // v21.25.1 [QUOTA HONESTY]: status ka displayed count wahi rows count kare
+  // jo tick ka quota gate karta hai — manual PAPER test rows isme nahi aate.
+  const _quotaLiveSession = String(cfg.executionMode || '').toLowerCase() === 'live';
+  const _quotaDayKeyNow = new Date();
+  const dayQuotaCount = st.book
+    .filter(b => isSessionQuotaEntry(b, _quotaLiveSession))
+    .filter(b => b.dayKey === dayKeyFor(b.market, _quotaDayKeyNow))
+    .length;
   return {
     ok: true,
     // Persistence provenance — 'false' means config/state came from defaults
@@ -3095,6 +3134,8 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
     ccyMode: 'crypto rows USDT (paper = FUTURES desk domain) · india rows ₹',
     day: st.day,
     dayCount: st.dayCount,
+    dayQuotaCount,
+    quotaScope: _quotaLiveSession ? 'LIVE rows only' : 'auto-engine rows only (manual PAPER excluded)',
     openCount: open.length,
     openNotionalINR: Math.round(_openNotionalINR()),
     book: st.book.filter(b => b.closeReason !== 'PURGED_UNTRADED_ENTRY').slice(-30).reverse(),
@@ -3255,6 +3296,11 @@ export function recordLiveMtfBoardTrade(item = {}) {
     traded: true,
     fullControl: true,
     openedInLiveMode: !isPaperExec,
+    // v21.25.1: manual board click provenance — PAPER clicks practice hain,
+    // auto quota consume nahi karte. Caller explicit `openedBy:'AUTO'` bhej
+    // sakta hai (e.g. future auto path reusing this recorder).
+    openedBy: item.openedBy || 'MANUAL',
+    autoTrade: item.autoTrade === true,
     symbol: sym,
     market: bookMarket,
     execMarket,
