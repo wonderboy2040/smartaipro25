@@ -3190,6 +3190,7 @@ export function recordLiveMtfBoardTrade(item = {}) {
   const bookMarket = isSimBook ? 'GLOBALFUTURES' : isUsdBook ? 'CRYPTO' : 'INDIA';
   const execMarket = isSimBook ? 'GLOBALFUTURES' : isUsdBook ? 'FUTURES' : 'INDIA';
   const bookCcy = isSimBook ? 'USDC' : isUsdBook ? 'USDT' : 'INR';
+  const now = Date.now();
   const existing = st.book.find(b => b.status === 'OPEN' && b.symbol === sym && b.market === bookMarket);
   if (existing) {
     // v21.23.12 [RE-ANCHOR LIFECYCLE RESET]: existing OPEN row par re-anchor
@@ -3202,6 +3203,35 @@ export function recordLiveMtfBoardTrade(item = {}) {
     // flip (purana row LONG, naya order SHORT) → SHORT exchange position
     // LONG ki tarah manage hoti — SL-hit logic inverted, wrong-side SL push.
     // Ab naye order ke saath poori lifecycle fresh re-anchors hoti hai.
+    //
+    // v21.25.3 [RE-ANCHOR MONEY BOOKKEEPING]: levels update hone ke baad
+    // derived money fields (risk/notional/margin/dayKey/fee-floor) purane
+    // lifecycle ke rehte the. Isse Phase-0 audit stale risk dikhata tha,
+    // open-notional budget under-count hota tha (naya bada order cap se
+    // bahar), aur fee-aware reversal purane entry ka fee floor use karta
+    // tha. Ab har derived field naye entry/qty/SL/fx/leverage se recompute
+    // hota hai — naye-row path ke SAME contract se.
+    const fxRate = clampN(item.fx ?? cfg.inrPerUsdt, 40, 150, 102);
+    const walletINR = Number(item.walletINR) > 0
+      ? Number(item.walletINR)
+      : (Number(existing.walletINR) > 0 ? Number(existing.walletINR) : (Number(cfg.walletAmountINR) || 10000));
+    const leverage = Number(item.leverage) > 0
+      ? Number(item.leverage)
+      : (Number(existing.leverage) > 0 ? Number(existing.leverage) : computeMtfWalletLeverage(walletINR, cfg));
+    const w95 = computeWallet95Deployment({
+      walletINR,
+      leverage,
+      fxRate,
+      deployPct: cfg.walletDeployPct ?? 100,
+      cfg,
+    });
+    const deployedWalletINR = Number(item.deployedWalletINR) > 0
+      ? Number(item.deployedWalletINR)
+      : w95.deployedWalletINR;
+    const buyingPowerINR = Number(item.buyingPowerINR) > 0
+      ? Number(item.buyingPowerINR)
+      : w95.buyingPowerINR;
+
     existing.executionMode = execMode;
     existing.traded = true;
     existing.fullControl = true;
@@ -3212,49 +3242,93 @@ export function recordLiveMtfBoardTrade(item = {}) {
     existing.market = bookMarket;
     existing.execMarket = execMarket;
     existing.ccy = bookCcy;
-    existing.fxUsed = isUsdBook ? clampN(item.fx ?? cfg.inrPerUsdt, 40, 150, 102) : null;
+    existing.fxUsed = isUsdBook ? fxRate : null;
     existing.peakPrice = Number(item.entry) > 0 ? Number(item.entry) : (Number(existing.entry) > 0 ? Number(existing.entry) : null);
     existing.t1Hit = false;
-    existing.openedAt = Date.now();
+    existing.openedAt = now;
     existing.deepMonitorStage = 'STAGE_0_INITIAL_GUARD';
     existing.deepMonitorLabel = isPaperExec ? 'Stage 0 · Paper Direction Test · SL Auto-Trail Ready' : 'Stage 0 · Initial SL Guard (Full Control)';
     existing.trendStatus = `📡 ${sideNorm === 'SHORT' ? 'BEARISH' : 'BULLISH'} LIVE WATCH (+0.00R)`;
-    existing.lastExchangeSl = existing.lastExchangeSl ?? null; // re-arm safe (re-anchored SL hi push hoga)
     existing.closeReason = null;
     existing.closedAt = null;
     existing.pnl = null;
     existing.syncError = null;
+    // New lifecycle = new quota provenance. A manual click re-anchoring an
+    // AUTO row must not keep eating the auto-engine daily quota.
+    existing.openedBy = item.openedBy || 'MANUAL';
+    existing.autoTrade = item.autoTrade === true;
+    existing.autoEngine = item.autoEngine === true;
     if (Number(item.superScore)) existing.score = Number(item.superScore);
     if (item.tier) existing.tier = item.tier;
     if (Number(item.holdMin) > 0) existing.holdMin = Number(item.holdMin);
     if (item.mode) existing.mode = item.mode;
+    // Mode provenance: never carry the previous lifecycle's mirror/order ids
+    // into the new one. A PAPER re-anchor used to keep liveOrderId/livePositionId
+    // (isLiveSessionEntry then treated the practice row as real money); a LIVE
+    // re-anchor could keep a closed paper mirror id. Both are cleared here and
+    // only the current mode's ids are stamped.
     if (isPaperExec) {
       existing.openedInLiveMode = false;
-      existing.paperId = item.paperId ?? existing.paperId ?? `PAPER_${sym}_${Date.now()}`;
+      existing.paperId = item.paperId ?? `PAPER_${sym}_${now}`;
+      existing.liveOrderId = null;
+      existing.livePositionId = null;
     } else {
       existing.openedInLiveMode = true;
+      existing.paperId = item.paperId ?? null;
+      existing.liveOrderId = item.orderId ?? null;
+      existing.livePositionId = item.positionId ?? null;
     }
-    if (item.orderId) existing.liveOrderId = item.orderId;
-    if (item.positionId) existing.livePositionId = item.positionId;
+    existing.activePos = item.activePos ?? item.positionAmt ?? null;
     if (Number(item.entry) > 0) existing.entry = Number(item.entry);
     if (Number(item.qty) > 0) existing.qty = Number(item.qty);
     if (Number(item.stopLoss) > 0) {
       existing.stopLoss = Number(item.stopLoss);
       existing.initialStopLoss = Number(item.stopLoss);
       existing.trailedStopLoss = Number(item.stopLoss);
+    } else {
+      // No fresh SL supplied: the re-anchored lifecycle must still start from
+      // a coherent guard, not a stale trailed level from the old trade.
+      existing.initialStopLoss = existing.stopLoss;
+      existing.trailedStopLoss = existing.stopLoss;
     }
     if (Number(item.t1) > 0) existing.t1 = Number(item.t1);
     if (Number(item.t2) > 0) existing.t2 = Number(item.t2);
-    // The re-anchored order carries its own native TP. Reset the rolling-TP2
-    // sync state so a stale "pending" flag from the previous lifecycle cannot
-    // re-arm an old target on the new position.
+    // The re-anchored order carries its own native TP/SL. Reset rolling-TP2
+    // and sync state so a stale "pending" flag from the previous lifecycle
+    // cannot re-arm an old target/stop on the new position.
     existing.tpSyncPending = false;
+    existing.slSyncPending = false;
     existing.lastExchangeTp = execMode === 'LIVE' && Number(existing.t2) > 0 ? Number(existing.t2) : null;
-    if (Number(item.leverage) > 0) existing.leverage = Number(item.leverage);
-    if (Number(item.walletINR) > 0) existing.walletINR = Math.round(Number(item.walletINR));
-    if (Number(item.deployedWalletINR) > 0) existing.deployedWalletINR = Number(item.deployedWalletINR);
-    if (Number(item.buyingPowerINR) > 0) existing.buyingPowerINR = Number(item.buyingPowerINR);
+    existing.lastExchangeSl = execMode === 'LIVE' && Number(existing.stopLoss) > 0 ? Number(existing.stopLoss) : null;
+    existing.t2Extensions = 0;
+    existing.lastTpExtendAt = null;
+    existing.bookedPnl = 0;
+    existing.smartTrail = null;
+    // Re-anchor is a fresh manual/auto order, not a UC flip-reverse row.
+    existing.flipEntry = false;
+    existing.flippedFrom = null;
+    existing.leverage = leverage;
+    existing.walletINR = Math.round(w95.walletTotalINR);
+    existing.walletDeployPct = w95.walletDeployPct;
+    existing.deployedWalletINR = +deployedWalletINR.toFixed(2);
+    existing.deployedWalletUSDT = isUsdBook ? +(deployedWalletINR / fxRate).toFixed(4) : w95.deployedWalletUSDT;
+    existing.buyingPowerINR = +buyingPowerINR.toFixed(2);
+    existing.buyingPowerUSDT = isUsdBook ? +(buyingPowerINR / fxRate).toFixed(4) : w95.buyingPowerUSDT;
     existing.orderSide = sideNorm === 'LONG' ? 'buy' : 'sell';
+
+    const nextEntry = Number(existing.entry) || 0;
+    const nextQty = Number(existing.qty) || 0;
+    const nextSl = Number(existing.stopLoss) || 0;
+    const riskPerUnit = Math.abs(nextEntry - nextSl);
+    existing.marginINR = +(nextQty * nextEntry * (isUsdBook ? fxRate : 1) / leverage).toFixed(2);
+    existing.marginUsdt = isUsdBook ? +(nextQty * nextEntry / leverage).toFixed(4) : null;
+    existing.riskINR = +(nextQty * riskPerUnit * (isUsdBook ? fxRate : 1)).toFixed(2);
+    existing.riskUsdt = isUsdBook ? +(nextQty * riskPerUnit).toFixed(4) : null;
+    existing.notional = +(nextQty * nextEntry * (isUsdBook ? fxRate : 1)).toFixed(2);
+    existing.notionalUsdt = isUsdBook ? +(nextQty * nextEntry).toFixed(4) : null;
+    existing.feeBreakevenPrice = feeBreakevenFloor({ entry: nextEntry, side: sideNorm, market: execMarket });
+    existing.dayKey = dayKeyFor(execMarket, new Date(now));
+
     existing.directionCertificate = buildDirectionCertificate({
       symbol: sym,
       market: bookMarket,
@@ -3268,6 +3342,10 @@ export function recordLiveMtfBoardTrade(item = {}) {
       directionVerified: item.directionVerified === true,
       source: 'record-live-board-trade',
     });
+    // A real LIVE re-anchor is a fresh execution — count it exactly like the
+    // new-row path. PAPER practice clicks never consume the quota.
+    if (!isPaperExec) st.dayCount += 1;
+    st.perSymbolLast[sym] = now;
     _persistState();
     return existing;
   }
@@ -3287,7 +3365,6 @@ export function recordLiveMtfBoardTrade(item = {}) {
   });
   const feeBePrice = feeBreakevenFloor({ entry, side: sideNorm, market: execMarket });
   const riskPerUnit = Math.abs(entry - sl);
-  const now = Date.now();
   const rec = {
     paperId: item.paperId ?? (isPaperExec ? `PAPER_${sym}_${now}` : null),
     liveOrderId: item.orderId ?? null,

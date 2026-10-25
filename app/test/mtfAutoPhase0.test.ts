@@ -637,3 +637,55 @@ describe('Phase 0 — canonical audit', () => {
     expect(a.riskCaps.dailyLossCapINR).toBe(150);
   });
 });
+
+// ------------------------------------------------------------
+// E) manual LIVE pause honesty — auto engine pause manual click
+//    ko bhi cover karta hai (v21.25.3)
+// ------------------------------------------------------------
+describe('Phase 0 — manual LIVE pause honesty', () => {
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+  it('/api/ai/mtf-dual/live blocks the manual click BEFORE any order work', () => {
+    const src = read('server/ai/routes.js');
+    const start = src.indexOf("app.post('/api/ai/mtf-dual/live'");
+    expect(start).toBeGreaterThan(-1);
+    const nextRoute = src.indexOf('app.post(', start + 10);
+    const route = src.slice(start, nextRoute === -1 ? undefined : nextRoute);
+
+    const pauseAt = route.indexOf('cfg.liveEntryPaused === true');
+    expect(pauseAt).toBeGreaterThan(-1);
+    // guard is the first decision: before symbol/market parsing and the
+    // actual exchange call, so a paused desk can never fire a real order.
+    expect(pauseAt).toBeLessThan(route.indexOf('normMarket(body.market'));
+    expect(route.slice(0, pauseAt)).not.toContain('openMtfBoardLive');
+    expect(route).toContain('res.status(409).json({ ok: false, blocked: true, paused: true');
+    // pause is honest to the caller (reason surfaced, not a silent 500)
+    expect(route).toContain('Phase 0 me PAUSED');
+  });
+
+  it('manual PAPER clicks stay usable while LIVE is paused (separate endpoint)', () => {
+    const src = read('server/ai/routes.js');
+    const paperStart = src.indexOf("app.post('/api/ai/mtf-dual/paper'");
+    const liveStart = src.indexOf("app.post('/api/ai/mtf-dual/live'");
+    expect(paperStart).toBeGreaterThan(-1);
+    expect(liveStart).toBeGreaterThan(paperStart);
+    expect(src.slice(paperStart, liveStart)).not.toContain('liveEntryPaused');
+  });
+
+  it('UI LIVE click aborts locally and the row LIVE button is disabled', () => {
+    const ui = read('src/components/aitrading/MTFDualBoardPanel.tsx');
+    expect(ui).toContain('const liveEntriesPaused = auto?.liveEntryPaused === true;');
+
+    const fnStart = ui.indexOf('const onLiveOrder = useCallback');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnEnd = ui.indexOf('}, [market, mode, holdMin', fnStart);
+    expect(fnEnd).toBeGreaterThan(fnStart);
+    const fn = ui.slice(fnStart, fnEnd);
+    const guardAt = fn.indexOf('if (liveEntriesPaused)');
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(fn.indexOf('openMtfBoardLive'));
+
+    expect(ui).toContain('disabled={liveOrdering === r.symbol || busy || liveEntriesPaused}');
+    expect(ui).toContain('if (status?.liveEntryPaused)');
+  });
+});

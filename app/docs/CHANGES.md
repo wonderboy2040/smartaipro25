@@ -1,5 +1,43 @@
 # Changelog
 
+## v21.25.3 — FULL-SITE DEEP RECHECK: Phase 0 pause honesty + re-anchor money + restart-safe MTF ledger (2026-10-25)
+
+**User ask: "full site ke sabhi features/functions ka deep recheck karo — sabhi working fine hai kya, issues fix kardo."**
+
+Pura site audit hua — data feeds, signal/MTF board, auto-trade engine, paper/LIVE execution, exits/trailing, UI, persistence aur Phase 0 audit. v21.24.0 se v21.25.3 tak ke confirmed defects fix hue; runtime state (`server/data`, positions, journals, bot state) delete NAHI hua.
+
+### 1) Phase 0 — LIVE pause ab manual board click par bhi lagu (v21.25.3)
+- **Root cause**: `liveEntryPaused` sirf auto engine aur UC-flip entries ko rokta tha. MTF board ka manual ⚡ LIVE button pause ke through real-money order bhej deta tha — pause ka matlab hi "naye LIVE entries band" tha, par ek bypass mojood tha.
+- **Fix**: `/api/ai/mtf-dual/live` ab sabse pehle `liveEntryPaused` check karta hai aur `409 {ok:false, blocked:true, paused:true, reason}` return karta hai (symbol/market parse ya exchange call se pehle). UI `onLiveOrder` bhi locally abort karta hai, LIVE button disabled + pause tooltip. Manual PAPER endpoint alag hai — paper forward-testing pause se unaffected.
+- **Regression**: `test/mtfAutoPhase0.test.ts` E-block — route guard ordering + 409 payload + PAPER isolation + UI guard/button lock.
+
+### 2) LIVE re-anchor ka stale money bookkeeping (v21.25.3)
+- **Root cause**: `recordLiveMtfBoardTrade()` naye plan levels (entry/SL/T1/T2/qty) update karta tha, par purane `riskINR`, `notional`, `margin`, `feeBreakevenPrice`, `dayKey`, lifecycle flags aur opposite-mode IDs book row me reh jaate the. Re-anchored trade ka risk/notional/margin actual naye ticket se match nahi karta tha, aur PAPER→LIVE / LIVE→PAPER mode switch par stale `paperId`/`liveOrderId`/`livePositionId` reconcile ko confuse karta tha.
+- **Fix**: re-anchor par saare derived money fields recompute; `t1Hit`, `peakPrice`, `openedAt`, stage/label, `flipEntry`, `flippedFrom`, `t2Extensions`, `bookedPnl`, sync flags aur exchange SL/TP anchors reset; PAPER mode stale live IDs clear karta hai, LIVE mode naya mirror ID set karta hai (ya null); wallet/deployment/buying-power aur manual-vs-auto provenance refresh; LIVE re-anchor `dayCount` + `perSymbolLast` update karta hai. Fee-floor / `dayKey` bhi naye entry se.
+- **Regression**: NAYA `test/mtfAutoReanchor.test.ts` — money fields, mode-ID cleanup, side flip, fee floor, dayKey, provenance, quota.
+
+### 3) MTF row ledger restart-safe + honest Phase 0 audit (v21.25.2)
+- **Root cause**: 30-day MTF Direction Scorecard in-memory `_mtfScanLedger` par chalta tha — restart par poora reset. `phase0Audit.js` jo `mtf-row-ledger.json` padhta hai us file ka koi writer hi nahi tha; 420 legacy rows permanently "unresolved" warning de rahe the.
+- **Fix**: NAYA `server/ai/mtfRowLedgerStore.js` — atomic tmp+rename save (Windows EPERM fallback), boot hydrate, 30s throttled MFE/MAE writes, new-row/resolution force-save. Purani legacy-shape rows `mtf-row-ledger-legacy.json` me archive hoti hain (delete nahi), active ledger clean current-format rows se start hota hai. `signalLedger.js` pure rehta hai; `mtfDualBoard.js` hydrate/save wire karta hai. Dedup ab MARKET+symbol+mode+30m bucket scoped hai (CRYPTO BTC aur FUTURES BTC alag scans). Audit `outcome:'PENDING'` ko unresolved maanta hai; `lastResolveAt` exposed; over-risk denominator actual live wallet.
+- **Regression**: NAYA `test/mtfRowLedgerPersistence.test.ts` — legacy archive, roundtrip/throttle, market-scoped hydrate/dedup, PENDING audit, wallet-aware over-risk.
+
+### 4) Direction certificate + no-silent-side hardening (v21.25.0)
+- Strict `LONG`/`SHORT` vocabulary; missing/unknown side ab silent LONG/SHORT guess nahi karta — order layer loud reject karta hai. MTF board LIVE/PAPER path explicit `signal → order side` certificate ke saath chalta hai; UI par certificate integrity strip (certified/blocked/mismatch) visible hai. `directionLiveCert` version stamp current release par.
+
+### 5) Quota + market-scan honesty (v21.25.1)
+- Manual PAPER board test clicks ab auto engine ka daily quota consume nahi karte; status ka displayed count sirf auto-opened rows count karta hai (session-aware). Full-market scan strip never-empty universe expose karti hai (NEUTRAL/WAIT rows bhi), taaki "koi coin nahi mila" jhootha empty state na aaye.
+
+### 6) Phase 0 foundation (v21.24.0)
+- Live-entry pause existing positions ka deep-monitor/SL management continue rakhta hai. Effective risk caps single source: 1% target / 2% hard cap, 5x max leverage, 25% wallet deploy, 1.5% daily-loss stop — entry sizing aur status same contract. Wallet honesty: caps actual live equity se. Stop-integrity: exchange SL book trail se converge + failed sync retry. Canonical audit board/paper/journal namespaces alag, duplicate signals + LIVE/paper qty-SL reconciliation + over-risk flags. Smart Trail v2 (noise-aware ratchet + rolling TP2).
+
+### Verification (v21.25.3)
+- `npm run typecheck` — 0 errors · `npm run lint` — 0 errors
+- `npm run check:version` — OK 21.25.3 (app + telegram-bot 21.4.0)
+- `npm run check:routes` — PASS (every frontend `/api/` call has a backend route)
+- Change-related targeted run — **14 suites / 291 tests PASS** (Phase 0, re-anchor, ledger persistence, direction certificate/conflict, smart trail, UC-flip, site rechecks, launcher/version, route mount)
+- `npm run build` — PASS · `dist/.build-version = 21.25.3`
+- Full-suite run on this host: external-feed suites (v69-core / cryptoAgent / council / llmValidator / directionProof + Groww-Dhan/exchange quote tests) network timeout se fail hote hain; touched modules ke tests isolated pass hain. Runtime data untouched.
+
 ## v21.23.9 — FULL-SITE DEEP RECHECK: CRITICAL SHORT-inversion + 8 aur audit fixes (2026-10-20)
 
 **User ask: "V21.23.8 latest full site code ko deep sabhi features and functions working flow deep recheck karo sabhi working fine hai kya and issues fix kardo"**

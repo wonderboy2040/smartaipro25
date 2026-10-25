@@ -428,6 +428,10 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
 
   /** ⚡ LIVE ORDER — places real CoinDCX Futures order directly for this MTF Dual Board card using .env keys (100% wallet + wallet-tier leverage). */
   const onLiveOrder = useCallback(async (row: MtfDualRow) => {
+    if (liveEntriesPaused) {
+      notify(false, '⏸ LIVE entries Phase 0 me PAUSED hain — pehle "RESUME ENTRIES" dabao. Existing positions ka SL management chalu hai.');
+      return;
+    }
     if (row.side !== 'LONG' && row.side !== 'SHORT') {
       notify(false, `${row.symbol}: directional signal (LONG/SHORT) required`);
       return;
@@ -465,7 +469,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     } else {
       notify(false, `${row.symbol} LIVE order failed: ${r?.error || r?.reason || 'check CoinDCX/Dhan wallet/margin'}`);
     }
-  }, [market, mode, holdMin, activeLeverage, walletDeployPct, deployed95WalletINR, activeLiveRows, notify, onExecuteLive, onPaperOpened, loadAuto]);
+  }, [market, mode, holdMin, activeLeverage, walletDeployPct, deployed95WalletINR, activeLiveRows, liveEntriesPaused, notify, onExecuteLive, onPaperOpened, loadAuto]);
 
   /** ⚡ SINGLE LIVE BUTTON — turns ON Auto-Trade Intelligence, fetches CoinDCX Wallet, deploys 100% of it on strictly 1 Verified Strong Trade per session, and takes Full Control! */
   const onAutoLiveExecute = useCallback(async () => {
@@ -1363,8 +1367,10 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                     {canLive && rowLiveReady && (
                       <button
                         onClick={() => void onLiveOrder(r)}
-                        disabled={liveOrdering === r.symbol || busy}
-                        title={`Place real CoinDCX Futures ${r.side} order (${activeLeverage}x leverage — Wallet ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')}) — sirf direction-verified, non-counter-HTF setups`}
+                        disabled={liveOrdering === r.symbol || busy || liveEntriesPaused}
+                        title={liveEntriesPaused
+                          ? 'LIVE entries Phase 0 me PAUSED hain — pehle RESUME ENTRIES dabao'
+                          : `Place real CoinDCX Futures ${r.side} order (${activeLeverage}x leverage — Wallet ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')}) — sirf direction-verified, non-counter-HTF setups`}
                         className="px-1.5 py-0.5 rounded text-[9px] font-black border border-amber-500/60 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25 disabled:opacity-40">
                         {liveOrdering === r.symbol ? '…' : `⚡ LIVE ${activeLeverage}x`}
                       </button>

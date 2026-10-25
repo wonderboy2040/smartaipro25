@@ -33,6 +33,7 @@ const CACHE_MS = 30_000;
 let _cache = null;
 let _cacheAt = 0;
 let _cacheDir = null;
+let _cacheWallet = null;
 
 const num = (v) => {
   const n = Number(v);
@@ -52,6 +53,16 @@ function _readList(name, key) {
   const raw = _readJson(name, null);
   if (Array.isArray(raw)) return raw;
   return Array.isArray(raw?.[key]) ? raw[key] : [];
+}
+
+/** v21.25.2: signalLedger pending rows `outcome:'PENDING'` rakhte hain —
+ *  `outcome != null` unhe resolved gin leta tha. PENDING/empty ko
+ *  unresolved hi maano; resolvedAt/resolved flag authoritative hai. */
+function _ledgerRowResolved(row) {
+  if (!row || typeof row !== 'object') return false;
+  if (row.resolved === true || Number(row.resolvedAt) > 0) return true;
+  const outcome = String(row.outcome ?? '').trim().toUpperCase();
+  return Boolean(outcome && outcome !== 'PENDING');
 }
 
 const CLOSED_SIGNAL_STATUSES = new Set(['EOD_EXIT', 'T2_HIT', 'BE_TRAIL_EXIT', 'SL_HIT', 'FLIP']);
@@ -83,19 +94,30 @@ function _rMultipleForTrade(trade) {
  * Build the canonical audit. `fresh:true` bypasses the 30s cache (detail
  * endpoint / tests); status polls ride the cache.
  */
-export function buildPhase0Audit({ fresh = false, now = Date.now() } = {}) {
+export function buildPhase0Audit({ fresh = false, now = Date.now(), walletINR = null } = {}) {
   const dir = _dataDir();
-  if (!fresh && _cache && _cacheDir === dir && now - _cacheAt < CACHE_MS) return _cache;
+  const cfg = (() => { try { return loadMtfAutoConfig(); } catch { return null; } })();
+  // v21.25.2 WALLET HONESTY: status/entry sizing actual live equity se
+  // chalti hai — audit ka riskCaps/over-risk check bhi wahi wallet use kare.
+  // Caller wallet na de to configured wallet fallback (paper/offline).
+  const auditWalletINR = Number(walletINR) > 0
+    ? Number(walletINR)
+    : (Number(cfg?.walletAmountINR) > 0 ? Number(cfg.walletAmountINR) : 10000);
+  if (!fresh && _cache && _cacheDir === dir && _cacheWallet === auditWalletINR
+    && now - _cacheAt < CACHE_MS) return _cache;
 
   const signals = _readList('tracked-signals.json', 'signals');
   const paperTrades = _readList('paper-trades.json', 'trades');
   const journal = _readList('ai-trading-journal.json', 'entries');
-  const rowLedger = _readList('mtf-row-ledger.json', 'rows');
+  const rowLedgerRaw = _readJson('mtf-row-ledger.json', null);
+  const rowLedger = Array.isArray(rowLedgerRaw)
+    ? rowLedgerRaw
+    : (Array.isArray(rowLedgerRaw?.rows) ? rowLedgerRaw.rows : []);
+  const rowLedgerLastResolveAt = num(rowLedgerRaw?.lastResolveAt);
   const learning = _readList('selfimprove-outcomes.json', 'rows');
   const autoState = _readJson('mtf-auto-state.json', {});
-  const cfg = (() => { try { return loadMtfAutoConfig(); } catch { return null; } })();
   const riskCaps = cfg
-    ? computeEffectiveRiskCaps(cfg, cfg.walletAmountINR)
+    ? computeEffectiveRiskCaps(cfg, auditWalletINR)
     : null;
 
   // ---------------- board signals ----------------
@@ -241,7 +263,7 @@ export function buildPhase0Audit({ fresh = false, now = Date.now() } = {}) {
   };
 
   // ---------------- row-ledger / learning-loop coverage ----------------
-  const ledgerResolved = rowLedger.filter(r => r?.outcome != null || r?.resolvedAt != null);
+  const ledgerResolved = rowLedger.filter(_ledgerRowResolved);
   const ledgerUnresolved = rowLedger.length - ledgerResolved.length;
   const learningWins = learning.filter(r => r?.win === true || (num(r?.r) || 0) > 0).length;
   const learningR = learning.map(r => num(r?.r)).filter(v => v != null);
@@ -286,7 +308,12 @@ export function buildPhase0Audit({ fresh = false, now = Date.now() } = {}) {
         stopViolations.push({ symbol: b.symbol, reason: 'SHORT stop trailed ABOVE initial SL', initialSl, currentSl });
       }
     }
-    const wallet = num(b.walletINR);
+    // v21.25.2 WALLET HONESTY: denominator actual live equity hai (wahi
+    // jo riskCaps banata hai). Entry-time `b.walletINR` use karne se wallet
+    // girne par bhi position "safe" dikhti thi aur over-risk warning
+    // kabhi fire nahi hoti thi. Entry wallet context ke liye alag report.
+    const wallet = auditWalletINR;
+    const positionWallet = num(b.walletINR);
     const risk = num(b.riskINR);
     const hardPct = riskCaps?.maxRiskPerTradePct || 2;
     if (wallet > 0 && risk != null && (risk / wallet) * 100 > hardPct + 1e-9) {
@@ -294,6 +321,7 @@ export function buildPhase0Audit({ fresh = false, now = Date.now() } = {}) {
         symbol: b.symbol,
         riskINR: round2(risk),
         walletINR: round2(wallet),
+        positionWalletINR: positionWallet == null ? null : round2(positionWallet),
         riskPct: round2((risk / wallet) * 100),
         capPct: hardPct,
       });
@@ -389,6 +417,7 @@ export function buildPhase0Audit({ fresh = false, now = Date.now() } = {}) {
         resolved: ledgerResolved.length,
         unresolved: ledgerUnresolved,
         resolvedPct: rowLedger.length ? round2((ledgerResolved.length / rowLedger.length) * 100) : null,
+        lastResolveAt: rowLedgerLastResolveAt,
       },
       learning: learningStats,
     },
@@ -440,6 +469,7 @@ export function buildPhase0Audit({ fresh = false, now = Date.now() } = {}) {
   _cache = out;
   _cacheAt = now;
   _cacheDir = dir;
+  _cacheWallet = auditWalletINR;
   return out;
 }
 
@@ -478,4 +508,5 @@ export function __resetPhase0AuditCacheForTests() {
   _cache = null;
   _cacheAt = 0;
   _cacheDir = null;
+  _cacheWallet = null;
 }

@@ -1185,6 +1185,15 @@ export function registerAITradingRoutes(app, deps) {
     try {
       const body = req.body || {};
       const cfg = loadMtfAutoConfig();
+      // v21.25.3 [PHASE-0 PAUSE HONESTY]: pause ka matlab "naye LIVE/UC-flip
+      // entries band" hai — manual board ka ⚡ LIVE button bhi naya real-money
+      // entry hai. Pehle sirf auto engine pause respect karta tha, manual
+      // click pause ke through real order bhej deta tha. PAPER test clicks
+      // is guard se affect nahi hote (alag endpoint).
+      if (cfg.liveEntryPaused === true) {
+        const pauseMsg = 'LIVE entries Phase 0 me PAUSED hain — naye manual/auto LIVE orders band. Existing positions ka SL/deep-monitor management chalu hai. Resume entries karke retry karo.';
+        return res.status(409).json({ ok: false, blocked: true, paused: true, error: pauseMsg, reason: pauseMsg });
+      }
       const market = normMarket(body.market || 'CRYPTO');
       const symbol = String(body.symbol || '').toUpperCase().trim();
       const mode = String(body.mode || cfg.mode || 'INTRADAY').toUpperCase();
@@ -1662,14 +1671,30 @@ export function registerAITradingRoutes(app, deps) {
     return _statusSyncP;
   }
 
+  // v21.25.2 PHASE 0 WALLET HONESTY: audit detail bhi wahi actual live
+  // equity use kare jo status/entry sizing use karte hain. Creds na hon
+  // to null → phase0Audit configured wallet par fallback karta hai.
+  async function resolveMtfAuditWalletINR(cfg) {
+    if (!loadCredsForOrder()) return null;
+    try {
+      const liveCtx = await mtfAutoLiveCtx(cfg);
+      const w = Number(liveCtx?.walletEquityINR);
+      return w > 0 ? w : null;
+    } catch {
+      return null;
+    }
+  }
+
   // v21.24.0 PHASE 0 — full canonical audit (closed outcomes + stop integrity
   // + duplicate/manual-exit/reconciliation checks). `?fresh=1` bypasses the
   // 30s cache; normal dashboard polls ride the cache via /status.phase0.
-  app.get('/api/ai/mtf-auto/phase0', (req, res) => {
+  app.get('/api/ai/mtf-auto/phase0', async (req, res) => {
     try {
       const fresh = String(req.query?.fresh || '') === '1';
+      const cfg = loadMtfAutoConfig();
+      const walletINR = await resolveMtfAuditWalletINR(cfg);
       res.set('Cache-Control', 'no-store');
-      res.json(buildPhase0Audit({ fresh }));
+      res.json(buildPhase0Audit({ fresh, walletINR }));
     } catch (e) {
       jsonError(res, 500, 'phase0 audit failed', e);
     }
@@ -1713,7 +1738,9 @@ export function registerAITradingRoutes(app, deps) {
         ...st,
         // v21.24.0 PHASE 0 — lightweight audit summary (30s cache; heavy
         // detail /api/ai/mtf-auto/phase0 se milta hai).
-        phase0: getPhase0Summary(),
+        // v21.25.2: actual live wallet pass — riskCaps/over-risk warning
+        // status ke effectiveWalletINR se match karta hai.
+        phase0: getPhase0Summary({ walletINR: liveWalletINR }),
         siteLiveActive: ready.siteLiveActive,
         siteLiveByDesk: ready.siteLiveByDesk,
         deskReady: ready.deskReady,

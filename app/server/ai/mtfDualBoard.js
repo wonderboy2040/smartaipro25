@@ -54,7 +54,29 @@ import { resolveDirection, checkDirectionLock } from './directionLock.js';
 import {
   buildDirectionCertificate, normalizeSide, summarizeBoardDirectionIntegrity,
 } from './directionCertificate.js';
-import { recordMtfBoardScanRow, resolveMtfBoardScanOutcomes, computeMtfDirectionScorecard } from './signalLedger.js';
+import {
+  recordMtfBoardScanRow, resolveMtfBoardScanOutcomes, computeMtfDirectionScorecard,
+  hydrateMtfLedger, getMtfLedgerSnapshot,
+} from './signalLedger.js';
+import { loadMtfRowLedger, saveMtfRowLedger } from './mtfRowLedgerStore.js';
+
+// v21.25.2: 30-day MTF scorecard restart-safe. Pehle ledger sirf memory me
+// tha — server restart par 30d calibration zero ho jati thi aur phase0 audit
+// ka `mtf-row-ledger.json` permanently stale rehta tha.
+let _mtfLedgerHydrated = false;
+function ensureMtfLedgerHydrated() {
+  if (_mtfLedgerHydrated) return;
+  _mtfLedgerHydrated = true;
+  try {
+    const saved = loadMtfRowLedger();
+    hydrateMtfLedger(saved.rows, {
+      lastLogAt: saved.lastLogAt,
+      lastResolveAt: saved.lastResolveAt,
+    });
+  } catch { /* read-only / corrupt file — memory-only mode */ }
+}
+/** Test hook — next board build re-reads the persisted ledger. */
+export function __resetMtfLedgerHydrationForTests() { _mtfLedgerHydrated = false; }
 
 /** v21.18.0 USER SPEC: sirf 2 dual-timeframe modes on the integrated board:
  *   • INTRADAY : 15m deep (context) + 5m action (trigger)
@@ -828,6 +850,7 @@ export function buildEarlyRadar(rows, limit = 3) {
 }
 
 export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', holdMin = null, boardSigs = [], minScore = 75, limit = TOP_DEEP_TREND_LIMIT, fx = null, fresh = false, force = false, candlesFor = null } = {}) {
+  ensureMtfLedgerHydrated();
   const rawMkt = String(market || 'INDIA').toUpperCase();
   const mkt = rawMkt === 'EQUITY_SIM' ? 'GLOBALFUTURES' : rawMkt;
   const modeId = DUAL_BOARD_MODES.includes(String(mode || 'INTRADAY').toUpperCase()) ? String(mode || 'INTRADAY').toUpperCase() : 'INTRADAY';
@@ -990,10 +1013,19 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
   for (const [s, px] of livePriceBySym.entries()) {
     if (px > 0) scanQuoteMap[s] = px;
   }
-  resolveMtfBoardScanOutcomes({ quotes: scanQuoteMap, now });
+  const ledgerBeforeIds = new Set(getMtfLedgerSnapshot().rows.map(r => r.id));
+  const resolveRes = resolveMtfBoardScanOutcomes({ quotes: scanQuoteMap, now });
+  let addedRows = 0;
   for (const r of trimmed.slice(0, TOP_DEEP_TREND_LIMIT)) {
-    recordMtfBoardScanRow(r, { now });
+    const rec = recordMtfBoardScanRow(r, { now });
+    if (rec && !ledgerBeforeIds.has(rec.id)) addedRows += 1;
   }
+  // v21.25.2: naya row ya resolution turant persist; MFE/MAE updates
+  // store ke 30s throttle par. Read-only FS par best-effort no-op.
+  saveMtfRowLedger(getMtfLedgerSnapshot(), {
+    force: addedRows > 0 || resolveRes.resolvedNow > 0,
+    now,
+  });
   const directionScorecard = computeMtfDirectionScorecard({ windowDays: 30, now });
   // v21.25.0: explicit LONG→BUY / SHORT→SELL integrity strip for the whole board.
   const directionIntegrity = summarizeBoardDirectionIntegrity([

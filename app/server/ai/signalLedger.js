@@ -221,11 +221,20 @@ export function purgedWalkForwardSplit(trades, { folds = 4, embargoMs = 5 * 6000
 // Phase 3 — Ledger-Based MTF Direction Scorecard (30d rolling)
 // ------------------------------------------------------------
 const _mtfScanLedger = [];
-const _mtfScanDedup = new Map(); // `${sym}:${mode}:${bucket30m}` -> id
+const _mtfScanDedup = new Map(); // `${market}:${sym}:${mode}:${bucket30m}` -> id
 const MTF_SCAN_MAX = 1500;
 const DEDUP_BUCKET_MS = 30 * 60_000; // 30 minutes
+// Persistence metadata — mtfRowLedgerStore inhe file me likhta hai.
+let _lastLogAt = null;
+let _lastResolveAt = null;
 
 const _r2 = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 100) / 100 : null);
+// v21.25.2: market bhi key me — CRYPTO BTC aur FUTURES BTC same 30m
+// bucket me ek doosre ko dedup NAHI kar sakte (pehle sirf symbol+mode tha).
+const _mtfDedupKey = (market, symbol, mode, ts) => (
+  `${String(market || 'CRYPTO').toUpperCase()}:${String(symbol || '').toUpperCase()}:`
+  + `${String(mode || 'INTRADAY').toUpperCase()}:${Math.floor((Number(ts) || 0) / DEDUP_BUCKET_MS)}`
+);
 
 /**
  * 3.1 Log every MTF Dual Board top-6 row into the MTF scan ledger
@@ -243,18 +252,24 @@ export function recordMtfBoardScanRow(row, { now = Date.now() } = {}) {
   if (!(entry > 0) || !(stopLoss > 0) || !(t1 > 0)) return null;
 
   const mode = String(row.mode || 'INTRADAY').toUpperCase();
-  const bucket = Math.floor((Number(now) || Date.now()) / DEDUP_BUCKET_MS);
-  const dedupKey = `${symbol}:${mode}:${bucket}`;
+  const market = String(row.market || 'CRYPTO').toUpperCase();
+  const ts = Number(now) || Date.now();
+  const dedupKey = _mtfDedupKey(market, symbol, mode, ts);
   if (_mtfScanDedup.has(dedupKey)) {
     const existingId = _mtfScanDedup.get(dedupKey);
-    return _mtfScanLedger.find((e) => e.id === existingId) || null;
+    const existing = _mtfScanLedger.find((e) => e.id === existingId);
+    if (existing) return existing;
+    // v21.25.2: row cap ne purani entry trim kar di — stale dedup id
+    // ko clear karke naya record banao (pehle null return hota tha aur
+    // bucket permanently "recorded" dikhta tha).
+    _mtfScanDedup.delete(dedupKey);
   }
 
   const risk = Math.max(entry * 0.001, Math.abs(entry - stopLoss));
   const rec = {
-    id: `mtf-${symbol}-${mode}-${now}-${Math.random().toString(36).slice(2, 7)}`,
+    id: `mtf-${symbol}-${mode}-${ts}-${Math.random().toString(36).slice(2, 7)}`,
     symbol,
-    market: String(row.market || 'CRYPTO').toUpperCase(),
+    market,
     mode,
     side,
     boardSide: row.boardSide ?? row.signals?.board?.side ?? null,
@@ -270,7 +285,7 @@ export function recordMtfBoardScanRow(row, { now = Date.now() } = {}) {
     t2: t2 > 0 ? t2 : t1,
     risk,
     holdMin: Number(row.holdMin) || (mode === 'SWING' ? 240 : 60),
-    ts: Number(now) || Date.now(),
+    ts,
     peakFavPrice: entry,
     peakAdvPrice: entry,
     mfeR: 0,
@@ -283,8 +298,12 @@ export function recordMtfBoardScanRow(row, { now = Date.now() } = {}) {
   };
   _mtfScanLedger.push(rec);
   _mtfScanDedup.set(dedupKey, rec.id);
+  _lastLogAt = ts;
   while (_mtfScanLedger.length > MTF_SCAN_MAX) {
-    _mtfScanLedger.shift();
+    const dropped = _mtfScanLedger.shift();
+    if (dropped) {
+      _mtfScanDedup.delete(_mtfDedupKey(dropped.market, dropped.symbol, dropped.mode, dropped.ts));
+    }
   }
   return rec;
 }
@@ -367,6 +386,7 @@ export function resolveMtfBoardScanOutcomes({ quotes = {}, candlesBySymbol = {},
       resolvedNow++;
     }
   }
+  if (resolvedNow > 0) _lastResolveAt = Number(now) || Date.now();
   return { updated, resolvedNow, total: _mtfScanLedger.length };
 }
 
@@ -426,7 +446,82 @@ export function computeMtfDirectionScorecard({ windowDays = 30, now = Date.now()
   };
 }
 
+/**
+ * 3.4 Hydrate the in-memory ledger from persisted rows (server boot).
+ * Current-format rows only — legacy-shape rows are archived by
+ * mtfRowLedgerStore. Dedup map is rebuilt so a 30m bucket cannot be
+ * double-counted after restart.
+ */
+export function hydrateMtfLedger(rows = [], { lastLogAt = null, lastResolveAt = null } = {}) {
+  _mtfScanLedger.length = 0;
+  _mtfScanDedup.clear();
+  const byKey = new Map();
+  for (const raw of (Array.isArray(rows) ? rows : [])) {
+    if (!raw || typeof raw !== 'object') continue;
+    const symbol = String(raw.symbol || '').toUpperCase().trim();
+    const side = String(raw.side || '').toUpperCase();
+    const entry = Number(raw.entry);
+    const stopLoss = Number(raw.stopLoss);
+    const t1 = Number(raw.t1);
+    const ts = Number(raw.ts);
+    if (!symbol || (side !== 'LONG' && side !== 'SHORT')) continue;
+    if (!(entry > 0) || !(stopLoss > 0) || !(t1 > 0) || !(ts > 0)) continue;
+    const mode = String(raw.mode || 'INTRADAY').toUpperCase();
+    const market = String(raw.market || 'CRYPTO').toUpperCase();
+    const rec = {
+      id: String(raw.id || `mtf-${symbol}-${mode}-${ts}`),
+      symbol,
+      market,
+      mode,
+      side,
+      boardSide: raw.boardSide ?? null,
+      boardSideConflict: raw.boardSideConflict === true,
+      svaConflict: raw.svaConflict === true,
+      councilConflict: raw.councilConflict === true,
+      directionVerified: raw.directionVerified === true,
+      superScore: Number(raw.superScore) || 0,
+      tier: raw.tier || null,
+      entry,
+      stopLoss,
+      t1,
+      t2: Number(raw.t2) > 0 ? Number(raw.t2) : t1,
+      risk: Number(raw.risk) > 0 ? Number(raw.risk) : Math.max(entry * 0.001, Math.abs(entry - stopLoss)),
+      holdMin: Number(raw.holdMin) || (mode === 'SWING' ? 240 : 60),
+      ts,
+      peakFavPrice: Number(raw.peakFavPrice) > 0 ? Number(raw.peakFavPrice) : entry,
+      peakAdvPrice: Number(raw.peakAdvPrice) > 0 ? Number(raw.peakAdvPrice) : entry,
+      mfeR: Number(raw.mfeR) || 0,
+      maeR: Number(raw.maeR) || 0,
+      resolved: raw.resolved === true,
+      resolvedAt: Number(raw.resolvedAt) > 0 ? Number(raw.resolvedAt) : null,
+      outcome: raw.outcome ?? 'PENDING',
+      outcomeR: Number.isFinite(Number(raw.outcomeR)) ? Number(raw.outcomeR) : null,
+      directionHit: typeof raw.directionHit === 'boolean' ? raw.directionHit : null,
+    };
+    const key = _mtfDedupKey(rec.market, rec.symbol, rec.mode, rec.ts);
+    const prev = byKey.get(key);
+    if (!prev || rec.ts >= prev.ts) byKey.set(key, rec);
+  }
+  _mtfScanLedger.push(...[...byKey.values()].sort((a, b) => a.ts - b.ts));
+  while (_mtfScanLedger.length > MTF_SCAN_MAX) _mtfScanLedger.shift();
+  for (const rec of _mtfScanLedger) {
+    _mtfScanDedup.set(_mtfDedupKey(rec.market, rec.symbol, rec.mode, rec.ts), rec.id);
+  }
+  const maxTs = _mtfScanLedger.reduce((a, r) => Math.max(a, Number(r.ts) || 0), 0) || null;
+  const maxResolvedAt = _mtfScanLedger.reduce((a, r) => Math.max(a, Number(r.resolvedAt) || 0), 0) || null;
+  _lastLogAt = Number(lastLogAt) > 0 ? Number(lastLogAt) : maxTs;
+  _lastResolveAt = Number(lastResolveAt) > 0 ? Number(lastResolveAt) : maxResolvedAt;
+  return { total: _mtfScanLedger.length, lastLogAt: _lastLogAt, lastResolveAt: _lastResolveAt };
+}
+
+/** Read-only snapshot for the persistence layer. */
+export function getMtfLedgerSnapshot() {
+  return { rows: _mtfScanLedger, lastLogAt: _lastLogAt, lastResolveAt: _lastResolveAt };
+}
+
 export function __resetMtfLedgerForTests() {
   _mtfScanLedger.length = 0;
   _mtfScanDedup.clear();
+  _lastLogAt = null;
+  _lastResolveAt = null;
 }
