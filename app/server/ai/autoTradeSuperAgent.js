@@ -259,15 +259,20 @@ function _syncRegistry() {
     REGISTRY.delete(key);
     // The row already carries the agent's own IDLE reason when the agent
     // closed it; external closes (paper SL/TP2, exchange sync) get stamped
-    // too so the UI never shows a ghost "MONITORING" state.
+    // too so the UI never shows a ghost "MONITORING" state. Prefer the closed
+    // row's REAL closeReason over the last trail action (v21.26.1).
+    let bookCloseReason = null;
+    try { bookCloseReason = _deps?.getCloseReason?.(entry.symbol, entry.market) || null; }
+    catch { /* non-fatal */ }
+    const idleReason = bookCloseReason || entry.idleReason || entry.lastAction || 'TRADE_CLOSED';
     try {
       markAutoTradeSuperAgentIdle({
         symbol: entry.symbol,
         market: entry.market,
-        reason: entry.idleReason || entry.lastAction || 'TRADE_CLOSED',
+        reason: idleReason,
       });
     } catch { /* non-fatal */ }
-    _pushIdle(entry);
+    _pushIdle(entry, idleReason);
   }
   // Warm the fallback caches (quotes / fx / live handlers) in the same turn a
   // trade is armed. A brand-new AUTO entry must not wait for the 1s watchdog

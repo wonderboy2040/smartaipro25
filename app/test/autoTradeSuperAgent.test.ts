@@ -28,7 +28,8 @@ process.env.MTF_AUTO_DATA_DIR = TMP_DATA;
 
 import {
   mtfAutoSuperAgentManage, __resetMtfAutoForTests, mtfAutoStatus,
-  getAutoTradeSuperAgentOpenTrades,
+  getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason,
+  syncCoinDcxActivePositionsToDeepMonitor,
 } from '../server/ai/mtfAutoLink.js';
 import {
   startAutoTradeSuperAgent, refreshAutoTradeSuperAgent,
@@ -414,5 +415,53 @@ describe('v21.26.0 S8 — real paper engine TP1 partial', () => {
     expect(res.trade.t1Hit).toBe(true);
     expect(res.trade.remainingQty).toBe(1);
     expect(res.trade.stopLoss).toBe(res.trade.entry);
+  });
+});
+
+describe('v21.26.1 S10 — external exchange close IDLE telemetry', () => {
+  afterEach(() => { __resetAutoTradeSuperAgentForTests(); __resetMtfAutoForTests(); });
+
+  it('stamps EXCHANGE_POSITION_CLOSED and never reports a stale trail action as the IDLE reason', async () => {
+    seed({
+      executionMode: 'LIVE',
+      liveOrderId: 'live-order-1',
+      livePositionId: 'live-pos-1',
+      openedAt: NOW - 5 * 60_000,
+      superAgentState: 'MONITORING',
+      superAgentIdleReason: null,
+    });
+    const { paper } = fakePaper();
+    startAutoTradeSuperAgent({
+      getOpenTrades: getAutoTradeSuperAgentOpenTrades,
+      getCloseReason: getAutoTradeSuperAgentCloseReason,
+      getQuoteFor: () => null,
+      getBoardRow: () => null,
+      getQuotes: () => ({}),
+      getFx: async () => 102,
+      getLiveCtx: async () => ({}),
+      isKillSwitch: () => false,
+      ensureSubs: vi.fn(),
+      releaseSubs: vi.fn(),
+      clientUp: vi.fn(),
+      clientDown: vi.fn(),
+      paper,
+      notify: async () => {},
+    });
+    expect(autoTradeSuperAgentStatus().trades).toHaveLength(1);
+
+    syncCoinDcxActivePositionsToDeepMonitor([], {
+      now: Date.now(),
+      authoritativeExchangeList: true,
+      flatConfirmedSyms: ['BTC'],
+    });
+    const closedRow = mtfAutoStatus().book.find((b: any) => b.symbol === 'BTC' && b.status === 'CLOSED');
+    expect(closedRow?.closeReason).toBe('EXCHANGE_POSITION_CLOSED');
+    expect(closedRow?.superAgentState).toBe('IDLE');
+    expect(closedRow?.superAgentIdleReason).toBe('EXCHANGE_POSITION_CLOSED');
+
+    refreshAutoTradeSuperAgent();
+    const st = autoTradeSuperAgentStatus();
+    expect(st.trades).toHaveLength(0);
+    expect(st.idle[0]?.reason).toBe('EXCHANGE_POSITION_CLOSED');
   });
 });

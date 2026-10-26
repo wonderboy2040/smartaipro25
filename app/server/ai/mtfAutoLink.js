@@ -1591,6 +1591,13 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
         b.status = 'CLOSED';
         b.closeReason = 'EXCHANGE_POSITION_CLOSED';
         b.closedAt = now;
+        // v21.26.1: an exchange-side close never passes through
+        // mtfAutoSuperAgentManage(), so stamp the agent lifecycle here. The
+        // tick router must not fall back to a stale trail action (SL_TRAILED)
+        // as the IDLE reason while the book row says EXCHANGE_POSITION_CLOSED.
+        b.superAgentState = 'IDLE';
+        b.superAgentIdleReason = 'EXCHANGE_POSITION_CLOSED';
+        b.superAgentIdleAt = now;
         changed = true;
       }
     }
@@ -3846,14 +3853,12 @@ export function getAutoTradeSuperAgentOpenTrades() {
 }
 
 /**
- * Called by the tick router when a trade disappears from the open book. Stamps
- * the CLOSED row so the UI/API can show "agent returned to IDLE" even when the
- * close came from the paper engine / exchange sync (not from the agent itself).
+ * Latest CLOSED row for a symbol/market. Shared by the IDLE stamp and the tick
+ * router's close-reason lookup.
  */
-export function markAutoTradeSuperAgentIdle({ symbol, market = null, reason = 'TRADE_CLOSED', state = 'IDLE', at = Date.now() } = {}) {
+function _latestClosedBookRow(st, symbol, market = null) {
   const sym = String(symbol || '').toUpperCase();
-  if (!sym) return false;
-  const st = _loadState();
+  if (!sym) return null;
   let target = null;
   for (const b of st.book) {
     if (!b || String(b.symbol || '').toUpperCase() !== sym) continue;
@@ -3861,10 +3866,35 @@ export function markAutoTradeSuperAgentIdle({ symbol, market = null, reason = 'T
     if (b.status !== 'CLOSED') continue;
     if (!target || Number(b.closedAt || b.openedAt || 0) >= Number(target.closedAt || target.openedAt || 0)) target = b;
   }
+  return target;
+}
+
+/**
+ * v21.26.1: the tick router's IDLE telemetry needs the REAL close reason for
+ * closes that happened outside mtfAutoSuperAgentManage (exchange SL/TP fill,
+ * manual close). Without this, `lastAction` (often SL_TRAILED) was logged as
+ * the reason while the book row correctly said EXCHANGE_POSITION_CLOSED.
+ */
+export function getAutoTradeSuperAgentCloseReason(symbol, market = null) {
+  const target = _latestClosedBookRow(_loadState(), symbol, market);
+  if (!target) return null;
+  return target.closeReason || target.superAgentIdleReason || null;
+}
+
+/**
+ * Called by the tick router when a trade disappears from the open book. Stamps
+ * the CLOSED row so the UI/API can show "agent returned to IDLE" even when the
+ * close came from the paper engine / exchange sync (not from the agent itself).
+ */
+export function markAutoTradeSuperAgentIdle({ symbol, market = null, reason = 'TRADE_CLOSED', state = 'IDLE', at = Date.now() } = {}) {
+  const target = _latestClosedBookRow(_loadState(), symbol, market);
   if (!target) return false;
-  if (target.superAgentState === state && target.superAgentIdleReason === reason) return true;
+  // Never clobber a precise reason already stamped by the close path
+  // (e.g. EXCHANGE_POSITION_CLOSED) with the router's generic fallback.
+  const nextReason = target.superAgentIdleReason || reason;
+  if (target.superAgentState === state && target.superAgentIdleReason === nextReason) return true;
   target.superAgentState = state;
-  target.superAgentIdleReason = reason;
+  target.superAgentIdleReason = nextReason;
   target.superAgentIdleAt = Number(at) || Date.now();
   _superAgentPersist(true);
   return true;

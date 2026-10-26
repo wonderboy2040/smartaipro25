@@ -218,7 +218,7 @@ import { dhanConnect, dhanDisconnect, dhanConnected, dhanProfile, scripMasterSta
 import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 // v21.16.0 + v21.20.0 MTF SIGNALS BOARD (Dual-Timeframe) + AUTO-LINK engine
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, mtfProEntryGate, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
-import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, getAutoTradeSuperAgentOpenTrades } from './mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason } from './mtfAutoLink.js';
 // v21.26.0 AI SUPER INTELLIGENCE — per-trade tick agent. Owns only routing /
 // registry / stream holds; every trade decision is mtfAutoLink's
 // mtfAutoSuperAgentManage (same gates as the 15s/60s sweeps).
@@ -4123,6 +4123,7 @@ export function registerAITradingRoutes(app, deps) {
   // ------------------------------------------------------------
   startAutoTradeSuperAgent({
     getOpenTrades: getAutoTradeSuperAgentOpenTrades,
+    getCloseReason: getAutoTradeSuperAgentCloseReason,
     getQuoteFor: superAgentQuoteFor,
     getBoardRow: superAgentBoardRow,
     getQuotes: () => (getLatestQuotes()?.data || {}),
