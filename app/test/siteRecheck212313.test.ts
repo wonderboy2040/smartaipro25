@@ -87,12 +87,27 @@ describe('v21.23.13 T1 — neutral-tape freshTapeAbsent cure', () => {
 // ============================================================
 // T2 — ENGINE-vs-UI BOARDSIGS PARITY (crypto desk)
 // ============================================================
-describe('v21.23.13 T2 — engine boardSigs parity (CRYPTO→FUTURES like UI route)', () => {
-  it('all 5 CRYPTO-desk boardSigs sites use the UI-route mapping (UI + 60s sweep + 15s deep tick + /run + preview)', () => {
+describe('v21.23.13 T2 — engine boardSigs parity (canonical CRYPTO desk merge)', () => {
+  it('all board-building sites use the canonical FUTURES + METALS + GLOBALFUTURES merge', () => {
     const src = read('server/ai/routes.js');
-    // v21.23.15 [A6]: /mtf-auto/preview is the 5th site — a raw-CRYPTO
-    // preview disagreed with the FUTURES board the engine actually trades.
-    expect((src.match(/getSignals\(market === 'CRYPTO' \? 'FUTURES' : market/g) || []).length).toBe(5);
+    // v21.25.3 [BOARD-SIGNAL COMPLETENESS]: single helper owns the desk
+    // universe. FEEDING ONLY FUTURES LEFT XAU/XAG (METALS) + NVDA/TSLA
+    // (GLOBALFUTURES) WITHOUT THEIR MAIN-AI SIGNAL → ensembleSignalAvailable
+    // false → ELITE rows bhi auto-reject hote the.
+    expect(src.includes('const boardSignalsForDesk = async (market, deps = depsForSignals())')).toBe(true);
+    expect(src).toMatch(/CRYPTO: \['FUTURES', 'METALS', 'GLOBALFUTURES'\]/);
+    expect(src).toMatch(/FUTURES: \['FUTURES', 'METALS', 'GLOBALFUTURES'\]/);
+    // UI + preview + /run + 60s sweep + 15s deep tick + recheck fallback
+    // (CRYPTO + INDIA) = 7 board calls, plus mainSignalForEntry's merged fallback.
+    expect((src.match(/await boardSignalsForDesk\(/g) || []).length).toBe(8);
+    expect(src).toContain("boardSigs: await boardSignalsForDesk('CRYPTO', deps)");
+    expect(src).toContain("boardSigs: await boardSignalsForDesk('INDIA', deps)");
+    // manual/main entry fallback uses the same merge (XAG/XAU + NVDA/TSLA
+    // requests received on the CRYPTO/FUTURES desk still get their ensemble)
+    expect(src).toContain('return findIn(await boardSignalsForDesk(market, deps));');
+    expect(src.includes("const eqBase = await getSignals('GLOBALFUTURES', deps")).toBe(false);
+    // old raw FUTURES-only board fetch must be gone from every site
+    expect(src.includes("getSignals(market === 'CRYPTO' ? 'FUTURES' : market")).toBe(false);
     // engine loops raw-CRYPTO boardSigs (the divergence) must not exist
     expect(src.includes('const base = await getSignals(market, deps, { warmOnly: true })')).toBe(false);
     expect(src.includes('const base = await getSignals(market, depsForSignals(), { warmOnly: true })')).toBe(false);

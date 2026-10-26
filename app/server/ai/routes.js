@@ -364,6 +364,45 @@ export function registerAITradingRoutes(app, deps) {
     getTradingConfig: () => { try { return loadConfig(); } catch { return {}; } },
   });
 
+  // v21.25.3 [BOARD-SIGNAL COMPLETENESS]: the MTF board is not one signal
+  // universe. The CRYPTO/FUTURES desk renders three domains — CoinDCX USDT
+  // perps (FUTURES), GOLD/SILVER (METALS), and EQUITY SIM (GLOBALFUTURES).
+  // Feeding the board only `getSignals('FUTURES')` left metals/equity rows
+  // without their REAL main-AI ensemble signal → `ensembleSignalAvailable`
+  // false → even ELITE rows were rejected ("main AI-BOARD ensemble signal
+  // unavailable") and auto-trade never fired. One helper, every board site.
+  const BOARD_SIGNAL_SCAN_MARKETS = {
+    CRYPTO: ['FUTURES', 'METALS', 'GLOBALFUTURES'],
+    FUTURES: ['FUTURES', 'METALS', 'GLOBALFUTURES'],
+    METALS: ['METALS'],
+    GLOBALFUTURES: ['GLOBALFUTURES'],
+    EQUITY_SIM: ['GLOBALFUTURES'],
+    INDIA: ['INDIA'],
+  };
+  const boardSignalKey = (sig, market) => normalizeLinkSymbol(
+    String(sig?.symbol || '').toUpperCase().trim().replace(/^B-/, ''),
+    market,
+  );
+  const boardSignalsForDesk = async (market, deps = depsForSignals()) => {
+    const mkt = String(market || 'INDIA').toUpperCase();
+    const scanMarkets = BOARD_SIGNAL_SCAN_MARKETS[mkt] || [mkt];
+    const boards = await Promise.all(scanMarkets.map(scanMarket =>
+      getSignals(scanMarket, deps, { warmOnly: true }).catch(() => null)
+    ));
+    const seen = new Set();
+    const out = [];
+    // Priority order matters: an alias seen in the primary universe wins.
+    for (const base of boards) {
+      for (const sig of (Array.isArray(base?.signals) ? base.signals : [])) {
+        const key = boardSignalKey(sig, mkt);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        out.push(sig);
+      }
+    }
+    return out;
+  };
+
   const mainSignalForEntry = async (market, symbol) => {
     const scanMarket = market === 'CRYPTO' ? 'FUTURES' : market;
     const deps = depsForSignals();
@@ -382,12 +421,10 @@ export function registerAITradingRoutes(app, deps) {
       return raw === wantRaw || canon(raw) === want;
     }) || null;
     const direct = findIn(base?.signals);
-    if (direct || market === 'INDIA' || market === 'GLOBALFUTURES') return direct;
-    // v21.23.14: an equity-symbol request may arrive with market=CRYPTO
-    // (legacy API callers). Fall back to its real GLOBALFUTURES ensemble
-    // instead of permanently failing the entry gate.
-    const eqBase = await getSignals('GLOBALFUTURES', deps, { warmOnly: true }).catch(() => null);
-    return findIn(eqBase?.signals);
+    if (direct || market === 'INDIA' || market === 'GLOBALFUTURES' || market === 'METALS') return direct;
+    // An equity/metals-symbol request may arrive with market=CRYPTO or FUTURES
+    // (legacy API + board callers). Fall back to the SAME merged desk signals.
+    return findIn(await boardSignalsForDesk(market, deps));
   };
 
   // v6.5: telegram — secrets WIN over env; one resolver, one sender.
@@ -972,26 +1009,10 @@ export function registerAITradingRoutes(app, deps) {
       const market = normMarket(req.query.market);
       const cfg = loadMtfAutoConfig();
       const deps = depsForSignals();
-      const base = await Promise.race([
-        getSignals(market === 'CRYPTO' ? 'FUTURES' : market, deps, { warmOnly: true }).catch(() => null),
-        new Promise(r => { const t = setTimeout(() => r(null), 400); t.unref?.(); }),
-      ]);
-      // v21.23.14 [EQUITY-SIM BOARD FIX]: the CRYPTO tab's EQUITY SIM cards
-      // need their OWN GLOBALFUTURES board signal. Previously they were built
-      // with `boardSig:null` (FUTURES universe has no NVDA/TSLA), so the new
-      // ensemble gate marked them "AI ENSEMBLE NOT READY" and hid PAPER.
-      const boardSigs = Array.isArray(base?.signals) ? base.signals : [];
-      if (market === 'CRYPTO' || market === 'FUTURES') {
-        const eqBase = await Promise.race([
-          getSignals('GLOBALFUTURES', deps, { warmOnly: true }).catch(() => null),
-          new Promise(r => { const t = setTimeout(() => r(null), 400); t.unref?.(); }),
-        ]);
-        const seen = new Set(boardSigs.map(s => String(s?.symbol || '').toUpperCase()));
-        for (const s of (eqBase?.signals || [])) {
-          const k = String(s?.symbol || '').toUpperCase();
-          if (k && !seen.has(k)) { seen.add(k); boardSigs.push(s); }
-        }
-      }
+      // v21.25.3 [BOARD-SIGNAL COMPLETENESS]: board must see FUTURES +
+      // METALS + GLOBALFUTURES signals; otherwise GOLD/SILVER and EQUITY SIM
+      // rows lacked their main-AI ensemble and rendered "NOT READY".
+      const boardSigs = await boardSignalsForDesk(market, deps);
       const out = await getDualMtfBoard({
         market,
         mode: String(req.query.mode || cfg.mode || 'INTRADAY').toUpperCase(),
@@ -1821,10 +1842,10 @@ export function registerAITradingRoutes(app, deps) {
         const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
         if (!on) continue;
         if (market === 'INDIA' && !isNseOpen()) continue;
-        const base = await getSignals(market === 'CRYPTO' ? 'FUTURES' : market, deps, { warmOnly: true }).catch(() => null);
+        const boardSigs = await boardSignalsForDesk(market, deps);
         boards[market] = await getDualMtfBoard({
           market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore,
-          boardSigs: base?.signals || [], fx: await mtfLiveFx(),
+          boardSigs, fx: await mtfLiveFx(),
         });
       }
       const status = mtfAutoStatus();
@@ -1860,12 +1881,11 @@ export function registerAITradingRoutes(app, deps) {
         const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
         if (!on) continue;
         if (market === 'INDIA' && !isNseOpen() && !hasOpenIndia) continue;
-        // v21.23.13 [BOARDSIGS PARITY #3]: /run (manual tick — LIVE button ke
-        // immediate-run wala call) bhi UI-route wala FUTURES-sigs mapping
-        // use karta hai (detail 60s sweep site pe) — manual run aur background
-        // engine ek hi board pe agree karenge.
-        const base = await getSignals(market === 'CRYPTO' ? 'FUTURES' : market, deps, { warmOnly: true }).catch(() => null);
-        boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: base?.signals || [], fx: fxLive });
+        // v21.25.3 [BOARD-SIGNAL COMPLETENESS]: /run uses the SAME merged
+        // FUTURES + METALS + GLOBALFUTURES signals as the UI/60s/15s engine
+        // paths — manual run cannot disagree with the board the user sees.
+        const boardSigs = await boardSignalsForDesk(market, deps);
+        boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs, fx: fxLive });
       }
       const liveCtx = await mtfAutoLiveCtx(cfg);
       const out = await mtfAutoTick({
@@ -3674,19 +3694,13 @@ export function registerAITradingRoutes(app, deps) {
         const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
         if (!on) continue;
         if (market === 'INDIA' && !isNseOpen() && !hasOpenIndia) continue;
-        // v21.23.13 [BOARDSIGS PARITY — 60s sweep]: UI board route (mtf-dual/
-        // board) CRYPTO desk ke liye `getSignals('FUTURES', …)` boardSigs use
-        // karta hai (USDT-perp universe — B-BTC_USDT rows jo dual board ke
-        // normSymKey base-symbol mapping se EXACT match karte hain). Ye loop
-        // raw `getSignals('CRYPTO', …)` (spot INR-pair universe) use karta
-        // tha → engine ka board UI se DIFFERENT boardBase/SVA/council inputs
-        // pe banta tha → user ko 'AUTO-READY 85+' row dikhta tha, engine apne
-        // board me wahi row capped/alag-scored dekhta tha — 'dikh raha hai
-        // par auto trade lagta nahi' wala divergence. Ab teeno engine sites
-        // (ye sweep + 15s deep tick + /run) UI route ke same mapping use
-        // karte hain — engine wahi board score karta hai jo user dekhta hai.
-        const base = await getSignals(market === 'CRYPTO' ? 'FUTURES' : market, deps, { warmOnly: true }).catch(() => null);
-        boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: base?.signals || [], fx: fxLive });
+        // v21.25.3 [BOARD-SIGNAL COMPLETENESS — 60s sweep]: UI board (mtf-dual/
+        // board) builds CRYPTO from FUTURES + METALS + GLOBALFUTURES signals.
+        // The engine must use the same helper — pehle metals/equity rows ke
+        // boardSig missing rehte the → even ELITE rows "main AI-BOARD ensemble
+        // signal unavailable" me reject hote the, jabki UI unhe ready dikhata tha.
+        const boardSigs = await boardSignalsForDesk(market, deps);
+        boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs, fx: fxLive });
       }
       await mtfAutoTick({
         boards,
@@ -3886,18 +3900,12 @@ export function registerAITradingRoutes(app, deps) {
           const on = market === 'INDIA' ? cfg.desks.india : cfg.desks.crypto;
           if (!on) continue;
           if (market === 'INDIA' && !isNseOpen() && !hasOpenIndia) continue;
-          // v21.23.10 [BOARDSIGS PARITY]: 15s deep tick (jo ACTUAL entry path
-          // hai — 10s probe isi me escalate karta hai) pehle boardSigs ke
-          // BINA board banata tha → P0 direction guards (boardOpposes −12/
-          // cap64, svaOpposes, councilHardNo, winProb NO-EDGE) is fastest
-          // path par kabhi fire nahi hote the + superScore ka boardBase
-          // weight redistribute → 15s vs 60s views diverge. Ab 60s loop
-          // (3134) jaisa hi warm signals pass.
-          // v21.23.13 [BOARDSIGS PARITY #2]: CRYPTO desk ke liye UI-route
-          // wala FUTURES-sigs mapping (detail 60s sweep site pe) — engine
-          // wahi board dekhta hai jo user ko dikhta hai.
-          const base = await getSignals(market === 'CRYPTO' ? 'FUTURES' : market, depsForSignals(), { warmOnly: true }).catch(() => null);
-          boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: base?.signals || [], fx: fxLive }).catch(() => null);
+          // v21.25.3 [BOARD-SIGNAL COMPLETENESS — 15s deep tick]: same merged
+          // FUTURES + METALS + GLOBALFUTURES board signals as the UI route and
+          // 60s sweep. Missing metals/equity boardSig made the fastest entry
+          // path reject even ELITE rows with "ensemble signal unavailable".
+          const boardSigs = await boardSignalsForDesk(market, depsForSignals());
+          boards[market] = await getDualMtfBoard({ market, mode: cfg.mode, holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs, fx: fxLive }).catch(() => null);
         }
         await mtfAutoTick({
           boards,
@@ -3932,11 +3940,12 @@ export function registerAITradingRoutes(app, deps) {
       if (warm.length > 0) return warm;
       const cfg = loadMtfAutoConfig();
       const fxLive = await mtfLiveFx();
+      const deps = depsForSignals();
       const outBoards = [];
-      const cryptoB = await getDualMtfBoard({ market: 'CRYPTO', mode: cfg.mode || 'INTRADAY', holdMin: cfg.holdMin, minScore: cfg.minScore, fx: fxLive }).catch(() => null);
+      const cryptoB = await getDualMtfBoard({ market: 'CRYPTO', mode: cfg.mode || 'INTRADAY', holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: await boardSignalsForDesk('CRYPTO', deps), fx: fxLive }).catch(() => null);
       if (cryptoB) outBoards.push(cryptoB);
       if (isNseOpen()) {
-        const indiaB = await getDualMtfBoard({ market: 'INDIA', mode: cfg.mode || 'INTRADAY', holdMin: cfg.holdMin, minScore: cfg.minScore, fx: fxLive }).catch(() => null);
+        const indiaB = await getDualMtfBoard({ market: 'INDIA', mode: cfg.mode || 'INTRADAY', holdMin: cfg.holdMin, minScore: cfg.minScore, boardSigs: await boardSignalsForDesk('INDIA', deps), fx: fxLive }).catch(() => null);
         if (indiaB) outBoards.push(indiaB);
       }
       return outBoards;
