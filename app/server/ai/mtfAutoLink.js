@@ -148,6 +148,17 @@ export const MTF_AUTO_DEFAULTS = {
   // "Thoda pullback" kabhi flip nahi hota (board row same-side hi rehta hai) —
   // flip SIRF pakka opposite-side confirmation (triggerFired || score>=65) pe.
   ucFlipReverse: true,
+  // v21.26.0 AI SUPER INTELLIGENCE PER-TRADE AGENT:
+  // AUTO entry hote hi ek dedicated tick-driven agent us trade ka full control
+  // leta hai — WebSocket liveFeed tick par (koi 3s/15s polling wait nahi)
+  // TP1/TP2 monitor, SL ratchet, minimal-loss protective exit, confirmed
+  // opposite-direction flip-reverse, aur TP2 ke baad IDLE.
+  superAgentEnabled: true,
+  // Confirmed adverse move par full -1R SL se PEHLE minimal-loss exit.
+  // -0.35R = risk ka sirf 35% (very low loss) — board flip ya tick-velocity
+  // confirmation ke bina ye kabhi fire nahi hota (whipsaw guard).
+  superAgentMinimalLossExit: true,
+  superAgentMinLossR: -0.35,
 };
 // v21.23.8 flip churn guards — ek symbol ke liye din me sirf itni flip-reverse
 // entries (whipsaw market me zyada flip = fees + churn; protective minimal-loss
@@ -174,6 +185,7 @@ const CLAMPS = {
   belowTenKLeverage: [1, 20],
   aboveTenKLeverage: [1, 20],
   postSuccessCooldownMin: [0, 120],   // v21.23.6: 0 = cooldown OFF; max 2h
+  superAgentMinLossR: [-0.90, -0.10], // v21.26.0: confirmed adverse par minimal-loss line
 };
 const MODES = new Set(['INTRADAY', 'SWING', 'SCALP']);
 
@@ -305,6 +317,9 @@ function _sanitizeCfg(cfg) {
   // (ucFlipReverse:false → confirmed flip par sirf protective close, reverse
   // entry nahi — user ka explicit opt-out).
   out.ucFlipReverse = cfg.ucFlipReverse !== false;
+  // v21.26.0 per-trade AI SUPER AGENT — default ON, explicit opt-out possible.
+  out.superAgentEnabled = cfg.superAgentEnabled !== false;
+  out.superAgentMinimalLossExit = cfg.superAgentMinimalLossExit !== false;
   return out;
 }
 
@@ -477,6 +492,14 @@ export const computeWallet100Deployment = computeWallet95Deployment;
 // only — persisted book me nahi jata) detection zinda rakhta hai.
 const _lastBoardRowSeenMap = new Map();
 const BOARD_ROW_SNAPSHOT_TTL_MS = 120_000;
+// v21.26.0 AI SUPER AGENT runtime (memory only — never persisted):
+//   • exit locks stop the 15s/60s deep-monitor sweep from double-closing a
+//     position while the tick agent is already mid-close;
+//   • per-trade throttle book keeps disk writes / exchange calls bounded even
+//     when a Binance WS symbol ticks 20×/second.
+const _superAgentExitLocks = new Set();
+const _superAgentRuntime = new Map();
+let _superAgentLastPersistAt = 0;
 function _rememberBoardRow(symbol, row, now) {
   const key = String(symbol || '').toUpperCase();
   if (!key || !row) return;
@@ -491,6 +514,18 @@ function _rememberBoardRow(symbol, row, now) {
     directionVerified: row.directionVerified === true,
     ensembleSignalAvailable: row.ensembleSignalAvailable !== false,
     autoEligible: row.autoEligible === true,
+    // v21.26.0 AI SUPER AGENT: reverse-entry readiness ab tick handler ke paas
+    // bhi chahiye (15s board rebuild ka wait nahi). Same fields jo
+    // _tryOpenUcFlipReverse ka reverseReady gate padhta hai.
+    trapVeto: row.trapVeto === true,
+    zoneWallVeto: row.zoneWallVeto === true,
+    counterTrend: row.counterTrend === true,
+    counterHtf: row.counterHtf === true,
+    reversalRisk: row.reversalRisk === true,
+    opposingFlow: row.trigger?.opposingFlow === true,
+    exhausted: row.context?.exhausted === true,
+    tier: row.tier || null,
+    plan: row.plan && typeof row.plan === 'object' ? { ...row.plan } : null,
   });
   if (_lastBoardRowSeenMap.size > 64) {
     const firstKey = _lastBoardRowSeenMap.keys().next().value;
@@ -510,7 +545,24 @@ function _snapshotRowFor(symbol, now) {
     directionVerified: s.directionVerified === true,
     ensembleSignalAvailable: s.ensembleSignalAvailable !== false,
     autoEligible: s.autoEligible === true,
-    context: { dir: s.contextDir, ...(s.atrPct != null ? { atrPct: s.atrPct } : {}) },
+    // v21.26.0 AI SUPER AGENT: reverse-entry readiness fields (see
+    // _rememberBoardRow) so a tick can drive the flip-reverse gate without
+    // waiting for the next 15s/60s board rebuild.
+    trapVeto: s.trapVeto === true,
+    zoneWallVeto: s.zoneWallVeto === true,
+    counterTrend: s.counterTrend === true,
+    counterHtf: s.counterHtf === true,
+    reversalRisk: s.reversalRisk === true,
+    opposingFlow: s.opposingFlow === true,
+    exhausted: s.exhausted === true,
+    tier: s.tier || null,
+    plan: s.plan && typeof s.plan === 'object' ? { ...s.plan } : null,
+    trigger: { opposingFlow: s.opposingFlow === true },
+    context: {
+      dir: s.contextDir,
+      ...(s.atrPct != null ? { atrPct: s.atrPct } : {}),
+      ...(s.exhausted ? { exhausted: true } : {}),
+    },
     __snapshot: true,
   };
 }
@@ -1865,6 +1917,11 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
       feeBreakevenPrice: feeBePrice,
       deepMonitorStage: 'STAGE_0_INITIAL_GUARD',
       deepMonitorLabel: 'Stage 0 · UC Flip-Reverse Entry (SL Auto-Trail Ready)',
+      // v21.26.0: the reverse trade gets its OWN tick agent lifecycle.
+      superAgentState: 'ARMED',
+      superAgentIdleReason: null,
+      superAgentTickCount: 0,
+      superAgentLastTickAt: null,
       atrPct: entryAtrPct, volClass: entryVolClass, momentumState: null, t1ClosePct: entryT1ClosePct,
       trendStatus: `🔁 UC FLIP ${b.side}→${side} · ${side === 'SHORT' ? 'BEARISH' : 'BULLISH'} REVERSE LIVE WATCH`,
       marginINR: +(finalQty * finalEntry * (isUsd ? fxRate : 1) / leverage).toFixed(2),
@@ -1884,6 +1941,9 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     stx.dayCount += 1;
     stx.perSymbolLast[sym] = now;
     _persistState();
+    // v21.26.0: reverse row's tick agent gets the same board snapshot the
+    // forward entry gets — flip detection never waits for a board rebuild.
+    if (boardRow) _rememberBoardRow(sym, boardRow, now);
     // Direction lock atomic flip: purana release (paper _closePart ne already
     // kiya hoga — idempotent) + naya opposite-side acquire (LIVE adopted rows
     // ke liye yahi authoritative release hai).
@@ -1996,6 +2056,15 @@ export async function mtfAutoTick(p = {}) {
   // hona chahiye accurately Trend follow karo bearish or bullish realtime."
   if ((cfg.feeAwareReversalExit !== false || cfg.deepMonitorEnabled !== false) && (typeof paper.closePaperTrade === 'function' || typeof p.liveClose === 'function')) {
     for (const b of _openLinked()) {
+      // v21.26.0 AI SUPER AGENT single-owner guard: the tick agent may already
+      // be closing/flipping this exact row. Never let the 15s sweep fire a
+      // second close on the same exchange position.
+      const saKey = `${String(b.market || '').toUpperCase()}|${String(b.symbol || '').toUpperCase()}`;
+      if (_superAgentExitLocks.has(saKey)
+        || (Number(b.superAgentExitPendingAt) > 0 && now - Number(b.superAgentExitPendingAt) < 120_000)) {
+        out.skipped.push(`${b.symbol}: super-agent exit in flight`);
+        continue;
+      }
       const mktBoard = p.boards?.[b.market];
       const allBoardRows = [
         ...(mktBoard?.rows || []),
@@ -2895,6 +2964,12 @@ export async function mtfAutoTick(p = {}) {
         feeBreakevenPrice: feeBreakevenFloor({ entry: finalEntry, side: row.side, market: execMarket }),
         deepMonitorStage: 'STAGE_0_INITIAL_GUARD',
         deepMonitorLabel: 'Stage 0 · Initial SL Guard',
+        // v21.26.0 AI SUPER AGENT: every AUTO entry starts a dedicated
+        // tick-driven lifecycle (ARMED → MONITORING → TP1_SECURED → IDLE).
+        superAgentState: 'ARMED',
+        superAgentIdleReason: null,
+        superAgentTickCount: 0,
+        superAgentLastTickAt: null,
         // v21.23.7 ENTRY-STAMP: vol class + TP1 partial pct — 15s deep tick
         // LIVE boardRow se refresh karta hai; 3s fast loop inhi se padhta hai.
         atrPct: entryAtrPct,
@@ -2917,6 +2992,9 @@ export async function mtfAutoTick(p = {}) {
       stx.dayCount += 1;
       stx.perSymbolLast[sym] = now;
       _persistState();
+      // v21.26.0: board row snapshot available to the tick agent from second
+      // zero (flip detection never waits for the next 15s/60s rebuild).
+      _rememberBoardRow(sym, row, now);
       acquireDirectionLock({ symbol: sym, side: row.side, source: 'mtf-auto', now });
       openSymbols.add(sym);
       out.opened.push(rec);
@@ -3129,6 +3207,11 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
     activeLeverage: riskCaps.effectiveLeverage,
     feeAwareReversalExit: cfg.feeAwareReversalExit !== false,
     deepMonitorEnabled: cfg.deepMonitorEnabled !== false,
+    // v21.26.0 per-trade AI SUPER AGENT config (runtime telemetry is injected
+    // by routes.js from autoTradeSuperAgent.js — mtfAutoLink stays decoupled).
+    superAgentEnabled: cfg.superAgentEnabled !== false,
+    superAgentMinimalLossExit: cfg.superAgentMinimalLossExit !== false,
+    superAgentMinLossR: clampN(cfg.superAgentMinLossR, -0.90, -0.10, -0.35),
     deepMonitor,
     directionIntegrity: deepMonitor.directionIntegrity,
     ccyMode: 'crypto rows USDT (paper = FUTURES desk domain) · india rows ₹',
@@ -3148,6 +3231,643 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
         ? `LIVE AUTO MODE ACTIVE — ${riskCaps.effectiveWalletDeployPct}% CoinDCX Wallet Deployment + ${riskCaps.effectiveLeverage}x leverage (wallet-tier: < ₹10,000 → 10x · ≥ ₹10,000 → 5x) + Full CoinDCX Active Position Control (TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.`
         : 'MTF AUTO-LINK PAPER mode me hai (Live Mode activate karne par ELITE/STRONG trades full-wallet deployment + wallet-tier leverage ke saath auto lagte hain; Full CoinDCX Active Position Control + TP1/TP2 Trailing SL + UC Flip-Reverse + Vol-Adaptive Reversal Profit Book). Trade allowlist: FUTURES USDT + GOLD/SILVER (XAU/XAG) + EQUITY SIM — CoinDCX SPOT FULL STOP.',
   };
+}
+
+// ============================================================
+// v21.26.0 AI SUPER INTELLIGENCE — TICK-DRIVEN PER-TRADE AGENT
+// ------------------------------------------------------------
+// USER SPEC (verbatim intent): "jab bhi AUTO trade lagta hai, us trade ke liye
+// ek AI super intelligence agent immediately active ho — WebSocket realtime
+// price par TP1/TP2 monitor kare, highest profit trail kare, trade clearly
+// against ho to bahut hi kam loss me close kare, aur market pakka opposite
+// move kare to purana trade band karke immediately naya trade live direction
+// me laga de. TP2 hit + close ke baad agent wapas IDLE ho jaye."
+//
+// WHY A SEPARATE TICK ENTRY-POINT (not another loop):
+//   • The 3s fast-SL loop and 15s deep tick remain BACKSTOPS. This function is
+//     called directly from liveFeed.subscribe() — the same event-loop turn as
+//     the WebSocket tick — so TP1/TP2/minimal-loss reaction does not wait for
+//     a poll boundary.
+//   • It is deliberately PURE-ish like mtfAutoTick: boards, paper engine,
+//     quotes and live handlers are injected by routes.js (hermetic tests).
+//   • All existing safety gates stay authoritative: direction certificate,
+//     trigger/ensemble/auto readiness for NEW reverse entries, 1-trade-session
+//     lock, daily quota, cooldowns, fee/age guards and budget caps.
+//
+// HONEST LATENCY: no 1ms feed is fabricated. The handler runs synchronously
+// inside setTick()'s subscriber loop; actual market latency is the upstream
+// WebSocket source's latency (Binance perps sub-second; CoinDCX book ~1s).
+// ============================================================
+
+const SUPER_AGENT_PAPER_SL_MIN_MS = 1_500;
+const SUPER_AGENT_EXCHANGE_SYNC_MIN_MS = 2_000;
+const SUPER_AGENT_PERSIST_MIN_MS = 8_000;
+const SUPER_AGENT_LOG_MIN_MS = 4_000;
+const SUPER_AGENT_MAX_ACTIONS = 12;
+
+function _superAgentKeyOf(b) {
+  return `${String(b?.market || '').toUpperCase()}|${String(b?.symbol || '').toUpperCase()}`;
+}
+
+function _superAgentRtFor(b) {
+  const key = _superAgentKeyOf(b);
+  let rt = _superAgentRuntime.get(key);
+  if (!rt) {
+    rt = {
+      lastPaperSlAt: 0, lastExchangeAt: 0, lastLogAt: 0, lastPersistAt: 0,
+      actions: [], lastAction: null, lastActionAt: 0,
+    };
+    _superAgentRuntime.set(key, rt);
+  }
+  if (_superAgentRuntime.size > 64) {
+    const first = _superAgentRuntime.keys().next().value;
+    if (first !== undefined && first !== key) _superAgentRuntime.delete(first);
+  }
+  return rt;
+}
+
+/** Persistence is intentionally throttled: a stage-5 chandelier trail can
+ *  improve on every new high, and a Binance symbol can tick 20×/s. Disk writes
+ *  happen at most once per SUPER_AGENT_PERSIST_MIN_MS unless an exit/TP event
+ *  forces one. */
+function _superAgentPersist(force = false) {
+  const now = Date.now();
+  if (!force && now - _superAgentLastPersistAt < SUPER_AGENT_PERSIST_MIN_MS) return false;
+  _superAgentLastPersistAt = now;
+  _persistState();
+  return true;
+}
+
+function _superAgentPushAction(b, kind, text, now) {
+  const rt = _superAgentRtFor(b);
+  const at = Number(now) || Date.now();
+  rt.lastAction = kind;
+  rt.lastActionAt = at;
+  rt.actions.push({ at, kind, text: String(text || '').slice(0, 240) });
+  if (rt.actions.length > SUPER_AGENT_MAX_ACTIONS) rt.actions = rt.actions.slice(-SUPER_AGENT_MAX_ACTIONS);
+  b.superAgentLastAction = kind;
+  b.superAgentLastActionAt = at;
+  b.superAgentActions = rt.actions.slice(-6);
+}
+
+function _superAgentMirror(summary, paperId) {
+  if (!summary || !Array.isArray(summary.open) || paperId == null) return null;
+  return summary.open.find(t => t && String(t.id) === String(paperId)) || null;
+}
+
+/**
+ * The dedicated per-trade agent's single entry point.
+ *
+ * @param {object} input
+ *  symbol, market        book identity (market: CRYPTO | INDIA)
+ *  ltp                   WebSocket tick price (already domain-checked below)
+ *  velocityAdverse       agent-computed: rapid consecutive adverse ticks
+ *  velocityPct           adverse move % over the agent's rolling window
+ *  tickAgeMs             age of the upstream tick (freshness honesty)
+ *  p                     injected deps (paper, quotes, getBoardRow, liveClose,
+ *                        liveUpdateSl, liveExecute, getLiveCtx, fx, notify…)
+ *  now                   epoch ms (tests / backtests)
+ *  isRuntimeClock        false in tests to bypass real-clock grace windows
+ */
+export async function mtfAutoSuperAgentManage(input = {}) {
+  const cfg = loadMtfAutoConfig();
+  const now = Number(input.now) || Date.now();
+  const sym = normalizeLinkSymbol(input.symbol, input.market);
+  const marketFilter = String(input.market || '').toUpperCase();
+  const baseOut = { ok: true, symbol: sym || null, market: marketFilter || null, state: 'IDLE' };
+  if (!sym) return { ...baseOut, ok: false, skipped: 'invalid symbol' };
+
+  const st = _loadState();
+  const b = st.book.find(row => row && row.status === 'OPEN'
+    && isGenuinelyTradedEntry(row, cfg)
+    && normalizeLinkSymbol(row.symbol, row.market) === sym
+    && (!marketFilter || String(row.market || '').toUpperCase() === marketFilter)
+    // ONLY true AUTO-engine rows. Manual board clicks keep the classic deep
+    // monitor; they never inherit the agent's minimal-loss policy silently.
+    && (row.autoTrade === true || row.openedBy === 'AUTO' || row.flipEntry === true));
+  if (!b) return { ...baseOut, skipped: 'no auto trade' };
+
+  const side = normalizeSide(b.side);
+  if (!side) {
+    b.superAgentState = 'PAUSED';
+    b.superAgentIdleReason = 'INVALID_SIDE';
+    return { ...baseOut, ok: false, skipped: 'invalid side', state: 'PAUSED' };
+  }
+  const ltp = Number(input.ltp) || 0;
+  if (!(ltp > 0)) return { ...baseOut, ok: false, state: b.superAgentState || 'ARMED', skipped: 'no live price' };
+  const entry = Number(b.entry) || 0;
+  // CROSS-CURRENCY / CORRUPT-TICK FIREWALL (same band as the 15s monitor).
+  if (entry > 0) {
+    const ratio = ltp / entry;
+    if (ratio <= 0.35 || ratio >= 2.85) {
+      return { ...baseOut, ok: false, state: b.superAgentState || 'ARMED', skipped: 'price domain mismatch', priceRatio: +ratio.toFixed(4) };
+    }
+  }
+  if (input.p?.killSwitch === true) {
+    b.superAgentState = 'PAUSED';
+    b.superAgentIdleReason = 'KILL_SWITCH';
+    return { ...baseOut, ok: false, state: 'PAUSED', skipped: 'kill switch' };
+  }
+
+  const isLivePos = String(b.executionMode || '').toUpperCase() === 'LIVE';
+  let pp = input.p || {};
+  const paper = pp.paper || {};
+
+  let summary = null;
+  try { summary = typeof paper.getPaperSummary === 'function' ? paper.getPaperSummary() : null; } catch { summary = null; }
+  let livePaper = _superAgentMirror(summary, b.paperId);
+
+  // PAPER mirror vanished → the real engine already closed it (TP2/SL/EOD/
+  // manual). Reconcile the book row honestly instead of managing a ghost.
+  // LIVE mirrors are NOT reconciled this way: a paper-mirror SL is not proof
+  // that the leveraged exchange position is closed.
+  if (!isLivePos && summary && Array.isArray(summary.open) && b.paperId != null && !livePaper) {
+    const closed = (summary.closedToday || []).find(t => String(t.id) === String(b.paperId));
+    b.status = 'CLOSED';
+    b.closeReason = closed?.closeReason || 'PAPER_ENGINE_CLOSED';
+    b.closedAt = Number(closed?.closedAt) || now;
+    b.pnl = closed?.realizedPnl ?? b.pnl ?? null;
+    b.pnlVerified = true;
+    b.pnlSource = 'PAPER';
+    b.superAgentState = 'IDLE';
+    b.superAgentIdleReason = b.closeReason;
+    b.superAgentIdleAt = now;
+    _superAgentPushAction(b, 'IDLE', `paper engine closed ${b.closeReason}`, now);
+    _superAgentPersist(true);
+    return { ...baseOut, ok: true, skipped: 'paper engine already closed', action: b.closeReason, closed: true, state: 'IDLE', idleReason: b.closeReason };
+  }
+
+  let effRow = null;
+  if (typeof pp.getBoardRow === 'function') {
+    try { effRow = pp.getBoardRow(sym, b.market) || null; } catch { effRow = null; }
+  }
+  // Freshest row wins; <=120s last-seen snapshot keeps flip detection alive
+  // when the symbol rotates out of the top-6 board trim.
+  if (effRow) _rememberBoardRow(b.symbol, effRow, now);
+  effRow = effRow || _snapshotRowFor(b.symbol, now);
+
+  const s1 = Number(b.trailedStopLoss ?? b.stopLoss) || 0;
+  const s2 = Number(livePaper?.stopLoss) || 0;
+  const effectiveCurSl = (s1 > 0 && s2 > 0)
+    ? (side === 'SHORT' ? Math.min(s1, s2) : Math.max(s1, s2))
+    : (s1 || s2);
+
+  const oppSide = oppositeSideOf(b.side);
+  const revByRow = Boolean(
+    oppSide && effRow && (
+      (normalizeSide(effRow.side) === oppSide && (effRow.triggerFired || Number(effRow.superScore) >= 65))
+      || (effRow.context?.dir != null && ((side === 'LONG' && effRow.context.dir < 0 && effRow.triggerDir < 0) || (side === 'SHORT' && effRow.context.dir > 0 && effRow.triggerDir > 0)))
+    )
+  );
+
+  const deepEval = evaluateActiveTradeDeepMonitor({
+    ...b,
+    side,
+    stopLoss: effectiveCurSl,
+    t1Hit: Boolean(livePaper?.t1Hit || b.t1Hit),
+    qty: Number(livePaper?.qty ?? b.qty ?? 1),
+  }, {
+    ltp,
+    boardRow: effRow,
+    reversalConfirmed: revByRow,
+  });
+
+  if (deepEval.directionBlocked) {
+    b.superAgentState = 'PAUSED';
+    b.superAgentIdleReason = 'DIRECTION_BLOCKED';
+    b.superAgentLastTickAt = now;
+    b.superAgentLastPrice = ltp;
+    b.superAgentTickCount = (Number(b.superAgentTickCount) || 0) + 1;
+    b.trendStatus = deepEval.trendStatus;
+    return { ...baseOut, ok: false, state: 'PAUSED', skipped: 'direction blocked', trendStatus: deepEval.trendStatus };
+  }
+
+  const rt = _superAgentRtFor(b);
+  const prevStage = b.deepMonitorStage;
+  const tradeAgeMs = Math.max(0, now - (Number(b.openedAt) || now));
+  const isRuntimeClock = input.isRuntimeClock !== false;
+  const tickAgeMs = Number(input.tickAgeMs);
+  const tickFresh = !(Number.isFinite(tickAgeMs) && tickAgeMs > 5_000);
+
+  // ---- stamp the deep-monitor result on the book row (single source of truth) ----
+  b.ltp = ltp;
+  b.peakPrice = deepEval.peakPrice;
+  b.currentR = deepEval.currentR;
+  b.peakR = deepEval.peakR;
+  b.t1Hit = Boolean(deepEval.tp1Hit || b.t1Hit);
+  b.deepMonitorStage = deepEval.stageCode;
+  b.deepMonitorLabel = deepEval.stageLabel;
+  b.trendStatus = deepEval.trendStatus;
+  b.atrPct = deepEval.atrPct ?? b.atrPct ?? null;
+  b.volClass = deepEval.volClass || b.volClass || null;
+  b.momentumState = deepEval.momentumState || b.momentumState || null;
+  b.t1ClosePct = deepEval.t1ClosePct || b.t1ClosePct || 0.5;
+  b.smartTrail = deepEval.smartTrail || null;
+  b.superAgentLastTickAt = now;
+  b.superAgentLastPrice = ltp;
+  b.superAgentTickCount = (Number(b.superAgentTickCount) || 0) + 1;
+  b.superAgentVelocityPct = Number(input.velocityPct) || 0;
+  b.superAgentVelocityAdverse = Boolean(input.velocityAdverse);
+  b.superAgentAdverseConfirmed = Boolean(revByRow || input.velocityAdverse);
+  b.superAgentMinLossR = clampN(cfg.superAgentMinLossR, -0.90, -0.10, -0.35);
+
+  // ---- TP1 partial: book it on THIS tick (no 3s sweep wait) ----
+  let tp1Booked = false;
+  if (deepEval.tp1Hit && livePaper && livePaper.t1Hit !== true) {
+    // Volatility can shift between entry and TP1. Refresh the paper mirror's
+    // vol-aware partial % first so this tick books the SAME size the deep
+    // monitor would (HIGH 40% / EXTREME 35% keep the runner bigger).
+    if (typeof paper.updatePaperTradeT1ClosePct === 'function' && Number(deepEval.t1ClosePct) > 0) {
+      try { paper.updatePaperTradeT1ClosePct(livePaper.id, deepEval.t1ClosePct); } catch { /* non-fatal */ }
+    }
+    let bookRes = null;
+    if (typeof paper.bookPaperT1Partial === 'function') {
+      try { bookRes = paper.bookPaperT1Partial(livePaper.id, ltp); } catch (e) { bookRes = { ok: false, error: e?.message || 'book failed' }; }
+    } else if (typeof paper.evaluatePaper === 'function') {
+      // Legacy/fake-paper fallback. Real routes inject bookPaperT1Partial.
+      try {
+        paper.evaluatePaper({
+          [b.symbol]: { price: ltp, src: 'super-agent' },
+          [`${b.execMarket || b.market}|${b.symbol}`]: { price: ltp, src: 'super-agent' },
+        }, []);
+        bookRes = { ok: true, fallback: true };
+      } catch { bookRes = { ok: false, error: 'evaluatePaper fallback failed' }; }
+    }
+    if (bookRes?.ok) {
+      tp1Booked = true;
+      b.t1Hit = true;
+      b.t1BookedAt = now;
+      b.bookedPnl = Number(bookRes.trade?.realizedPnl ?? livePaper.realizedPnl ?? b.bookedPnl ?? 0);
+      b.superAgentState = 'TP1_SECURED';
+      b.superAgentTp1At = now;
+      _superAgentPushAction(b, 'TP1_PARTIAL_BOOKED', `TP1 ${deepEval.t1} touched @ ${ltp} — ${bookRes.note || 'partial booked'}`, now);
+      _logEvent('super-tp1', `🎯 SUPER AGENT TP1 ${b.symbol} ${b.side} @ ${ltp} — ${bookRes.note || 'partial booked'} (SL ${b.trailedStopLoss ?? b.stopLoss} locked)`);
+      _superAgentPersist(true);
+      if (typeof pp.notify === 'function') {
+        // Fire-and-forget: Telegram latency must never delay the exit ladder
+        // that runs a few lines below on this same tick.
+        try {
+          Promise.resolve(pp.notify(`🎯 SUPER AGENT TP1: ${b.symbol} ${b.side} @ ${ltp} — ${bookRes.note || 'partial booked'} · runner → T2 ${b.t2}`))
+            .catch(() => { /* non-fatal */ });
+        } catch { /* non-fatal */ }
+      }
+      livePaper = _superAgentMirror(typeof paper.getPaperSummary === 'function' ? paper.getPaperSummary() : summary, b.paperId) || livePaper;
+    }
+  }
+
+  // ---- exit decision ladder (TP2 → confirmed flip → minimal loss → fee-safe exit) ----
+  const revEval = revByRow ? evaluateFeeAwareReversalExit({
+    side: b.side,
+    entry: b.entry,
+    ltp,
+    stopLoss: livePaper?.stopLoss ?? b.stopLoss,
+    target1: b.t1,
+    target2: b.t2,
+    tp1Hit: Boolean(livePaper?.t1Hit || b.t1Hit),
+    bookedPnl: Number(livePaper?.realizedPnl ?? b.bookedPnl ?? 0),
+    qty: Number(livePaper?.qty ?? b.qty ?? 1),
+    market: b.execMarket || b.market,
+    reversalConfirmed: true,
+    reversalReasons: [`board flipped ${oppSide} (${effRow?.superScore ?? '—'}${effRow?.__snapshot ? ' · snap' : ''})`],
+  }) : null;
+
+  const movePctFromEntry = entry > 0 ? Math.abs(ltp - entry) / entry : 0;
+  const liveFeeSafeProfitMove = !isLivePos || movePctFromEntry >= 0.0020 || deepEval.tp2Hit;
+  const hasProgressedIntoProfitStage = deepEval.peakR >= 0.35 || (b.deepMonitorStage && b.deepMonitorStage !== 'STAGE_0_INITIAL_GUARD');
+  const allowDefensiveSlClose = !isLivePos
+    ? deepEval.shouldExitDefensiveSl
+    : (deepEval.shouldExitDefensiveSl && deepEval.currentR <= -1.02 && (!isRuntimeClock || tradeAgeMs >= 90_000));
+  const allowLiveExitAfterGrace = !isLivePos
+    || !isRuntimeClock
+    || tradeAgeMs >= 90_000
+    || (deepEval.feeCovered && liveFeeSafeProfitMove && hasProgressedIntoProfitStage)
+    || (deepEval.tp2Hit && movePctFromEntry >= 0.0040);
+
+  const shouldExitByReversalOrTrail = Boolean(
+    allowLiveExitAfterGrace && (
+      ((revEval?.shouldExit && revEval?.feeCovered) && liveFeeSafeProfitMove)
+      || (deepEval.shouldBookProfitNow && liveFeeSafeProfitMove)
+      || allowDefensiveSlClose
+    )
+  );
+
+  const ucFlipAgeOk = !isRuntimeClock || tradeAgeMs >= (isLivePos ? UC_FLIP_MIN_AGE_MS_LIVE : UC_FLIP_MIN_AGE_MS_PAPER);
+  const ucFlipConfirmed = revByRow;
+  const ucFlipProtectiveExit = Boolean(
+    ucFlipConfirmed
+    && cfg.ucFlipReverse !== false
+    && ucFlipAgeOk
+    && !deepEval.tp2Hit
+    && !shouldExitByReversalOrTrail
+  );
+
+  // MINIMAL-LOSS PROTECTION: only on CONFIRMED adverse direction (board flip
+  // or the agent's tick-velocity confirmation) AND after the age guard. A
+  // normal pullback never qualifies — that is the whipsaw firewall.
+  const minLossR = clampN(cfg.superAgentMinLossR, -0.90, -0.10, -0.35);
+  const superAgentAgeOk = !isRuntimeClock || tradeAgeMs >= (isLivePos ? Math.max(UC_FLIP_MIN_AGE_MS_LIVE, 60_000) : UC_FLIP_MIN_AGE_MS_PAPER);
+  const adverseConfirmed = Boolean(ucFlipConfirmed || (input.velocityAdverse === true && tickFresh));
+  const superAgentMinimalLossExit = Boolean(
+    cfg.superAgentEnabled !== false
+    && cfg.superAgentMinimalLossExit !== false
+    && !deepEval.tp2Hit
+    && superAgentAgeOk
+    && adverseConfirmed
+    && deepEval.currentR <= minLossR
+  );
+
+  let exitReason = null;
+  let flipWanted = false;
+  if (deepEval.tp2Hit) {
+    exitReason = 'TP2_TARGET_HIT_FULL_PROFIT';
+    flipWanted = false;
+  } else if (ucFlipProtectiveExit) {
+    exitReason = 'UC_FLIP_MINIMAL_LOSS_EXIT';
+    flipWanted = true;
+  } else if (superAgentMinimalLossExit) {
+    exitReason = 'SUPER_AGENT_MINIMAL_LOSS_EXIT';
+    flipWanted = Boolean(ucFlipConfirmed);
+  } else if (shouldExitByReversalOrTrail) {
+    exitReason = revEval?.shouldExit ? revEval.stage : (deepEval.exitReason || 'DEEP_MONITOR_PROFIT_BOOK');
+    flipWanted = Boolean(ucFlipConfirmed && cfg.ucFlipReverse !== false && !deepEval.tp2Hit);
+  }
+
+  // ---- LIVE context is expensive (wallet snapshot); only fetch when an
+  // action actually needs the exchange handlers. Routes caches it 15s.
+  const needsLiveCtx = isLivePos && (
+    Boolean(exitReason)
+    || deepEval.slTrailed
+    || b.slSyncPending
+    || b.tpSyncPending
+    || deepEval.t2Extended
+  );
+  if (needsLiveCtx && typeof pp.getLiveCtx === 'function'
+    && (typeof pp.liveClose !== 'function' || typeof pp.liveUpdateSl !== 'function')) {
+    try {
+      const lc = await pp.getLiveCtx();
+      if (lc && typeof lc === 'object') pp = { ...pp, ...lc };
+    } catch { /* keep injected handlers */ }
+    if (b.status !== 'OPEN') return { ...baseOut, ok: true, skipped: 'trade closed during context refresh', state: 'IDLE' };
+  }
+
+  if (exitReason) {
+    const key = _superAgentKeyOf(b);
+    if (_superAgentExitLocks.has(key)) return { ...baseOut, skipped: 'exit already in flight', state: b.superAgentState };
+    _superAgentExitLocks.add(key);
+    b.superAgentExitPendingAt = now;
+    try {
+      if (b.status !== 'OPEN') return { ...baseOut, ok: true, skipped: 'trade already closed', state: b.superAgentState };
+      let liveClosePnl = null;
+      if (isLivePos && typeof pp.liveClose === 'function') {
+        let lc = null;
+        try { lc = await pp.liveClose(b); } catch { lc = null; }
+        if (lc === null) {
+          b.syncError = 'super-agent liveClose returned null — exchange state unknown';
+          _logEvent('live-close-failed', `⚠️ SUPER AGENT LIVE close FAILED ${b.symbol} — row OPEN, next tick retries`);
+          return { ...baseOut, ok: false, state: b.superAgentState, skipped: 'live close failed', error: b.syncError };
+        }
+        if (lc && lc.ok === false) {
+          b.syncError = String(lc.error || lc.reason || 'exchange close failed').slice(0, 200);
+          _logEvent('live-close-failed', `⚠️ SUPER AGENT LIVE close FAILED ${b.symbol} — ${b.syncError} (row OPEN, retry)`);
+          return { ...baseOut, ok: false, state: b.superAgentState, skipped: 'live close failed', error: b.syncError };
+        }
+        const lcPnl = Number(lc?.realizedPnl ?? lc?.pnl);
+        if (Number.isFinite(lcPnl)) liveClosePnl = lcPnl;
+      }
+
+      const closeQuotes = {
+        ...(pp.quotes || {}),
+        [b.symbol]: { price: ltp, src: 'super-agent' },
+        [`${b.execMarket || b.market}|${b.symbol}`]: { price: ltp, src: 'super-agent' },
+      };
+      let r = null;
+      if (b.paperId != null && typeof paper.closePaperTrade === 'function') {
+        try { r = paper.closePaperTrade(b.paperId, closeQuotes, exitReason); } catch { r = null; }
+      }
+      if (isLivePos && b.paperId && r && r.ok === false && typeof paper.voidPaperTrade === 'function') {
+        try { paper.voidPaperTrade(b.paperId); } catch { /* best-effort */ }
+      }
+      if (r?.ok || isLivePos || b.paperId == null) {
+        b.status = 'CLOSED';
+        b.closeReason = exitReason;
+        b.closedAt = now;
+        const estimatedPnl = r?.trade?.realizedPnl ?? revEval?.netTotalPnl ?? deepEval.grossPnl;
+        if (isLivePos && liveClosePnl != null) {
+          b.pnl = liveClosePnl;
+          b.pnlVerified = true;
+          b.pnlSource = 'EXCHANGE';
+        } else if (isLivePos) {
+          b.pnl = estimatedPnl;
+          b.pnlVerified = false;
+          b.pnlSource = 'ESTIMATE';
+        } else {
+          b.pnl = estimatedPnl;
+          b.pnlVerified = true;
+          b.pnlSource = 'PAPER';
+        }
+        b.superAgentState = flipWanted ? 'FLIPPED' : 'IDLE';
+        b.superAgentIdleReason = flipWanted ? `FLIPPED:${exitReason}` : exitReason;
+        b.superAgentIdleAt = now;
+        _superAgentPushAction(b, exitReason, `closed @ ${ltp} (${deepEval.currentR}R) — ${b.superAgentIdleReason}`, now);
+        _logEvent('super-exit', `🤖 SUPER AGENT EXIT ${b.symbol} ${b.side} @ ${ltp} — ${exitReason} (${deepEval.currentR}R · state ${b.superAgentState})`);
+        _superAgentPersist(true);
+
+        let reverseRec = null;
+        if (flipWanted && cfg.ucFlipReverse !== false) {
+          const saOut = { opened: [], closed: [], skipped: [] };
+          reverseRec = await _tryOpenUcFlipReverse({ b, boardRow: effRow, ltp, p: pp, cfg, out: saOut, now });
+          if (reverseRec) {
+            b.superAgentIdleReason = 'FLIPPED_REVERSE_ENTRY';
+            _superAgentPersist(true);
+          }
+        }
+        if (typeof pp.notify === 'function') {
+          // Fire-and-forget: the exit is already committed; a slow Telegram
+          // send must not hold the per-trade handler/lock.
+          try {
+            const msg = exitReason === 'TP2_TARGET_HIT_FULL_PROFIT'
+              ? `✅ SUPER AGENT TP2: ${b.symbol} ${b.side} @ ${ltp} — full profit booked, agent IDLE`
+              : reverseRec
+                ? `🔁 SUPER AGENT FLIP: ${b.symbol} ${b.side}→${reverseRec.side} @ ${ltp} — minimal loss close + immediate reverse entry`
+                : `🛡️ SUPER AGENT ${exitReason}: ${b.symbol} ${b.side} @ ${ltp} (${deepEval.currentR}R) — agent IDLE`;
+            Promise.resolve(pp.notify(msg)).catch(() => { /* non-fatal */ });
+          } catch { /* non-fatal */ }
+        }
+        return {
+          ...baseOut,
+          ok: true,
+          side: b.side,
+          state: b.superAgentState,
+          idleReason: b.superAgentIdleReason,
+          action: exitReason,
+          closed: true,
+          flipped: Boolean(reverseRec),
+          reverseSymbol: reverseRec?.symbol || null,
+          reverseSide: reverseRec?.side || null,
+          currentR: deepEval.currentR,
+          peakR: deepEval.peakR,
+          ltp,
+        };
+      }
+      b.syncError = `paper close failed: ${String(r?.error || 'unknown').slice(0, 120)}`;
+      return { ...baseOut, ok: false, state: b.superAgentState, skipped: 'paper close failed', error: b.syncError };
+    } finally {
+      _superAgentExitLocks.delete(key);
+      b.superAgentExitPendingAt = 0;
+    }
+  }
+
+  // ---- HOLD / TRAIL path ----
+  let trailAction = null;
+  // Rolling TP2 first so the same throttled exchange call carries the new TP.
+  if (deepEval.t2Extended && Number(deepEval.t2) > 0 && Number(deepEval.t2) !== Number(b.t2)) {
+    const prevT2 = b.t2;
+    b.t2 = deepEval.t2;
+    b.t2Extensions = deepEval.t2Extensions;
+    b.lastTpExtendAt = now;
+    if (livePaper?.id != null && typeof paper.updatePaperTradeTarget2 === 'function') {
+      try { paper.updatePaperTradeTarget2(livePaper.id, deepEval.t2); } catch { /* non-fatal */ }
+    }
+    if (isLivePos) b.tpSyncPending = true;
+    trailAction = 'TP2_EXTENDED';
+    _superAgentPushAction(b, 'TP2_EXTENDED', `T2 ${prevT2} → ${b.t2} [#${b.t2Extensions}] @ ${ltp}`, now);
+    _logEvent('super-tp-extend', `🎯 SUPER AGENT ROLLING TP2 ${b.symbol} (${b.side}): T2 ${prevT2} → ${b.t2} [#${b.t2Extensions}] @ ${ltp}`);
+    _superAgentPersist(true);
+  }
+
+  if (deepEval.slTrailed && deepEval.trailedStopLoss > 0) {
+    const prevSl = b.trailedStopLoss ?? b.stopLoss;
+    b.trailedStopLoss = deepEval.trailedStopLoss;
+    b.stopLoss = deepEval.trailedStopLoss;
+    if (livePaper) livePaper.stopLoss = deepEval.trailedStopLoss;
+    trailAction = trailAction || 'SL_TRAILED';
+    // PAPER engine SL write — throttled by time OR a meaningful move.
+    if (!isLivePos && livePaper?.id != null && typeof paper.updatePaperTradeStopLoss === 'function') {
+      const deltaPct = Number(prevSl) > 0 ? Math.abs(deepEval.trailedStopLoss - Number(prevSl)) / Number(prevSl) : 1;
+      if (now - rt.lastPaperSlAt >= SUPER_AGENT_PAPER_SL_MIN_MS || deltaPct >= 0.002) {
+        rt.lastPaperSlAt = now;
+        try { paper.updatePaperTradeStopLoss(livePaper.id, deepEval.trailedStopLoss, b.execMarket || b.market || null); } catch { /* non-fatal */ }
+      }
+    }
+  } else if (!isLivePos && livePaper?.id != null && Number(b.trailedStopLoss) > 0
+    && Math.abs(Number(b.trailedStopLoss) - Number(livePaper.stopLoss || 0)) > 1e-9
+    && now - rt.lastPaperSlAt >= SUPER_AGENT_PAPER_SL_MIN_MS
+    && typeof paper.updatePaperTradeStopLoss === 'function') {
+    // Restart/divergence repair: book row and paper mirror must agree.
+    rt.lastPaperSlAt = now;
+    try { paper.updatePaperTradeStopLoss(livePaper.id, b.trailedStopLoss, b.execMarket || b.market || null); } catch { /* non-fatal */ }
+  }
+
+  // LIVE exchange SL/TP sync — throttled to ~2s (the 3s backstop uses 4.5s).
+  if (isLivePos && typeof pp.liveUpdateSl === 'function'
+    && (deepEval.slTrailed || b.slSyncPending || b.tpSyncPending || trailAction === 'TP2_EXTENDED')
+    && now - rt.lastExchangeAt >= SUPER_AGENT_EXCHANGE_SYNC_MIN_MS) {
+    rt.lastExchangeAt = now;
+    try {
+      const slRes = await pp.liveUpdateSl({
+        ...b,
+        stopLoss: Number(b.trailedStopLoss ?? b.stopLoss) || 0,
+        takeProfit: Number(b.t2) || 0,
+      });
+      if (slRes?.ok) {
+        if (Number(b.trailedStopLoss ?? b.stopLoss) > 0) b.lastExchangeSl = Number(b.trailedStopLoss ?? b.stopLoss);
+        if (Number(b.t2) > 0) b.lastExchangeTp = Number(b.t2);
+        b.slSyncPending = false;
+        b.tpSyncPending = false;
+      } else {
+        // Never claim a tighter stop than the exchange actually accepted.
+        b.slSyncPending = true;
+      }
+    } catch {
+      b.slSyncPending = true;
+    }
+  }
+
+  // ---- state machine + telemetry ----
+  if (b.t1Hit || tp1Booked) b.superAgentState = 'TP1_SECURED';
+  else if (b.superAgentState !== 'MONITORING') b.superAgentState = 'MONITORING';
+  b.superAgentLastTickAt = now;
+
+  if (prevStage && deepEval.stageCode !== prevStage && now - rt.lastLogAt >= SUPER_AGENT_LOG_MIN_MS) {
+    rt.lastLogAt = now;
+    _logEvent('super-stage', `🤖 SUPER AGENT ${b.symbol} ${b.side}: ${deepEval.stageCode} @ ${ltp} (${deepEval.currentR}R) — ${deepEval.stageLabel}`);
+  }
+  _superAgentPersist(false);
+
+  return {
+    ...baseOut,
+    ok: true,
+    side: b.side,
+    state: b.superAgentState,
+    action: tp1Booked ? 'TP1_PARTIAL_BOOKED' : trailAction,
+    closed: false,
+    currentR: deepEval.currentR,
+    peakR: deepEval.peakR,
+    ltp,
+    tp1Hit: Boolean(b.t1Hit),
+    tp2Hit: Boolean(deepEval.tp2Hit),
+    adverseConfirmed,
+    velocityPct: Number(input.velocityPct) || 0,
+  };
+}
+
+/**
+ * Open AUTO-engine rows for the tick router. Deliberately does NOT run the
+ * deep monitor / persist — it is a cheap read called on every registry sync.
+ */
+export function getAutoTradeSuperAgentOpenTrades() {
+  const cfg = loadMtfAutoConfig();
+  const st = _loadState();
+  return st.book
+    .filter(b => b && b.status === 'OPEN' && isGenuinelyTradedEntry(b, cfg))
+    .filter(b => b.autoTrade === true || b.openedBy === 'AUTO' || b.flipEntry === true)
+    .map(b => ({
+      symbol: String(b.symbol || '').toUpperCase(),
+      market: String(b.market || '').toUpperCase(),
+      execMarket: String(b.execMarket || b.market || 'FUTURES').toUpperCase(),
+      side: normalizeSide(b.side) || String(b.side || '').toUpperCase(),
+      entry: Number(b.entry) || 0,
+      t1: Number(b.t1) || 0,
+      t2: Number(b.t2) || 0,
+      stopLoss: Number(b.trailedStopLoss ?? b.stopLoss) || 0,
+      initialStopLoss: Number(b.initialStopLoss ?? b.stopLoss) || 0,
+      directionVerified: b.directionVerified === true,
+      executionMode: b.executionMode || 'PAPER',
+      paperId: b.paperId ?? null,
+      openedAt: Number(b.openedAt) || 0,
+      holdMin: Number(b.holdMin) || null,
+      superAgentState: b.superAgentState || 'ARMED',
+      superAgentIdleReason: b.superAgentIdleReason || null,
+      ltp: Number(b.ltp) || 0,
+      currentR: Number(b.currentR) || 0,
+      peakR: Number(b.peakR) || 0,
+      atrPct: Number(b.atrPct) || null,
+    }));
+}
+
+/**
+ * Called by the tick router when a trade disappears from the open book. Stamps
+ * the CLOSED row so the UI/API can show "agent returned to IDLE" even when the
+ * close came from the paper engine / exchange sync (not from the agent itself).
+ */
+export function markAutoTradeSuperAgentIdle({ symbol, market = null, reason = 'TRADE_CLOSED', state = 'IDLE', at = Date.now() } = {}) {
+  const sym = String(symbol || '').toUpperCase();
+  if (!sym) return false;
+  const st = _loadState();
+  let target = null;
+  for (const b of st.book) {
+    if (!b || String(b.symbol || '').toUpperCase() !== sym) continue;
+    if (market && String(b.market || '').toUpperCase() !== String(market).toUpperCase()) continue;
+    if (b.status !== 'CLOSED') continue;
+    if (!target || Number(b.closedAt || b.openedAt || 0) >= Number(target.closedAt || target.openedAt || 0)) target = b;
+  }
+  if (!target) return false;
+  if (target.superAgentState === state && target.superAgentIdleReason === reason) return true;
+  target.superAgentState = state;
+  target.superAgentIdleReason = reason;
+  target.superAgentIdleAt = Number(at) || Date.now();
+  _superAgentPersist(true);
+  return true;
 }
 
 /**
@@ -3248,6 +3968,13 @@ export function recordLiveMtfBoardTrade(item = {}) {
     existing.openedAt = now;
     existing.deepMonitorStage = 'STAGE_0_INITIAL_GUARD';
     existing.deepMonitorLabel = isPaperExec ? 'Stage 0 · Paper Direction Test · SL Auto-Trail Ready' : 'Stage 0 · Initial SL Guard (Full Control)';
+    // v21.26.0: re-anchored lifecycle = fresh agent lifecycle.
+    existing.superAgentState = 'ARMED';
+    existing.superAgentIdleReason = null;
+    existing.superAgentTickCount = 0;
+    existing.superAgentLastTickAt = null;
+    existing.superAgentActions = [];
+    existing.superAgentExitPendingAt = 0;
     existing.trendStatus = `📡 ${sideNorm === 'SHORT' ? 'BEARISH' : 'BULLISH'} LIVE WATCH (+0.00R)`;
     existing.closeReason = null;
     existing.closedAt = null;
@@ -3464,6 +4191,9 @@ export function __resetMtfAutoForTests(seed = null) {
   _bootPersistenceReady = true;
   if (_bootPersistenceTimer) { clearTimeout(_bootPersistenceTimer); _bootPersistenceTimer = null; }
   _lastBoardRowSeenMap.clear(); // v21.23.10: board-rotation snapshot cache bhi module state hai
+  _superAgentExitLocks.clear();
+  _superAgentRuntime.clear();
+  _superAgentLastPersistAt = 0;
   __resetDirectionLocksForTests();
   try { fs.unlinkSync(CFG_FILE()); } catch { /* absent */ }
   try { fs.unlinkSync(STATE_FILE()); } catch { /* absent */ }

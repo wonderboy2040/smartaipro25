@@ -37,7 +37,7 @@ import { getSignals, getDeepSignal, getFreshSignalForExec, getFreshFuturesSignal
 // only ever called by /api/intraday-scanner, which no frontend polls).
 import { setScanSymbols as intradaySetScanSymbols, getLatestQuotes } from '../intraday/stream.js';
 import { getDirectionReport } from '../intraday/trackRecord.js';
-import { openPaperTrade as openPaperTradeExec, closePaperTrade as closePaperTradeExec, voidPaperTrade as voidPaperTradeExec, getPaperSummary as getPaperSummaryExec, updatePaperTradeStopLoss, updatePaperTradeT1ClosePct, updatePaperTradeTarget2, evaluatePaper } from '../intraday/paperTrading.js';
+import { openPaperTrade as openPaperTradeExec, closePaperTrade as closePaperTradeExec, voidPaperTrade as voidPaperTradeExec, getPaperSummary as getPaperSummaryExec, updatePaperTradeStopLoss, updatePaperTradeT1ClosePct, updatePaperTradeTarget2, bookPaperT1Partial as bookPaperT1PartialExec, evaluatePaper } from '../intraday/paperTrading.js';
 // v20.2 ACCOUNTABILITY: the board's ACTIONABLE signals (STRONG + ACTION
 // with a plan) feed the signal Track Record — the panel's "har published
 // signal track hota hai" promise is finally true for the board the user
@@ -218,7 +218,13 @@ import { dhanConnect, dhanDisconnect, dhanConnected, dhanProfile, scripMasterSta
 import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 // v21.16.0 + v21.20.0 MTF SIGNALS BOARD (Dual-Timeframe) + AUTO-LINK engine
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, mtfProEntryGate, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
-import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced } from './mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, getAutoTradeSuperAgentOpenTrades } from './mtfAutoLink.js';
+// v21.26.0 AI SUPER INTELLIGENCE — per-trade tick agent. Owns only routing /
+// registry / stream holds; every trade decision is mtfAutoLink's
+// mtfAutoSuperAgentManage (same gates as the 15s/60s sweeps).
+import {
+  startAutoTradeSuperAgent, refreshAutoTradeSuperAgent, autoTradeSuperAgentStatus,
+} from './autoTradeSuperAgent.js';
 // v21.25.0 DIRECTION CERTIFICATE — every manual board PAPER/LIVE order proves
 // signal side → exchange order side before touching a broker.
 import { buildDirectionCertificate, normalizeSide } from './directionCertificate.js';
@@ -1678,6 +1684,88 @@ export function registerAITradingRoutes(app, deps) {
     };
   };
 
+  // ------------------------------------------------------------
+  // v21.26.0 AI SUPER AGENT — injected server deps.
+  // The tick agent itself is pure route-agnostic (autoTradeSuperAgent.js);
+  // these adapters give it the same quote / board / live-handler truth the
+  // 15s and 60s sweeps already use.
+  // ------------------------------------------------------------
+  const SUPER_AGENT_LIVE_CTX_TTL_MS = 15_000;
+  let _superAgentLiveCtx = null;
+  let _superAgentLiveCtxAt = 0;
+  let _superAgentLiveCtxP = null;
+
+  /** Cached live context. Wallet snapshots are far too expensive for a WS
+   *  tick path; the handlers themselves (close/SL/execute) are stateless. */
+  const getSuperAgentLiveCtx = async () => {
+    const now = Date.now();
+    if (_superAgentLiveCtx && now - _superAgentLiveCtxAt < SUPER_AGENT_LIVE_CTX_TTL_MS) return _superAgentLiveCtx;
+    if (_superAgentLiveCtxP) return _superAgentLiveCtxP;
+    const p = mtfAutoLiveCtx(loadMtfAutoConfig())
+      .then((lc) => {
+        if (lc && typeof lc === 'object') {
+          _superAgentLiveCtx = lc;
+          _superAgentLiveCtxAt = Date.now();
+        }
+        return lc;
+      })
+      .finally(() => { _superAgentLiveCtxP = null; });
+    _superAgentLiveCtxP = p;
+    return p;
+  };
+
+  /** One market-qualified quote from the server stream cache. This is the
+   *  FALLBACK path only — liveFeed's WebSocket tick is primary. */
+  const superAgentQuoteFor = (symbol, market, execMarket = null) => {
+    const raw = String(symbol || '').toUpperCase().trim();
+    if (!raw) return null;
+    const mk = String(market || '').toUpperCase();
+    const exec = String(execMarket || mk || '').toUpperCase();
+    const sym = normalizeLinkSymbol(raw, mk || exec);
+    if (!sym) return null;
+    const data = getLatestQuotes()?.data || {};
+    const keys = [
+      `${exec}|${sym}`, `${mk}|${sym}`, `${exec}|${raw}`, `${mk}|${raw}`,
+      sym, raw,
+    ];
+    const usdDesk = ['FUTURES', 'GLOBALFUTURES', 'METALS', 'CRYPTO'].includes(exec)
+      || ['FUTURES', 'GLOBALFUTURES', 'METALS', 'CRYPTO'].includes(mk);
+    for (const key of keys) {
+      if (!key) continue;
+      const row = data[key];
+      const px = typeof row === 'object' ? Number(row?.price ?? row?.ltp) : Number(row);
+      if (!(px > 0)) continue;
+      // Plain symbol keys can be INR spot while the trade is USDT/USDC.
+      // Qualified keys are authoritative; reject a plain INR source for USD.
+      if (usdDesk && !String(key).includes('|') && /inr/i.test(String(row?.src || ''))) continue;
+      return px;
+    }
+    return null;
+  };
+
+  /** Freshest warm MTF row for an open trade (top-6 rotation safe: the agent
+   *  also has its own 120s snapshot fallback inside mtfAutoLink). */
+  const superAgentBoardRow = (symbol, market = null) => {
+    const mk = String(market || '').toUpperCase();
+    const want = normalizeLinkSymbol(symbol, mk || 'CRYPTO');
+    if (!want) return null;
+    for (const board of peekDualMtfBoards(120_000)) {
+      const bm = String(board?.market || '').toUpperCase();
+      const deskMatches = bm === mk
+        || ((mk === 'CRYPTO' || mk === 'FUTURES' || mk === 'METALS' || mk === 'GLOBALFUTURES')
+          && bm === 'CRYPTO');
+      if (!deskMatches) continue;
+      const rows = [
+        ...(board?.rows || []),
+        ...(board?.metalsRows || []),
+        ...(board?.equitySimRows || []),
+      ];
+      const row = rows.find(r => r && normalizeLinkSymbol(r.symbol, mk || bm) === want);
+      if (row) return row;
+    }
+    return null;
+  };
+
   // A2 FIX: throttle exchange sync in /status — single-flighted + 10s TTL.
   // Background tick (lines 3296/3483) already syncs; /status polls (2-5s) don't
   // need fresh sync every time. Prevents CoinDCX rate-limit/timeouts that cascade
@@ -1768,6 +1856,9 @@ export function registerAITradingRoutes(app, deps) {
         deskArmable: ready.deskArmable,
         killSwitch: ready.killSwitch,
         coindcxConnected: ready.hasCreds,
+        // v21.26.0: dedicated per-trade tick agent health + live states
+        // (ARMED / MONITORING / TP1_SECURED / FLIPPED / PAUSED / IDLE).
+        superAgent: autoTradeSuperAgentStatus(),
       });
     } catch (e) {
       jsonError(res, 500, 'mtf auto status failed', e);
@@ -1905,6 +1996,8 @@ export function registerAITradingRoutes(app, deps) {
         liveClose: liveCtx.liveClose,
         notify: sendTelegram,
       });
+      // New AUTO entries arm their dedicated tick agent in this same turn.
+      refreshAutoTradeSuperAgent();
       res.json({ ok: true, tick: out });
     } catch (e) {
       jsonError(res, 500, 'mtf auto run failed', e);
@@ -3719,6 +3812,7 @@ export function registerAITradingRoutes(app, deps) {
         liveClose: liveCtx.liveClose,
         notify: sendTelegram,
       });
+      refreshAutoTradeSuperAgent();
     } catch { /* non-fatal — mtf auto logs its own errors */ }
   }, MTF_AUTO_TICK_SEC * 1000);
   if (mtfAutoLoop.unref) mtfAutoLoop.unref();
@@ -3926,6 +4020,8 @@ export function registerAITradingRoutes(app, deps) {
           liveClose: liveCtx.liveClose,
           notify: sendTelegram,
         });
+        // A fresh 15s board may have opened a trade (or a flip-reverse row).
+        refreshAutoTradeSuperAgent();
       } catch { /* non-fatal */ }
     };
 
@@ -4017,6 +4113,55 @@ export function registerAITradingRoutes(app, deps) {
     finally { _fastProbeBusy = false; }
   }, 10_000);
   if (fastEntryProbeLoop.unref) fastEntryProbeLoop.unref();
+
+  // ------------------------------------------------------------
+  // v21.26.0 AI SUPER INTELLIGENCE — start the per-trade tick agent.
+  // Primary path: liveFeed.subscribe → mtfAutoSuperAgentManage (same event-loop
+  // turn as the upstream WebSocket tick). The 1s timer inside the agent is a
+  // watchdog/fallback only. Stream holds keep headless AUTO trades fed even
+  // when no browser SSE client is connected.
+  // ------------------------------------------------------------
+  startAutoTradeSuperAgent({
+    getOpenTrades: getAutoTradeSuperAgentOpenTrades,
+    getQuoteFor: superAgentQuoteFor,
+    getBoardRow: superAgentBoardRow,
+    getQuotes: () => (getLatestQuotes()?.data || {}),
+    getFx: () => mtfLiveFx(),
+    getLiveCtx: getSuperAgentLiveCtx,
+    isKillSwitch: () => { try { return loadConfig()?.killSwitch === true; } catch { return false; } },
+    ensureSubs: ({ crypto = [], india = [], fut = [], glob = [] } = {}) => {
+      if (crypto.length) ensureCryptoSubscribed(crypto);
+      if (india.length) ensureInSubscribed(india);
+      if (fut.length || glob.length) ensureCxRtSubscribed({ fut, glob });
+    },
+    releaseSubs: ({ crypto = [], india = [], fut = [], glob = [] } = {}) => {
+      if (crypto.length) releaseCryptoSubscribed(crypto);
+      if (india.length) releaseInSubscribed(india);
+      if (fut.length || glob.length) releaseCxRtSubscribed({ fut, glob });
+    },
+    clientUp: (domain) => {
+      if (domain === 'crypto') cryptoClientUp();
+      else if (domain === 'india') inClientUp();
+      else if (domain === 'cxrt') cxRtClientUp();
+    },
+    clientDown: (domain) => {
+      if (domain === 'crypto') cryptoClientDown();
+      else if (domain === 'india') inClientDown();
+      else if (domain === 'cxrt') cxRtClientDown();
+    },
+    paper: {
+      openPaperTrade: openPaperTradeExec,
+      closePaperTrade: closePaperTradeExec,
+      voidPaperTrade: voidPaperTradeExec,
+      getPaperSummary: getPaperSummaryExec,
+      bookPaperT1Partial: bookPaperT1PartialExec,
+      updatePaperTradeStopLoss,
+      updatePaperTradeT1ClosePct,
+      updatePaperTradeTarget2,
+      evaluatePaper,
+    },
+    notify: sendTelegram,
+  });
 
   // v10.16 SECTION 2: the MANUAL TRADE monitor — 5s LTP sweep + 30s
   // conviction re-vote (cached deep path) + telegram pushes on flip /

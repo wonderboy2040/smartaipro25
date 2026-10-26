@@ -322,6 +322,21 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   const armBlockWhy = !isLiveAuto && deskArmable?.armable === false
     ? (deskArmable.why || 'LIVE prerequisites are not met')
     : null;
+  // v21.26.0 AI SUPER AGENT: this desk's live tick agents (WS hot path) and
+  // their states. Purely display — the server agent remains the single owner.
+  const superAgentTrades = (auto?.superAgent?.trades || []).filter(t => (
+    deskKey === 'india'
+      ? String(t.market || '').toUpperCase() === 'INDIA'
+      : String(t.market || '').toUpperCase() !== 'INDIA'
+  ));
+  const superAgentStates = [...new Set(superAgentTrades.map(t => t.state).filter(Boolean))];
+  const superAgentTitle = auto?.superAgent
+    ? [
+        `Primary: ${auto.superAgent.primarySource || 'WebSocket tick'} · polling ${auto.superAgent.pollingMs ?? 0}ms · fallback watchdog ${auto.superAgent.fallbackMs ?? 1000}ms`,
+        'TP2 hit → agent IDLE · confirmed reversal → minimal-loss close + immediate reverse entry',
+        ...superAgentTrades.map(t => `${t.symbol} ${t.side || ''} ${t.state} · ${t.tickCount ?? 0} ticks · ${t.lastSource || 'waiting'} · handler ${t.lastHandlerMs ?? '—'}ms`),
+      ].join('\n')
+    : 'AI super agent status unavailable';
   const activeTradedRows = useMemo(
     () => (auto?.deepMonitor?.trades || []).filter(t => t.traded !== false),
     [auto?.deepMonitor?.trades],
@@ -789,6 +804,21 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
               <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/40 text-[9px] font-mono text-emerald-200">
                 🔒 Full CoinDCX Active Position Control · Sirf Active Traded Positions · TP1/TP2 + SL Trail + Reversal Profit-Book
               </span>
+              {auto?.superAgent?.running && (
+                <span
+                  data-testid="mtf-super-agent-badge"
+                  className={`px-2 py-0.5 rounded-md border text-[9px] font-mono ${
+                    superAgentTrades.length > 0
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                      : 'bg-slate-500/10 border-slate-500/30 text-slate-300'
+                  }`}
+                  title={superAgentTitle}
+                >
+                  🤖 AI SUPER AGENT · {superAgentTrades.length > 0
+                    ? `${superAgentTrades.length} × ${superAgentStates.join(' / ')}`
+                    : 'READY · WS TICK 0ms'}
+                </span>
+              )}
             </div>
             <div className="mt-1 text-[9px] font-mono text-slate-400">
               {statusLine}

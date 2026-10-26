@@ -698,6 +698,55 @@ export function paperCircuitWatch(quotes, events, opts = {}) {
   return fired;
 }
 
+/**
+ * v21.26.0 AI SUPER AGENT — single-trade TP1 partial book.
+ *
+ * The tick-driven per-trade agent must book TP1 the moment the WebSocket tick
+ * crosses it — waiting for the 3s evaluatePaper sweep defeats the purpose.
+ * Calling evaluatePaper() itself would also re-evaluate every other open trade
+ * against a one-symbol quote map (stale lastPrice = cross-trade side effects),
+ * so this is the exact TP1 branch scoped to one trade.
+ *
+ * Math/behavior is IDENTICAL to evaluatePaper()'s `if (hitT1)` block:
+ *   • t1ClosePct partial (default 50%, clamped 5–90%)
+ *   • fractional qty for USD desks, ceil for INR
+ *   • un-splittable 1-unit position → SL moved to breakeven (runner intact)
+ */
+export function bookPaperT1Partial(id, price) {
+  const t = _state.trades.find(x => x.id === id && x.status !== 'CLOSED');
+  if (!t) return { ok: false, error: 'Open paper trade not found' };
+  if (t.t1Hit) return { ok: false, error: 'T1 already booked' };
+  const px = Number(price);
+  if (!(px > 0)) return { ok: false, error: 'Invalid price' };
+  const t1 = Number(t.target1) || 0;
+  if (!(t1 > 0)) return { ok: false, error: 'No target1' };
+  const isLong = t.direction === 'LONG';
+  if (!(isLong ? px >= t1 : px <= t1)) return { ok: false, error: 'T1 not touched' };
+
+  t.t1Hit = true;
+  // Vol-aware partial: same clamp + default as evaluatePaper.
+  const t1Pct = Number.isFinite(Number(t.t1ClosePct)) && Number(t.t1ClosePct) >= 0.05 && Number(t.t1ClosePct) <= 0.90
+    ? Number(t.t1ClosePct)
+    : 0.5;
+  // Fractional-safe T1 booking: t1Pct of the position (4dp for crypto).
+  const partQty = _isUsdDesk(_marketOfTrade(t))
+    ? +((t.qty * t1Pct).toFixed(4))
+    : Math.ceil(t.qty * t1Pct);
+
+  let note;
+  if (partQty > 0 && partQty < t.remainingQty) {
+    _closePart(t, partQty, t.target1, 'T1_BOOK');
+    if (t.status !== 'CLOSED') t.status = 'PARTIAL';
+    note = `booked ${Math.round(t1Pct * 100)}% at T1, trail to entry`;
+  } else {
+    // A 1-unit position cannot be split — protect the runner at breakeven.
+    t.stopLoss = t.entry;
+    note = 'T1 touched — 1 lot split nahi hota, SL breakeven pe shifted (runner T2/BE tak)';
+  }
+  _persist();
+  return { ok: true, trade: t, t1Pct, note };
+}
+
 export function closePaperTrade(id, quotes, reason = 'MANUAL') {
   const t = _state.trades.find(x => x.id === id && x.status !== 'CLOSED');
   if (!t) return { error: 'Open paper trade not found.' };

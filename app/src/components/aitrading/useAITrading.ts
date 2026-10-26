@@ -1326,6 +1326,42 @@ export interface MtfAutoStatus {
     }>;
     checkedAt: number;
   };
+  /** v21.26.0 — dedicated per-trade AI super agent telemetry.
+   *  Primary path = liveFeed WebSocket tick (pollingMs 0); fallbackMs is the
+   *  watchdog only. States: ARMED | MONITORING | TP1_SECURED | FLIPPED | PAUSED | IDLE. */
+  superAgent?: {
+    ok: boolean;
+    running: boolean;
+    engine?: string;
+    primarySource?: string;
+    pollingMs: number;
+    fallbackMs: number;
+    startedAt?: number | null;
+    lastTickAt?: number | null;
+    lastActionAt?: number | null;
+    registryCount: number;
+    subscribedKeys?: string[];
+    velocityGuard?: {
+      windowMs: number; minSpanMs: number; minMovePct: number;
+      hardMovePct: number; consecutiveTicks: number; note?: string;
+    };
+    trades: Array<{
+      key: string; symbol: string; market: string; execMarket?: string;
+      side?: DirectionSide | null; state: string; idleReason?: string | null;
+      tradeKey: string; executionMode?: string; paperId?: number | string | null;
+      entry?: number; stopLoss?: number; t1?: number; t2?: number;
+      ltp?: number | null; tickCount?: number; lastTickAt?: number | null;
+      lastTickAgeMs?: number | null; lastHandlerMs?: number | null;
+      lastSource?: string | null; lastAction?: string | null; lastActionAt?: number | null;
+      lastError?: string | null; subscribed?: boolean; armedAt?: number | null;
+    }>;
+    idle?: Array<{
+      at: number; symbol: string; market: string; execMarket?: string;
+      state: string; reason: string; ticks?: number;
+      lastPrice?: number | null; opener?: number | null;
+    }>;
+    note?: string;
+  };
   day?: string | null; dayCount: number;
   /** v21.25.1 — session-aware quota count (manual PAPER test rows excluded). */
   dayQuotaCount?: number;
