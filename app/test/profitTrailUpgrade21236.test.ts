@@ -54,6 +54,9 @@ function dmTrade(over = {}) {
     symbol: 'BTCUSDT', market: 'FUTURES', execMarket: 'FUTURES', ccy: 'USDT',
     side: 'LONG', entry: 100, entryPrice: 100, stopLoss: 99, initialStopLoss: 99,
     t1: 101, t2: 102, qty: 1, peakPrice: 100, openedAt: NOW - 10 * 60_000,
+    // v21.26.1: this suite locks the LEGACY v1/v2 stage engine. Pro defaults
+    // ON in production; explicit false keeps the old-behavior coverage.
+    proExitPolicy: false,
     ...over,
   };
 }

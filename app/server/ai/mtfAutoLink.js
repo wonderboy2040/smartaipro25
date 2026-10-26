@@ -136,6 +136,16 @@ export const MTF_AUTO_DEFAULTS = {
   aboveTenKLeverage: 5,
   feeAwareReversalExit: true,
   deepMonitorEnabled: true,        // v21.22.0: Realtime Active-Trade Deep Monitor + Trailing SL + Reversal Profit Book
+  // v21.26.1 PRO TRADER EXIT POLICY (user spec): "TP1 reach hone se pehle SL
+  // trail bilkul nahi hona chahiye - normal pullback ko reversal mat samjho.
+  // TP1 ke baad SL entry/fee-breakeven par, TP2 ke karib SL TP1 par, TP2 hit
+  // par full close. TP1 se pehle pakka reversal ho to fees cover hone par
+  // no-loss scratch." true = pro ladder; false = legacy v1/v2 stage trail
+  // (kept only as an explicit diagnostic escape hatch).
+  proExitPolicy: true,
+  // 0 = UNLIMITED daily trades (user spec). Finite values keep the old hard
+  // cap. The 1-session/1-open-trade lock still applies regardless.
+  // (maxTradesPerDay default 5 below stays the conservative default.)
   // v21.23.6 USER SPEC: "jab trade successful close hone LIVE Auto trade 5 min ka
   // cooldown lagake then phir auto trade signals me ELITE top trade verify karke
   // trade lagna chahiye" — successful close ke baad LIVE re-entry sirf
@@ -176,7 +186,7 @@ const CLAMPS = {
   dailyLossPct: [0, 10],
   maxPositionsINR: [1000, 1000000],
   maxNotionalPerTradeINR: [1000, 500000],
-  maxTradesPerDay: [1, 25],
+  maxTradesPerDay: [0, 25],         // 0 = unlimited (user spec)
   maxOpenPositions: [1, 10],        // paper engine ka apna 10-open guard bhi hai
   cooldownMin: [5, 720],
   inrPerUsdt: [40, 150],
@@ -313,6 +323,8 @@ function _sanitizeCfg(cfg) {
   out.liveEntryPaused = cfg.liveEntryPaused === true;
   out.feeAwareReversalExit = cfg.feeAwareReversalExit !== false;
   out.deepMonitorEnabled = cfg.deepMonitorEnabled !== false;
+  // v21.26.1 PRO TRADER EXIT POLICY - default ON; explicit opt-out only.
+  out.proExitPolicy = cfg.proExitPolicy !== false;
   // v21.23.8: UC FLIP-AND-REVERSE — default ON; config se OFF ho sakta hai
   // (ucFlipReverse:false → confirmed flip par sirf protective close, reverse
   // entry nahi — user ka explicit opt-out).
@@ -677,6 +689,24 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
 
   const tp1Touched = Boolean(trade.t1Hit || trade.tp1Hit || (t1 > 0 && (isLong ? peakPrice >= t1 : peakPrice <= t1)));
 
+  // v21.26.1 PRO TRADER EXIT LADDER ---------------------------------------
+  // Pre-TP1: initial SL is LOCKED. No stage trail, no defensive tighten, no
+  // reversal-hint lock. A routine pullback is NOT a reversal and must never
+  // move the stop. TP1 -> SL at fee-breakeven; TP2 progress >= 80% -> SL at
+  // TP1; TP2 touched -> full close. Pre-TP1 confirmed reversal -> fee-safe
+  // scratch ONLY once round-trip fees are covered (otherwise initial SL is
+  // the backstop - "no loss" is mathematically impossible below fee floor).
+  // Explicitly passing proExitPolicy:false keeps the legacy v1/v2 stage
+  // engine available for diagnostics/tests.
+  const proExitPolicy = (liveCtx.proExitPolicy ?? trade.proExitPolicy ?? true) !== false;
+  const tp2Span = t2Base > 0 ? (isLong ? (t2Base - entry) : (entry - t2Base)) : 0;
+  // v21.26.2: "TP2 ke karib aate hi SL TP1 par" — approach is measured on the
+  // FAVOURABLE EXTREME, not the current tick. A spike to >=80% followed by a
+  // pullback must still lock the TP1 stop (the exchange TP order would have
+  // been armed there); only TP2 TOUCH itself closes the position.
+  const tp2ProgressPct = tp2Span > 0 ? +((peakMove / tp2Span) * 100).toFixed(2) : 0;
+  const tp2Approach = tp2Span > 0 && tp2ProgressPct >= 80;
+
   // v21.23.7 VOLATILITY-ADAPTIVE TRAIL PROFILE — LIVE ATR% (board context)
   // > entry-stamp (trade.atrPct) > 15s-tick stamp (trade.volClass) > NORMAL.
   // Momentum (trigger roc1/roc3/volRatio) SURGING pe trail WIDEN karta hai
@@ -718,8 +748,11 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const smartExtBeforeTarget = Boolean(
     smartExt && t2Base > 0 && (isLong ? ltp < t2Base : ltp > t2Base),
   );
-  const t2 = (smartEnforce && allowTpExtension && smartExtBeforeTarget) ? smartExt.newT2 : t2Base;
-  const t2Extended = Boolean(smartEnforce && allowTpExtension && smartExtBeforeTarget);
+  // Rolling TP2 belongs to the legacy smart-trail engine. PRO policy must keep
+  // the ORIGINAL TP2: "TP2 hit hote hi trade close" (a moving target would
+  // silently postpone the full-profit exit). Shadow telemetry is still exposed.
+  const t2 = (!proExitPolicy && smartEnforce && allowTpExtension && smartExtBeforeTarget) ? smartExt.newT2 : t2Base;
+  const t2Extended = Boolean(!proExitPolicy && smartEnforce && allowTpExtension && smartExtBeforeTarget);
   const tp2Touched = Boolean(t2 > 0 && (isLong ? ltp >= t2 : ltp <= t2));
   const smartPlan = smartCfg
     ? smartTrailPlan({
@@ -728,7 +761,8 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     }, smartCfg)
     : null;
   // v2 takes over the profit-locking stages (3/4/5) only when enforced AND active.
-  const smartTakesOver = Boolean(smartEnforce && smartPlan?.active);
+  // PRO policy owns the whole ladder - never let an enforce-mode env override it.
+  const smartTakesOver = Boolean(!proExitPolicy && smartEnforce && smartPlan?.active);
 
   // Multi-Stage Dynamic Trailing SL computation
   let stageCode = 'STAGE_0_INITIAL_GUARD';
@@ -746,6 +780,22 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     stageCode = 'STAGE_5_TP2_HIT';
     stageLabel = 'Stage 5 · TP2 Target Hit (Full Profit Book)';
     candidateSl = tightenSl(candidateSl, t1 > 0 ? t1 : priceAtR(1.2));
+  } else if (proExitPolicy) {
+    // PRO LADDER: exactly two profit checkpoints after TP1. No chandelier,
+    // no giveback ratchet, no smart-trail override.
+    if (tp1Touched && tp2Approach) {
+      stageCode = 'STAGE_5_RUNNER_TO_TP2';
+      stageLabel = 'Stage 5 - TP2 Approach | SL Locked at TP1';
+      candidateSl = tightenSl(candidateSl, t1 > 0 ? t1 : (feeFloor > 0 ? feeFloor : entry));
+    } else if (tp1Touched) {
+      stageCode = 'STAGE_4_TP1_LOCKED';
+      stageLabel = 'Stage 4 - TP1 Secured | SL Locked at Fee-Breakeven';
+      candidateSl = tightenSl(candidateSl, feeFloor > 0 ? feeFloor : entry);
+    } else {
+      stageCode = 'STAGE_0_INITIAL_GUARD';
+      stageLabel = 'Stage 0 - Initial SL Guard (PRO: no trail before TP1)';
+      // candidateSl stays at the carried stop - initial SL is the backstop.
+    }
   } else if (peakR >= 1.4 || (tp1Touched && peakR >= 1.25)) {
     stageCode = 'STAGE_5_RUNNER_TO_TP2';
     stageLabel = 'Stage 5 · TP1 Locked + Structure Trail → TP2';
@@ -850,13 +900,13 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   // HIGH/EXTREME me ek-candle 45% noise-giveback ab book NAHI karta.
   // v21.24.0: when v2 owns the trail, the noise-aware trailed SL handles pullbacks;
   // the ratio-based "book on 45% giveback" exit was inside the noise band.
-  const peakPullbackReversal = !smartTakesOver && peakR >= 0.50 && peakGivebackRatio >= (profile.givebackRatioPct / 100) && givebackR >= profile.givebackAbsFloorR && feeCovered;
+  const peakPullbackReversal = !smartTakesOver && !proExitPolicy && peakR >= 0.50 && peakGivebackRatio >= (profile.givebackRatioPct / 100) && givebackR >= profile.givebackAbsFloorR && feeCovered;
   const trailedSlHit = candidateSl > 0 && (isLong ? ltp <= candidateSl : ltp >= candidateSl);
   const slImproved = candidateSl > 0 && currentSl > 0 && Math.abs(candidateSl - currentSl) > 1e-7 && (isLong ? candidateSl > currentSl : candidateSl < currentSl);
 
   // If mild reversal signal appears before feeCovered (either explicit boardFlipped, or giveback after peakR >= 0.45),
   // defensively tighten SL to -0.35R to prevent full SL hit
-  if ((boardFlipped || reversalRiskHint || peakGivebackRatio >= 0.45) && !feeCovered && currentR > -0.30) {
+  if (!proExitPolicy && (boardFlipped || reversalRiskHint || peakGivebackRatio >= 0.45) && !feeCovered && currentR > -0.30) {
     candidateSl = tightenSl(candidateSl, priceAtR(-0.35));
     stageLabel = `${stageLabel} · Defensive Reversal Tighten`;
   }
@@ -867,29 +917,42 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   // isliye lock ko wide rakhna padta hai) pe lock karo (min +0.15R) —
   // giveback protection WITHOUT closing a potentially-still-strong trend.
   // tightenSl monotonic hai — stage locks isse loose nahi hote.
-  if (!smartTakesOver && reversalRiskHint && feeCovered && peakR >= 0.45) {
+  if (!smartTakesOver && !proExitPolicy && reversalRiskHint && feeCovered && peakR >= 0.45) {
     const hintLockR = Math.max(0.15, +(peakR - profile.hintGivebackR).toFixed(2));
     candidateSl = tightenSl(candidateSl, priceAtR(hintLockR));
     stageLabel = `${stageLabel} · Reversal-Risk Profit-Lock`;
   }
 
   const reversalConfirmed = Boolean(boardFlipped || peakPullbackReversal || liveCtx.reversalConfirmed);
+  // PRO: pre-TP1 only a CONFIRMED reversal (board flip / explicit confirmation)
+  // can scratch the trade, and only AFTER round-trip fees are covered. A
+  // normal pullback never qualifies. Post-TP1 a confirmed reversal exits at
+  // the locked fee-BE/TP1 stop - never at a fee loss.
+  const proPreTp1Scratch = proExitPolicy && !tp1Touched && reversalConfirmed && feeCovered;
+  const proPostTp1Reversal = proExitPolicy && tp1Touched && !tp2Touched && reversalConfirmed && feeCovered;
+  const legacyReversalProfit = !proExitPolicy && reversalConfirmed && feeCovered && currentR >= 0.12;
   const shouldBookProfitNow = Boolean(
     tp2Touched
-    || (reversalConfirmed && feeCovered && currentR >= 0.12)
+    || proPreTp1Scratch
+    || proPostTp1Reversal
+    || legacyReversalProfit
     || (trailedSlHit && feeCovered && peakR >= 0.50)
   );
   const shouldExitDefensiveSl = Boolean(trailedSlHit && !shouldBookProfitNow);
 
   const exitReason = tp2Touched
     ? 'TP2_TARGET_HIT_FULL_PROFIT'
-    : (reversalConfirmed && feeCovered && currentR >= 0.12)
-      ? (tp1Touched ? 'T1_BOOKED_REVERSAL_PROFIT_LOCK' : 'PRE_T1_REVERSAL_PROFIT_BOOKED')
-      : (trailedSlHit && feeCovered)
-        ? 'TRAILED_SL_PROFIT_BOOKED'
-        : shouldExitDefensiveSl
-          ? 'TRAILED_SL_PROTECTIVE_EXIT'
-          : null;
+    : proPreTp1Scratch
+      ? 'PRE_T1_REVERSAL_FEE_SAFE_SCRATCH'
+      : proPostTp1Reversal
+        ? 'T1_SECURED_REVERSAL_PROFIT_EXIT'
+        : legacyReversalProfit
+          ? (tp1Touched ? 'T1_BOOKED_REVERSAL_PROFIT_LOCK' : 'PRE_T1_REVERSAL_PROFIT_BOOKED')
+          : (trailedSlHit && feeCovered)
+            ? 'TRAILED_SL_PROFIT_BOOKED'
+            : shouldExitDefensiveSl
+              ? (proExitPolicy ? 'INITIAL_SL_PROTECTIVE_EXIT' : 'TRAILED_SL_PROTECTIVE_EXIT')
+              : null;
 
   const grossPnl = +(favorableMove * qty).toFixed(4);
   const movePctFromEntry = entry > 0 ? +(((favorableMove / entry) * 100)).toFixed(3) : 0;
@@ -946,6 +1009,11 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     distToTp2Pct,
     stageCode,
     stageLabel,
+    // v21.26.1 PRO ladder telemetry (UI + logs): pre-TP1 = initial SL only,
+    // post-TP1 = fee-BE, >=80% to TP2 = TP1 lock, TP2 = full close.
+    proExitPolicy,
+    tp2ProgressPct,
+    tp2Approach,
     trendStatus,
     reversalDetected: reversalConfirmed,
     shouldBookProfitNow,
@@ -1769,10 +1837,11 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
     // daily quota — hard cap, counted against each row's own market day so a
     // UTC crypto session cannot be blocked/shortened by the IST rollover.
     const stq = _rollDayIfNeeded();
-    const flipQuota = Number(cfg.maxTradesPerDay) || 5;
+    const flipQuota = Number(cfg.maxTradesPerDay) || 0;
+    const flipQuotaUnlimited = !(flipQuota > 0);
     const flipDayCount = stq.book.filter(b => isSessionQuotaEntry(b, flipLiveSession))
       .filter(b => b.dayKey === dayKeyFor(b.market, new Date(now))).length;
-    if (flipDayCount >= flipQuota) {
+    if (!flipQuotaUnlimited && flipDayCount >= flipQuota) {
       _logEvent('flip-skip', `🔁 UC FLIP-REVERSE SKIP ${sym}: daily quota ${flipDayCount}/${flipQuota} done`);
       return null;
     }
@@ -2144,6 +2213,7 @@ export async function mtfAutoTick(p = {}) {
         ltp: rawQuote,
         boardRow: effRow,
         reversalConfirmed: revByRow,
+        proExitPolicy: cfg.proExitPolicy !== false,
       });
 
       // Persist updated peakPrice, trailedStopLoss, stage, and live telemetry on the linked book record
@@ -2540,9 +2610,10 @@ export async function mtfAutoTick(p = {}) {
     const openForDesk = sessionOpen().filter(b => b.market === market).length;
     const isLiveExecActive = isLiveSession;
     const effectiveMaxOpenPositions = isLiveExecActive ? 1 : cfg.maxOpenPositions;
-    const effectiveMaxTradesPerDay = cfg.maxTradesPerDay;
-    if (dayCountAllDesks >= effectiveMaxTradesPerDay) { out.skipped.push(`${market}: daily quota ${dayCountAllDesks}/${cfg.maxTradesPerDay} done`); continue; }
-    if (dayCountForDesk >= effectiveMaxTradesPerDay) { out.skipped.push(`${market}: desk quota done`); continue; }
+    const effectiveMaxTradesPerDay = Number(cfg.maxTradesPerDay) || 0;
+    const quotaUnlimited = !(effectiveMaxTradesPerDay > 0);
+    if (!quotaUnlimited && dayCountAllDesks >= effectiveMaxTradesPerDay) { out.skipped.push(`${market}: daily quota ${dayCountAllDesks}/${effectiveMaxTradesPerDay} done`); continue; }
+    if (!quotaUnlimited && dayCountForDesk >= effectiveMaxTradesPerDay) { out.skipped.push(`${market}: desk quota done`); continue; }
     if (openForDesk >= effectiveMaxOpenPositions || sessionOpen().length >= effectiveMaxOpenPositions) { out.skipped.push(`${market}: max open positions (${openForDesk}/${effectiveMaxOpenPositions})`); continue; }
     if (_openNotionalINR(isLiveSession) >= cfg.maxPositionsINR) { out.skipped.push(`${market}: notional budget full (₹${Math.round(_openNotionalINR(isLiveSession))}/${cfg.maxPositionsINR})`); continue; }
     // v21.24.0 PHASE 0 daily-loss circuit breaker — desk ke apne day key par,
@@ -2697,7 +2768,7 @@ export async function mtfAutoTick(p = {}) {
     let openedThisDesk = 0;
     for (const row of eligible) { // v21.22.0: strictly 1 trade at a time per session — never open 2 trades simultaneously!
       if (openedThisDesk >= 1 || out.opened.length >= 1) break;
-      if (dayCountAllDesks + openedThisDesk >= effectiveMaxTradesPerDay) break;
+      if (!quotaUnlimited && dayCountAllDesks + openedThisDesk >= effectiveMaxTradesPerDay) break;
       if (sessionOpen().length >= effectiveMaxOpenPositions) break;
       const sym = normalizeLinkSymbol(row.symbol, market);
       if (!sym || openSymbols.has(sym)) { out.skipped.push(`${sym}: already open`); continue; }
@@ -3049,8 +3120,9 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
       ltp,
       boardRow: _snapshotRowFor(b.symbol, Date.now()),
       // A fallback/stale book LTP may keep SL telemetry alive, but it must
-      // NEVER move TP2 — only a real, sanity-checked quote can extend.
+      // NEVER move TP2 - only a real, sanity-checked quote can extend.
       allowTpExtension: allowTpExtension && hasFreshQuote,
+      proExitPolicy: cfg.proExitPolicy !== false,
     });
     // v21.22.0 ULTRA-FAST REALTIME SL RATCHET PERSISTENCE:
     // Persist peakPrice and ratcheted trailedStopLoss directly onto `_state.book`
@@ -3195,6 +3267,8 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
     maxPositionsINR: cfg.maxPositionsINR,
     maxNotionalPerTradeINR: cfg.maxNotionalPerTradeINR,
     maxTradesPerDay: cfg.maxTradesPerDay,
+    quotaUnlimited: Number(cfg.maxTradesPerDay) === 0,
+    proExitPolicy: cfg.proExitPolicy !== false,
     maxOpenPositions: cfg.maxOpenPositions,
     cooldownMin: cfg.cooldownMin,
     desks: cfg.desks,
@@ -3437,6 +3511,7 @@ export async function mtfAutoSuperAgentManage(input = {}) {
     ltp,
     boardRow: effRow,
     reversalConfirmed: revByRow,
+    proExitPolicy: cfg.proExitPolicy !== false,
   });
 
   if (deepEval.directionBlocked) {

@@ -16,7 +16,14 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA = path.join(__dirname, '..', 'server', 'data');
+// v21.26.2 [TEST HYGIENE]: setup.ts gives every suite a hermetic temp data dir
+// via SMARTAI_DATA_DIR. This suite still hardcoded server/data here, so its
+// beforeEach/afterEach fs.rmSync calls deleted the LIVE dev credentials file
+// (mcp-coindcx.json) on every `npm test` run — the running server then reported
+// blocked.notConnected and the UI hid manual LIVE buttons until the next boot.
+const DATA = process.env.SMARTAI_DATA_DIR
+  ? path.resolve(process.env.SMARTAI_DATA_DIR)
+  : path.join(__dirname, '..', 'server', 'data');
 const SNAP_PATH = path.join(DATA, 'mcp-portfolio.json');
 const CDCX_CREDS_PATH = path.join(DATA, 'mcp-coindcx.json');
 const SYM_CACHE_PATH = path.join(DATA, 'mcp-symbol-cache.json');

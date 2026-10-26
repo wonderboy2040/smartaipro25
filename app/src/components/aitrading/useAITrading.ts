@@ -1181,6 +1181,10 @@ export interface MtfAutoStatus {
   entryPauseReason?: string | null;
   minScore: number; riskPerTradeINR: number; maxPositionsINR: number; maxNotionalPerTradeINR?: number;
   maxTradesPerDay: number; maxOpenPositions?: number; cooldownMin: number;
+  /** v21.26.1: 0 = unlimited daily trades (1-session lock still enforced). */
+  quotaUnlimited?: boolean;
+  /** v21.26.1: pro trader exit ladder (no trail before TP1). */
+  proExitPolicy?: boolean;
   desks?: { india: boolean; crypto: boolean }; timeStopEnabled?: boolean;
   inrPerUsdt?: number; ccyMode?: string;
   executionMode?: 'paper' | 'live';

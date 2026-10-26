@@ -158,6 +158,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       target2: 106,
       t1Hit: false,
       leverage: 10,
+      proExitPolicy: false,
     };
 
     // Case A: +0.60R progress toward T1 -> STAGE_2_BREAKEVEN_PLUS moves SL above breakeven + fees
@@ -505,7 +506,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
     expect(w100Large.buyingPowerINR).toBe(100000);
 
     // 2. Strict Active-Traded-Only Deep Monitor: when live order fails, NEVER add "entry without traded"
-    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'live', walletAmountINR: 1163.93, walletDeployPct: 100 } });
+    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'live', walletAmountINR: 1163.93, walletDeployPct: 100, proExitPolicy: false } });
     let paperRollbackCount = 0;
     const failedLiveTick = await mtfAutoTick({
       boards: {
@@ -634,6 +635,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       t1: 154.5,
       t2: 159,
       qty: 1,
+      proExitPolicy: false,
     }, {
       ltp: 149.85, // minor -0.05R spread noise
       boardRow: { symbol: 'SOL', side: 'LONG', superScore: 88, triggerFired: true },
@@ -1335,7 +1337,9 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
   });
 
   it('17) Anti-Late-Entry ("Trend Moment Ke Baad Trade Na Lage") + Paper Direction Test + Realtime Ultra-Fast SL Trail Persistence', async () => {
-    __resetMtfAutoForTests();
+    // v21.26.1: this test pins the LEGACY ultra-fast stage trail; production
+    // defaults to proExitPolicy (no trail before TP1), covered separately.
+    __resetMtfAutoForTests({ config: { proExitPolicy: false } });
 
     // 1. fairValueGap must NOT self-tap on the creation bar (barsAgo === 0)
     const spikeCandles = [];

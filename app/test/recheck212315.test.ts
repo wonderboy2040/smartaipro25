@@ -82,7 +82,10 @@ describe('v21.23.15 recheck — desk scope + safety source pins', () => {
 
   it('daily quota is not silently inflated to 15 in live mode', () => {
     const ai = read('server/ai/mtfAutoLink.js');
-    expect(ai).toContain('const effectiveMaxTradesPerDay = cfg.maxTradesPerDay;');
+    // v21.26.1: 0 = unlimited sentinel; a finite cap stays exactly as
+    // configured (never auto-raised to 15 in live mode).
+    expect(ai).toContain('const effectiveMaxTradesPerDay = Number(cfg.maxTradesPerDay) || 0;');
+    expect(ai).toContain('const quotaUnlimited = !(effectiveMaxTradesPerDay > 0);');
     expect(ai).not.toContain('Math.max(cfg.maxTradesPerDay, 15)');
     expect(ai).not.toContain('priorWasLive ? Math.max(Number(cfg.maxTradesPerDay) || 5, 15)');
   });

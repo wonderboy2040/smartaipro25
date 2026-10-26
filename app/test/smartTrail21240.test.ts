@@ -73,7 +73,10 @@ function longTrade(over: Record<string, unknown> = {}) {
   return {
     symbol: 'BTCUSDT', market: 'FUTURES', execMarket: 'FUTURES', ccy: 'USDT', side: 'LONG',
     entry: 100, entryPrice: 100, stopLoss: 99, initialStopLoss: 99, t1: 101, t2: 102, qty: 1,
-    peakPrice: 100, openedAt: Date.now() - 600_000, atrPct: 0.45, ...over,
+    peakPrice: 100, openedAt: Date.now() - 600_000, atrPct: 0.45,
+    // v21.26.1: legacy v1/v2 stage-engine coverage (pro defaults ON in prod).
+    proExitPolicy: false,
+    ...over,
   };
 }
 const surgingLong = { trigger: { roc1: 0.2, roc3: 0.6, volRatio: 1.6 }, context: { atrPct: 0.45 } };
@@ -132,7 +135,9 @@ describe('T4 AVAX replay — live log 2026-10-24 (SHORT, R=0.026, peak 9.034 →
   const avax = (over: Record<string, unknown> = {}) => ({
     symbol: 'AVAXUSDT', market: 'FUTURES', execMarket: 'FUTURES', ccy: 'USDT', side: 'SHORT', executionMode: 'LIVE',
     entry: 9.064, entryPrice: 9.064, stopLoss: 9.09, initialStopLoss: 9.09, t1: 9.02, t2: 8.92, qty: 13,
-    leverage: 10, peakPrice: 9.064, openedAt: Date.now() - 600_000, atrPct: 0.45, ...over,
+    leverage: 10, peakPrice: 9.064, openedAt: Date.now() - 600_000, atrPct: 0.45,
+    proExitPolicy: false,
+    ...over,
   });
   function run(mode: string) {
     setMode(mode);
@@ -378,6 +383,9 @@ describe('T12 stale-quote TP2 guard (3s status path)', () => {
   beforeEach(() => {
     setMode('enforce');
     __resetMtfAutoForTests({
+      // v21.26.1: the status path reads the GLOBAL policy config; pin this
+      // suite to the legacy engine (PRO default-ON keeps the original TP2).
+      config: { proExitPolicy: false },
       state: {
         book: [{
           status: 'OPEN', symbol: 'BTCUSDT', market: 'CRYPTO', execMarket: 'FUTURES', side: 'LONG',
@@ -385,6 +393,10 @@ describe('T12 stale-quote TP2 guard (3s status path)', () => {
           stopLoss: 99, initialStopLoss: 99, trailedStopLoss: 99, peakPrice: 101.8, ltp: 101.8,
           t1: 101, t2: 102, t1Hit: true, qty: 1, atrPct: 0.45, momentumState: 'SURGING',
           openedAt: Date.now() - 600_000,
+          // v21.26.1: this suite pins the LEGACY rolling-TP2 engine. PRO policy
+          // (default ON) intentionally keeps the original TP2, covered in
+          // test/proExitPolicy21261.test.ts.
+          proExitPolicy: false,
         }],
       },
     });

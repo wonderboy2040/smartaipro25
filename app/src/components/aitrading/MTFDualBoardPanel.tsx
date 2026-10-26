@@ -297,7 +297,18 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   const deskKey: 'india' | 'crypto' = market === 'INDIA' ? 'india' : 'crypto';
   const deskReadiness = auto?.deskReady?.[deskKey] || null;
   const deskArmable = auto?.deskArmable?.[deskKey] || null;
-  const canArmLive = canLive && (!auto?.deskArmable || deskArmable?.armable === true);
+  // v21.26.2 [LIVE-READY RECONCILE]: the legacy CoinDCX desk state
+  // (`/api/ai/trading/state.blocked.notConnected`) only looks at the saved
+  // mcp-coindcx.json file, while this engine resolves the SAME keys from .env
+  // (`loadCredsForOrder`) and persists them on the first live order. A missing
+  // file therefore showed "LIVE execution is not enabled" even though the
+  // server's own deskReady said ready:true. Server deskReady is the
+  // execute-right-now authority for this desk; GLOBALFUTURES stays PAPER-only.
+  const engineLiveReady = market !== 'GLOBALFUTURES'
+    && auto?.executionMode === 'live'
+    && deskReadiness?.ready === true;
+  const liveExecEnabled = canLive || engineLiveReady;
+  const canArmLive = liveExecEnabled && (!auto?.deskArmable || deskArmable?.armable === true);
   // v21.23.18 [STABLE LIVE + HONEST READINESS]:
   // Pehle isLiveAuto volatile `autoFresh` + `deskReadiness.ready` par depend
   // karta tha — ek slow /status poll ya India typed-LIVE arming missing hone
@@ -312,7 +323,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   const liveWarnWhy = isLiveAuto
     ? (liveStatusStale
         ? 'Status poll stale — LIVE engine last known ON; server/network wapas aate hi fresh status aa jayega'
-        : !canLive
+        : !liveExecEnabled
           ? 'LIVE execution is not enabled for this desk/tab — engine live entries reject karega'
           : deskReadiness && deskReadiness.ready === false
             ? (deskReadiness.why || 'Desk not ready (server) — engine live entries reject karega')
@@ -488,7 +499,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
 
   /** ⚡ SINGLE LIVE BUTTON — turns ON Auto-Trade Intelligence, fetches CoinDCX Wallet, deploys 100% of it on strictly 1 Verified Strong Trade per session, and takes Full Control! */
   const onAutoLiveExecute = useCallback(async () => {
-    if (!canLive) {
+    if (!liveExecEnabled) {
       notify(false, '⛔ LIVE execution is not enabled for this desk/tab — arm it in the desk console first.');
       return;
     }
@@ -511,7 +522,10 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
         minScore,
         walletDeployPct: 100,
         maxOpenPositions: 2,
-        maxTradesPerDay: 3,
+        maxTradesPerDay: 0,
+        // v21.26.1 USER SPEC: daily trade quota UNLIMITED (0 sentinel) -
+        // the 1-session / 1-open-trade lock still applies; only the daily
+        // count cap is removed.
         // User spec v21.25: FULL 100% CoinDCX wallet deployment. Leverage is
         // wallet-tier driven — below ₹10,000 → 10x, ₹10,000+ → 5x. The 10x
         // ceiling only lets the tier rule decide; it never over-leverages a
@@ -602,7 +616,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     } finally {
       setBusy(false);
     }
-  }, [mode, holdMin, minScore, activeLeverage, walletDeployPct, effectiveWalletINR, deployed95WalletINR, liveFutMarginCcy, activeLiveRows, auto, canLive, deskKey, notify, loadAuto, applyAutoStatus]);
+  }, [mode, holdMin, minScore, activeLeverage, walletDeployPct, effectiveWalletINR, deployed95WalletINR, liveFutMarginCcy, activeLiveRows, auto, liveExecEnabled, deskKey, notify, loadAuto, applyAutoStatus]);
 
   /** v21.24.0 PHASE 0 — live entries pause/resume. Pause is instant; resume
    *  needs explicit confirmation because it re-arms real-money entries. */
@@ -653,6 +667,9 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     const staleTag = liveStatusStale ? ' · STATUS STALE' : '';
     const tierDiag = ` · 🎯 ELITE/STRONG ${counts?.strong ?? 0} · trigger-fired ${counts?.fired ?? 0}`;
     const quotaUsed = Number.isFinite(Number(auto.dayQuotaCount)) ? Number(auto.dayQuotaCount) : auto.dayCount;
+    const quotaLimitLabel = (auto.quotaUnlimited === true || Number(auto.maxTradesPerDay) === 0)
+      ? 'unlimited'
+      : String(auto.maxTradesPerDay);
     const runTag = liveEntriesPaused
       ? '⏸ LIVE ENTRIES PAUSED (existing positions managed)'
       : isLiveAuto
@@ -660,7 +677,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
         : paperArmed
           ? '🧪 AUTO-TRADE PAPER ON — REAL ORDERS OFF'
           : '⏸ AUTO-TRADE STANDBY';
-    return `${runTag} · ${walletDeployPct}% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} / ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')} @ ${activeLeverage}x (Buying Power ₹${buyingPower95INR.toLocaleString('en-IN')}) · Active LIVE: ${activeLiveRows.length}${paperTag} · day ${auto.day ?? '—'} · trades ${quotaUsed}/${auto.maxTradesPerDay}${tierDiag}${warnWhy}${credsWarn}${nearMiss}${skipWhy}`;
+    return `${runTag} · ${walletDeployPct}% Wallet ₹${deployed95WalletINR.toLocaleString('en-IN')} / ₹${Math.round(effectiveWalletINR).toLocaleString('en-IN')} @ ${activeLeverage}x (Buying Power ₹${buyingPower95INR.toLocaleString('en-IN')}) · Active LIVE: ${activeLiveRows.length}${paperTag} · day ${auto.day ?? '—'} · trades ${quotaUsed}/${quotaLimitLabel}${tierDiag}${warnWhy}${credsWarn}${nearMiss}${skipWhy}`;
   }, [auto, isLiveAuto, paperArmed, liveEntriesPaused, liveStatusStale, liveWarnWhy, topNearMissBlockers, activeLeverage, walletDeployPct, effectiveWalletINR, deployed95WalletINR, buyingPower95INR, activeTradedRows.length, activeLiveRows.length, counts]);
 
   return (
@@ -856,7 +873,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                 className="mt-1.5 flex items-center gap-2 flex-wrap text-[9px] font-mono text-slate-300"
               >
                 <span className="px-1.5 py-0.5 rounded border border-violet-500/40 bg-violet-500/10 text-violet-200 font-black">
-                  🛡 LIVE RISK · {auto.riskCaps.activeRiskPct || '—'}% risk/trade (hard {auto.riskCaps.maxRiskPerTradePct}%) · {auto.riskCaps.effectiveWalletDeployPct}% deploy · {auto.riskCaps.effectiveLeverage}x wallet-tier · daily loss stop {auto.riskCaps.dailyLossPct || '—'}% · max {auto.maxOpenPositions ?? '—'} open / {auto.maxTradesPerDay}/day
+                  🛡 LIVE RISK · {auto.riskCaps.activeRiskPct || '—'}% risk/trade (hard {auto.riskCaps.maxRiskPerTradePct}%) · {auto.riskCaps.effectiveWalletDeployPct}% deploy · {auto.riskCaps.effectiveLeverage}x wallet-tier · daily loss stop {auto.riskCaps.dailyLossPct || '—'}% · max {auto.maxOpenPositions ?? '-'} open / {(auto.quotaUnlimited || Number(auto.maxTradesPerDay) === 0) ? 'unlimited' : `${auto.maxTradesPerDay}/day`}
                 </span>
                 {auto.phase0 && (
                   <span className={`px-1.5 py-0.5 rounded border font-black ${auto.phase0.verdict === 'OK' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200' : 'border-amber-500/40 bg-amber-500/10 text-amber-200'}`}>
@@ -1394,7 +1411,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                         {paperOrdering === r.symbol ? '…' : `🧪 PAPER ${r.side}`}
                       </button>
                     )}
-                    {canLive && rowLiveReady && (
+                    {liveExecEnabled && rowLiveReady && (
                       <button
                         onClick={() => void onLiveOrder(r)}
                         disabled={liveOrdering === r.symbol || busy || liveEntriesPaused}
