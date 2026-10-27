@@ -259,7 +259,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
     expect(panelSrc).not.toContain('data-testid="mtf-auto-tick-btn"');
 
     const recheckSrc = fs.readFileSync(path.resolve('src/components/aitrading/SignalRecheckPanel.tsx'), 'utf8');
-    expect(recheckSrc).toContain('AUTO-TRADE DEEP MONITOR (15s REALTIME)');
+    expect(recheckSrc).toContain('AUTO-TRADE DEEP MONITOR (REALTIME WS)');
   });
 
   it('6 & 7) MTF Dual Board includes GOLD & SILVER (XAU/XAG perps) + EQUITY SIM + 3-Model Local Ollama AI verdicts + 2s 24x7 feed', async () => {

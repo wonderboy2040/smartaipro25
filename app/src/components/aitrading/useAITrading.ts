@@ -1073,7 +1073,7 @@ export interface MtfDualRow {
     zeroLossRule?: string;
   } | null;
   leverageRule?: { below10k: number; above10k: number; thresholdINR: number; walletDeployPct?: number } | null;
-  signals?: { board?: { side?: 'LONG' | 'SHORT' | string | null; aiScore?: number | null; grade?: string | null; confidence?: number | null; winProb?: { verdict?: string | null; pWin?: number | null; evR?: number | null; calibrated?: boolean } | null } | null; mtf6?: { consensus?: string; agreementPct?: number; phase?: string; htfBias?: string | null; ltfTrigger?: string | null; timing?: string | null } | null } | null;
+  signals?: { board?: { side?: 'LONG' | 'SHORT' | string | null; aiScore?: number | null; /** v21.26.3: main ensemble tier (same as DEEP ring) */ aiTier?: string | null; grade?: string | null; confidence?: number | null; winProb?: { verdict?: string | null; pWin?: number | null; evR?: number | null; calibrated?: boolean } | null } | null; mtf6?: { consensus?: string; agreementPct?: number; phase?: string; htfBias?: string | null; ltfTrigger?: string | null; timing?: string | null } | null } | null;
   asOf?: number;
 }
 

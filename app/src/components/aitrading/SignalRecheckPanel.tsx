@@ -1,13 +1,15 @@
 // ============================================================
-// src/components/aitrading/SignalRecheckPanel.tsx — v20.7.5
+// src/components/aitrading/SignalRecheckPanel.tsx — v21.26.3
 // ------------------------------------------------------------
-// THE 15-SECOND SIGNAL RECHECK PANEL — the user's explicit ask:
+// THE REALTIME SIGNAL RECHECK PANEL — the user's explicit ask:
 // "AI ko sabhi trading 80+ signals (Strong + Action) har 15 sec
-// recheck karta rahe."
+// recheck karta rahe." v21.26.3: prices are now driven by the
+// server's live WebSocket ticks (per-row 1s throttle); this panel
+// polls a 5s snapshot, and a 30s watchdog refreshes boards +
+// re-votes the committee.
 //
-// Mirrors server/ai/signalRecheck.js's loop at the SAME 15s
-// cadence: every STRONG/ACTION signal across all four desks with
-// its LIVE recheck state —
+// Every STRONG/ACTION signal across all four desks shows its LIVE
+// recheck state —
 //   🚨 INVALIDATED (SL through — entry mat karo)
 //   ⚠️ WEAKENING   (>0.75 ATR against the signal)
 //   🎯 TARGET_1/2  (plan levels touched)
@@ -70,6 +72,8 @@ interface RecheckRow {
 }
 interface RecheckView {
   ok: boolean; enabled: boolean; started: boolean; tickMs: number;
+  watchdogMs?: number;
+  realtime?: boolean; realtimeTicks?: number; lastRealtimeTickAt?: number | null;
   lastTickAt: number | null; nextTickIn: number | null;
   ticks: number; checks: number; events: number; watched: number;
   lastError: string | null;
@@ -86,7 +90,9 @@ interface RecheckView {
   note?: string;
 }
 
-const POLL_MS = 15_000;
+// v21.26.3: the SERVER re-prices rows on every live socket tick; this poll
+// only refreshes the panel's snapshot (watchlist/deep monitor/states).
+const POLL_MS = 5_000;
 
 const STATE_STYLE: Record<string, { chip: string; label: string }> = {
   INVALIDATED: { chip: 'bg-red-500/20 text-red-300 border-red-500/50', label: '🚨 INVALIDATED' },
@@ -126,7 +132,7 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
   useEffect(() => {
     alive.current = true;
     load();
-    // 15s poll — the loop's own cadence (paused via the chip)
+    // 5s snapshot poll — server-side prices are pushed by liveFeed WS ticks
     const t = setInterval(() => { if (!paused) load(); }, POLL_MS);
     return () => { alive.current = false; clearInterval(t); };
   }, [load, paused]);
@@ -142,10 +148,10 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
       <div className="flex items-center justify-between gap-2 flex-wrap mb-2.5">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-xs font-black text-violet-300 tracking-wide">🛡 SIGNAL RECHECK — 15s LIVE WATCH</h3>
+            <h3 className="text-xs font-black text-violet-300 tracking-wide">🛡 SIGNAL RECHECK — REALTIME WS WATCH</h3>
             <span className="px-2 py-0.5 rounded-lg text-[9px] font-black border bg-violet-500/10 text-violet-300 border-violet-500/30">
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse align-middle mr-1" />
-              {view?.enabled === false ? 'OFF (AI_SIGNAL_RECHECK=off)' : nextIn != null ? `next ${nextIn}s` : 'starting…'}
+              {view?.enabled === false ? 'OFF (AI_SIGNAL_RECHECK=off)' : view?.realtime ? `LIVE TICKS · ${view.realtimeTicks ?? 0}` : nextIn != null ? `watchdog ${nextIn}s` : 'starting…'}
             </span>
             {view && (
               <>
@@ -157,7 +163,7 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
                     ⚠ {problems} problem{problems > 1 ? 's' : ''}
                   </span>
                 )}
-                <span className="px-2 py-0.5 rounded-lg text-[9px] font-black border bg-black/30 text-slate-500 border-slate-600/30" title="Total 15s price checks since boot">
+                <span className="px-2 py-0.5 rounded-lg text-[9px] font-black border bg-black/30 text-slate-500 border-slate-600/30" title="Total live price checks since boot (WS ticks + 30s REST fallback)">
                   ✓ {view.checks} checks
                 </span>
               </>
@@ -167,18 +173,18 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
             </button>
           </div>
           <p className="text-[9px] text-slate-600 mt-1 leading-relaxed">
-            Har STRONG/ACTION signal + <span className="text-emerald-400 font-bold">Active Traded Auto-Trade (Full CoinDCX Position Control)</span> har <span className="text-violet-400 font-bold">15 sec</span> me live price se recheck aur Deep Monitor hota hai (Dynamic SL Trail · Reversal Profit-Book · TP1/TP2 touch) + ~60s me committee re-vote.
+            Har STRONG/ACTION signal + <span className="text-emerald-400 font-bold">Active Traded Auto-Trade (Full CoinDCX Position Control)</span> har <span className="text-violet-400 font-bold">live WebSocket tick</span> par price-recheck hota hai (per-row 1s throttle); <span className="text-cyan-400 font-bold">30s watchdog</span> board refresh, committee re-vote aur REST fallback chalata hai. Deep Monitor: Dynamic SL Trail · Reversal Profit-Book · TP1/TP2 touch.
           </p>
         </div>
       </div>
 
-      {/* v21.22.0 ACTIVE AUTO-TRADE DEEP MONITOR — 15s REALTIME ANALYSIS (SIRF ACTIVE TRADES) */}
+      {/* v21.26.3 ACTIVE AUTO-TRADE DEEP MONITOR — REALTIME WS + 30s WATCHDOG (SIRF ACTIVE TRADES) */}
       {view?.autoTradeDeepMonitor && (
         <div className="mb-2.5 rounded-xl border border-emerald-500/35 bg-emerald-950/20 p-2.5">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
               <span className="px-2 py-0.5 rounded-md font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                ⚡ AUTO-TRADE DEEP MONITOR (15s REALTIME) · SIRF ACTIVE TRADES
+                ⚡ AUTO-TRADE DEEP MONITOR (REALTIME WS) · SIRF ACTIVE TRADES
               </span>
               <span className="text-slate-300 font-bold">
                 Active Traded: <span className="text-emerald-300 font-black">{activeAutoTrades.length}</span>
@@ -240,7 +246,7 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
             </div>
           ) : (
             <div className="mt-1 text-[9px] text-slate-400">
-              Jab bhi MTF Dual-Board se Auto-Trade lagega, uska 15s Deep Monitor (Live PnL, Multi-Stage Trailing SL, TP1/TP2 distance, aur Bullish/Bearish Reversal Profit-Book Guard) yahan realtime chalega.
+              Jab bhi MTF Dual-Board se Auto-Trade lagega, uska realtime Deep Monitor (Live PnL, Multi-Stage Trailing SL, TP1/TP2 distance, aur Bullish/Bearish Reversal Profit-Book Guard) yahan live socket ticks par chalega.
             </div>
           )}
         </div>
@@ -250,7 +256,7 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
 
       {view && rows.length === 0 && (
         <div className="text-[10px] text-slate-500 py-3 text-center">
-          Abhi koi STRONG/ACTION signal watch me nahi hai — board par jab bhi aayega, 15s watch khud shuru ho jayega.
+          Abhi koi STRONG/ACTION signal watch me nahi hai — board par jab bhi aayega, realtime WS watch khud shuru ho jayega.
         </div>
       )}
 

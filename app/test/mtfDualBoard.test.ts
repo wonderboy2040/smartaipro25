@@ -14,7 +14,9 @@
 //     (fake score nahi banta)
 // ============================================================
 import { describe, it, expect } from 'vitest';
-import { fuseDualTf, dualAutoCandidates, mtfProEntryGate, buildEarlyRadar, DUAL_FUSE_WEIGHTS, __clearDualBoardCaches } from '../server/ai/mtfDualBoard.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fuseDualTf, dualAutoCandidates, mtfProEntryGate, buildEarlyRadar, mainAiSnapshot, DUAL_FUSE_WEIGHTS, __clearDualBoardCaches } from '../server/ai/mtfDualBoard.js';
 
 /** A clean, fully-confirmed LONG plan fixture (planner-shaped). */
 function planFixture(over = {}) {
@@ -335,5 +337,37 @@ describe('v21.16.0 — cost/noise-stop gates (live-test regression)', () => {
   it('healthy-cost row still passes (guard did not over-tighten)', () => {
     const f = fuseDualTf({ symbol: 'BTC', market: 'CRYPTO', boardSig, plan: planFixture({ costs: { costR: 0.12, roundTripPct: 0.1 } }), snap, modeId: 'INTRADAY' });
     expect(f.autoEligible).toBe(true);
+  });
+});
+
+// ============================================================
+// v21.26.3 — ONE AI SCORE (DEEP ENSEMBLE ≡ MTF BOARD headline)
+// ============================================================
+describe('mainAiSnapshot — the authoritative DEEP/MTF score pair', () => {
+  it('returns EXACTLY the main ensemble aiScore + tier (not the MTF fusion score)', () => {
+    const s = mainAiSnapshot({
+      side: 'SHORT', grade: 'ACTION', confidence: 76,
+      superIntel: { aiScore: 83, tier: 'STRONG', winProb: { verdict: 'EDGE', pWin: 64, evRealisticR: 0.8, calibrated: true } },
+    });
+    expect(s).toMatchObject({ side: 'SHORT', aiScore: 83, aiTier: 'STRONG', grade: 'ACTION', confidence: 76 });
+    expect(s.winProb).toMatchObject({ verdict: 'EDGE', pWin: 64, evR: 0.8, calibrated: true });
+  });
+
+  it('never invents a score when the main board has none', () => {
+    expect(mainAiSnapshot(null)).toBeNull();
+    const s = mainAiSnapshot({ side: 'LONG', grade: 'ACTION', confidence: 70, superIntel: {} });
+    expect(s.aiScore).toBeNull();
+    expect(s.aiTier).toBeNull();
+  });
+
+  it('row wire uses the helper and ships aiTier; UI headlines MAIN AI, not fusion', () => {
+    const srv = fs.readFileSync(path.resolve('server/ai/mtfDualBoard.js'), 'utf8');
+    expect(srv).toContain('board: mainAiSnapshot(boardSig)');
+    const ui = fs.readFileSync(path.resolve('src/components/aitrading/MTFDualBoardPanel.tsx'), 'utf8');
+    expect(ui).toContain('MAIN AI');
+    expect(ui).toContain('MTF FUSION');
+    expect(ui).toContain('mtf-main-ai-${r.symbol}');
+    expect(ui).toContain('r.ensembleSignalAvailable === true');
+    expect(ui).toContain('AI ENSEMBLE NOT READY');
   });
 });

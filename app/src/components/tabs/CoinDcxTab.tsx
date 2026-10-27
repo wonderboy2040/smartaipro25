@@ -642,7 +642,7 @@ export default memo(function CoinDcxTab() {
         </div>
       </div>
 
-      {/* ============ 01r · 15s SIGNAL RECHECK (v20.7.5) ============ */}
+      {/* ============ 01r · REALTIME SIGNAL RECHECK (v21.26.3 WS ticks + 30s watchdog) ============ */}
       <div id="cx-recheck" className="mt-4">
         <SignalRecheckPanel />
       </div>

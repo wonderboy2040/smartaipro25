@@ -1,34 +1,36 @@
 // ============================================================
-// server/ai/signalRecheck.js — v20.7.5 THE 15-SECOND SIGNAL RECHECK
+// server/ai/signalRecheck.js — v21.26.3 THE REALTIME SIGNAL RECHECK
 // ------------------------------------------------------------
 // THE USER'S ASK (verbatim intent): "AI ko sabhi trading 80+
 // signals — Strong or Action signals — ko every 15 sec recheck
-// karte rehna chahiye." The boards refresh on a 60s cadence and
-// the STRONG-signal telegram scan runs ~30s — between those
-// beats, a STRONG/ACTION signal could hit its stop, flip its
-// committee side, or decay a whole grade with NOTHING watching.
+// karte rehna chahiye." v21.26.3 upgrade: the recheck is now driven
+// by the live WebSocket tick store — every `FUT_*` / `IN_*` / `GLOB_*`
+// tick re-prices its watched row IMMEDIATELY (per-row throttled), and
+// a slower 30s watchdog handles board refresh + the staggered
+// committee re-vote + a REST fallback for symbols without a socket.
 //
-// THE LOOP (every 15s, AI_SIGNAL_RECHECK=off to disable):
+// THE LOOP:
 //   1. Read the CACHED boards (warmOnly — never triggers a cold
 //      universe scan; a stopped board is simply a paused watch).
 //   2. Watchlist = every STRONG + ACTION signal (the "80+ AI
 //      score" tier and the tradeable tier below it) across all
 //      four desks: CRYPTO · FUTURES · INDIA · GLOBALFUTURES.
-//   3. Per-symbol LIVE price recheck: tick store first (free,
-//      freshest), then each market's own cached batch chain.
-//      → SL-through = INVALIDATED · deep adverse drift =
-//      WEAKENING · T1/T2 touch = TARGET_1/TARGET_2 (freshness
-//      only — the executors own the fills).
-//   4. Staggered ENSEMBLE RE-VOTE: every 4th tick (~60s per
-//      symbol, max 3 symbols/tick to bound cost) the cached
-//      deep path re-votes the committee — side FLIP and grade
+//   3. REALTIME price recheck: liveFeed.subscribe → applyRealtimeTick.
+//      SL-through = INVALIDATED · deep adverse drift = WEAKENING ·
+//      T1/T2 touch = TARGET_1/TARGET_2 (freshness only — the
+//      executors own the fills). A 30s watchdog re-sweeps rows whose
+//      socket is silent (REST is the fallback, never the primary).
+//   4. Staggered ENSEMBLE RE-VOTE: every 2nd watchdog (~60s per
+//      symbol, max 3 symbols/tick to bound cost) the cached deep
+//      path re-votes the committee — side FLIP and grade
 //      transitions are caught against the board snapshot.
 //   5. Transition EVENTS (NEW · INVALIDATED · FLIPPED · DEMOTED
 //      · PROMOTED · TARGET · RECOVERED · EXPIRED) land on the
 //      row's event log AND on Telegram (deduped 30 min per
 //      symbol+event — the insta-push pattern).
 //   6. GET /api/ai/signal-recheck serves the live watchlist for
-//      the frontend panel (15s poll parity with this loop).
+//      the frontend panel (5s snapshot poll; prices themselves are
+//      pushed by the server's socket ticks).
 //
 // PURITY: everything price/transition-shaped is pure and
 // injected (boards, LTP resolver, deep re-vote, telegram send) —
@@ -41,12 +43,18 @@ import { liveInvalidationCheck } from './superIntel.js';
 import { normalizeSide } from './directionCertificate.js';
 import { getActiveAutoTradesDeepMonitor } from './mtfAutoLink.js';
 
-export const RECHECK_TICK_MS = 15_000;
+/** Watchdog cadence for board refresh + deep re-vote + REST fallback. */
+export const RECHECK_WATCHDOG_MS = 30_000;
+/** @deprecated v21.26.3 — realtime prices come from the WS tick store;
+ *  this alias is the watchdog cadence kept for API/back-compat. */
+export const RECHECK_TICK_MS = RECHECK_WATCHDOG_MS;
 export const RECHECK_GRADES = ['STRONG', 'ACTION'];
-/** Staggered deep re-vote cadence: every Nth 15s tick (~60s/symbol). */
-export const DEEP_REVOTE_EVERY_N_TICKS = 4;
-/** Max symbols sent through the cached deep path per tick (cost bound). */
+/** Staggered deep re-vote cadence: every Nth watchdog (~60s/symbol). */
+export const DEEP_REVOTE_EVERY_N_TICKS = 2;
+/** Max symbols sent through the cached deep path per watchdog (cost bound). */
 export const DEEP_REVOTE_BATCH = 3;
+/** Per-row realtime tick throttle — a hot socket must not re-vote 20×/s. */
+export const REALTIME_ROW_MIN_MS = 1_000;
 /** Telegram dedupe per symbol+event (matches the STRONG alerter). */
 export const EVENT_COOLD_MS = 30 * 60_000;
 /** A row that left the board is kept EXPIRED for this long, then dropped. */
@@ -58,6 +66,10 @@ export const ADVERSE_ATR_X = 0.75;
 
 const GRADE_RANK = { NEUTRAL: 0, WATCH: 1, ACTION: 2, STRONG: 3 };
 const _num = (v) => (v != null && Number.isFinite(Number(v)) ? Number(v) : null);
+
+function _curOf(market) {
+  return market === 'FUTURES' ? 'USDT' : market === 'GLOBALFUTURES' ? 'USDC' : '₹';
+}
 
 export function recheckEnabled() {
   return String(process.env.AI_SIGNAL_RECHECK || '').toLowerCase() !== 'off';
@@ -237,10 +249,14 @@ const _state = {
   timer: null,
   ticking: false,
   tickN: 0,
-  deps: null,       // { getSignals, getDeepSignal, depsForSignals, send, fetchLtp }
+  deps: null,       // { getSignals, getDeepSignal, depsForSignals, send, fetchLtp, subscribeTicks }
+  unsubscribeTicks: null,
   rows: new Map(),  // "MKT:SYM" → live row (watch + runtime fields)
   events: [],       // last 30 loop-level events (panel feed)
-  status: { started: false, startedAt: null, lastTickAt: null, ticks: 0, checks: 0, events: 0, lastError: null, boardsSeen: 0 },
+  status: {
+    started: false, startedAt: null, lastTickAt: null, ticks: 0, checks: 0, events: 0,
+    lastError: null, boardsSeen: 0, realtime: false, realtimeTicks: 0, lastRealtimeTickAt: null,
+  },
 };
 const _pushedAt = new Map(); // "MKT:SYM:EVENT" → ts (telegram dedupe)
 
@@ -250,13 +266,18 @@ export function __pushedAtForTests() { return _pushedAt; }
 
 export function __resetSignalRecheckForTests() {
   if (_state.timer) { clearInterval(_state.timer); _state.timer = null; }
+  if (typeof _state.unsubscribeTicks === 'function') {
+    try { _state.unsubscribeTicks(); } catch { /* ignore */ }
+  }
+  _state.unsubscribeTicks = null;
   _state.ticking = false;
   _state.tickN = 0;
   _state.rows.clear();
   _state.events.length = 0;
   _pushedAt.clear();
   Object.assign(_state.status, {
-    started: false, startedAt: null, lastTickAt: null, ticks: 0, checks: 0, events: 0, lastError: null, boardsSeen: 0,
+    started: false, startedAt: null, lastTickAt: null, ticks: 0, checks: 0, events: 0,
+    lastError: null, boardsSeen: 0, realtime: false, realtimeTicks: 0, lastRealtimeTickAt: null,
   });
 }
 
@@ -347,6 +368,66 @@ export function mergeWatchlist(watch) {
     if (!row.expiredAt) row.expiredAt = now;
     else if (Date.now() - row.expiredAt > EXPIRED_KEEP_MS) _state.rows.delete(key);
   }
+}
+
+/** Apply one live price to one row — the SINGLE mutation path shared by the
+ *  realtime socket handler and the 30s REST fallback sweep. */
+function _applyPriceToRow(row, price, at, src) {
+  const rc = recheckRow(row, _num(price));
+  row.checks++;
+  _state.status.checks++;
+  const hadLtp = row.ltp != null;
+  row.ltp = rc.ltp ?? row.ltp;
+  row.movePct = rc.movePct;
+  if (rc.ltp != null) { row.ltpAt = at; row.ltpSrc = src || null; }
+  const prevPriceState = row.state;
+  row.state = rc.state;
+  row.reason = rc.reason;
+  row.lastCheckAt = at;
+  const ev = priceStateTransition(prevPriceState, rc.state);
+  if (ev && hadLtp) {
+    _recordEvent(ev, row, { ltp: rc.ltp, reason: rc.reason, cur: _curOf(row.market) });
+    _pushEvent(ev, row, { ltp: rc.ltp, reason: rc.reason, grade: row.grade, cur: _curOf(row.market) }).catch(() => {});
+  }
+  return rc;
+}
+
+/** Map a liveFeed key to every watched market that shares it. */
+function _marketsForKey(key) {
+  if (key.startsWith('FUT_')) return { markets: ['FUTURES'], symbol: key.slice(4) };
+  if (key.startsWith('GLOB_')) return { markets: ['GLOBALFUTURES'], symbol: key.slice(5) };
+  if (key.startsWith('IN_')) return { markets: ['INDIA', 'CRYPTO'], symbol: key.slice(3) };
+  return null;
+}
+
+/**
+ * v21.26.3 REALTIME ENTRY POINT — liveFeed.subscribe hands every socket tick
+ * here. The matching watched row is re-priced IMMEDIATELY (per-row throttled),
+ * so SL-through / T1 / T2 / adverse-drift state updates at socket speed instead
+ * of waiting for a 15s poll. Exported for tests (no feed import needed).
+ * @returns number of rows actually re-priced
+ */
+export function applyRealtimeTick(key, tick, at = Date.now()) {
+  const k = String(key || '').toUpperCase();
+  const px = _num(tick?.price);
+  if (!(px > 0) || !k) return 0;
+  const map = _marketsForKey(k);
+  if (!map || !map.symbol) return 0;
+  const sym = String(map.symbol).toUpperCase();
+  let applied = 0;
+  for (const mkt of map.markets) {
+    const row = _state.rows.get(`${mkt}:${sym}`);
+    if (!row || row.state === 'EXPIRED') continue;
+    // Per-row throttle — a hot bookTicker socket may print many times per
+    // second; re-evaluating more than once a second adds nothing.
+    if (at - (row.lastRealtimeAt || 0) < REALTIME_ROW_MIN_MS) continue;
+    row.lastRealtimeAt = at;
+    _applyPriceToRow(row, px, at, 'ws-tick');
+    applied++;
+    _state.status.realtimeTicks++;
+    _state.status.lastRealtimeTickAt = at;
+  }
+  return applied;
 }
 
 /** One loop tick. Exported for tests (called by the interval in prod). */
@@ -452,37 +533,29 @@ export async function recheckTick(now = Date.now()) {
     }
     mergeWatchlist(watch);
 
-    // 3) live LTP sweep + price-state recheck (per market batch)
+    // 3) watchdog REST sweep — FALLBACK for rows whose socket is silent.
+    //    Prices already delivered by liveFeed ticks are fresher; this pass
+    //    exists so a dead/slow feed degrades to 30s REST instead of no watch.
     const byMarket = new Map();
     for (const row of _state.rows.values()) {
       if (row.state === 'EXPIRED') continue;
       if (!byMarket.has(row.market)) byMarket.set(row.market, []);
       byMarket.get(row.market).push(row);
     }
-    const curOf = (m) => m === 'FUTURES' ? 'USDT' : m === 'GLOBALFUTURES' ? 'USDC' : '₹';
     for (const [mkt, rows] of byMarket) {
       let quotes = new Map();
       if (typeof deps.fetchLtp === 'function') {
         try { quotes = await deps.fetchLtp(mkt, rows.map(r => r.symbol)) || new Map(); } catch { quotes = new Map(); }
       }
       for (const row of rows) {
+        // Socket is alive for this row (a tick within the watchdog window)
+        // → the REST print can only be older. Skip; ticks already priced it.
+        const wsFresh = row.lastRealtimeAt && (now - row.lastRealtimeAt) <= RECHECK_WATCHDOG_MS;
+        if (wsFresh) continue;
         const q = quotes.get(row.symbol);
-        const rc = recheckRow(row, _num(q?.price));
-        row.checks++;
-        _state.status.checks++;
-        const hadLtp = row.ltp != null;
-        row.ltp = rc.ltp ?? row.ltp;
-        row.movePct = rc.movePct;
-        if (rc.ltp != null) { row.ltpAt = now; row.ltpSrc = q?.src || null; }
-        const prevPriceState = row.state;
-        row.state = rc.state;
-        row.reason = rc.reason;
-        row.lastCheckAt = now;
-        const ev = priceStateTransition(prevPriceState, rc.state);
-        if (ev && hadLtp) {
-          _recordEvent(ev, row, { ltp: rc.ltp, reason: rc.reason, cur: curOf(mkt) });
-          _pushEvent(ev, row, { ltp: rc.ltp, reason: rc.reason, grade: row.grade, cur: curOf(mkt) }).catch(() => {});
-        }
+        const px = _num(q?.price);
+        if (!(px > 0)) continue;
+        _applyPriceToRow(row, px, now, q?.src || null);
       }
     }
 
@@ -519,7 +592,7 @@ export async function recheckTick(now = Date.now()) {
               if (ucV === 'REJECTED' || (ucV === 'CONFIRMED' && prevUc === 'REJECTED')) {
                 const evType = ucV === 'REJECTED' ? 'UC_REJECTED' : 'UC_CONFIRMED';
                 const ucDetail = {
-                  side: s.side, grade: s.grade, ltp: row.ltp, cur: curOf(row.market),
+                  side: s.side, grade: s.grade, ltp: row.ltp, cur: _curOf(row.market),
                   reason: s.ultrafast?.detail || '',
                   ucAnswer: s.ultrafast?.answer || '',
                 };
@@ -541,7 +614,7 @@ export async function recheckTick(now = Date.now()) {
                 // STRONG" me pehla grade naye grade se replace hota tha.
                 reason: `ensemble re-vote: ${prevSide} ${prevGrade2} → ${s.side} ${s.grade} (conf ${s.confidence}%)`,
               });
-              _pushEvent(tr, row, { side: s.side, grade: s.grade, ltp: row.ltp, cur: curOf(row.market) }).catch(() => {});
+              _pushEvent(tr, row, { side: s.side, grade: s.grade, ltp: row.ltp, cur: _curOf(row.market) }).catch(() => {});
             }
           }
         } catch { /* one symbol's re-vote never kills the tick */ }
@@ -559,24 +632,38 @@ export async function recheckTick(now = Date.now()) {
 }
 
 /**
- * Boot the 15s recheck loop (idempotent). Injected deps keep this
+ * Boot the realtime recheck loop (idempotent). Injected deps keep this
  * pure-testable AND cycle-free:
  *   getSignals(mkt, deps, { warmOnly: true })  cached board read
  *   getDeepSignal(sym, mkt, deps)             cached ensemble re-vote
  *   depsForSignals()                          the routes' dep bag
  *   send(text) → { ok }                       telegram (optional)
- *   fetchLtp(mkt, symbols) → Map<sym, {price, src}>
+ *   fetchLtp(mkt, symbols) → Map<sym, {price, src}>  30s fallback sweep
+ *   subscribeTicks(fn) → unsubscribe          liveFeed WS tick source
  */
 export function startSignalRecheckLoop(deps = {}) {
   if (_state.deps == null && deps) _state.deps = deps;
   else if (deps) _state.deps = { ..._state.deps, ...deps };
   if (_state.timer) return;
   if (!recheckEnabled()) { _state.status.enabled = false; return; }
+  // v21.26.3 REALTIME: every socket tick re-prices the matching watched row.
+  // The 30s timer below is ONLY the watchdog (board refresh + deep re-vote +
+  // REST fallback) — it is no longer the price path.
+  if (typeof _state.deps?.subscribeTicks === 'function' && !_state.unsubscribeTicks) {
+    try {
+      _state.unsubscribeTicks = _state.deps.subscribeTicks((key, tick) => {
+        try { applyRealtimeTick(key, tick); } catch { /* one tick never kills the feed */ }
+      });
+      _state.status.realtime = true;
+    } catch {
+      _state.status.realtime = false;
+    }
+  }
   _state.status.started = true;
   _state.status.startedAt = Date.now();
-  _state.timer = setInterval(() => { recheckTick().catch(() => {}); }, RECHECK_TICK_MS);
+  _state.timer = setInterval(() => { recheckTick().catch(() => {}); }, RECHECK_WATCHDOG_MS);
   if (typeof _state.timer.unref === 'function') _state.timer.unref();
-  console.log(`[signal-recheck] 15s STRONG/ACTION recheck loop armed (ticks ${RECHECK_TICK_MS / 1000}s · deep re-vote every ${DEEP_REVOTE_EVERY_N_TICKS}th tick ×${DEEP_REVOTE_BATCH})`);
+  console.log(`[signal-recheck] REALTIME WS recheck armed (${_state.status.realtime ? 'liveFeed.subscribe' : 'REST-only — no tick source injected'} · watchdog ${RECHECK_WATCHDOG_MS / 1000}s · deep re-vote every ${DEEP_REVOTE_EVERY_N_TICKS}th watchdog ×${DEEP_REVOTE_BATCH})`);
 }
 
 /** The panel/API view — the watchlist with runtime state + loop health. */
@@ -626,10 +713,15 @@ export function signalRecheckStatus() {
     ok: true,
     enabled: recheckEnabled(),
     started: _state.status.started,
-    tickMs: RECHECK_TICK_MS,
+    /** v21.26.3: watchdog cadence (prices arrive via WS ticks, not this timer). */
+    tickMs: RECHECK_WATCHDOG_MS,
+    watchdogMs: RECHECK_WATCHDOG_MS,
+    realtime: _state.status.realtime,
+    realtimeTicks: _state.status.realtimeTicks,
+    lastRealtimeTickAt: _state.status.lastRealtimeTickAt,
     startedAt: _state.status.startedAt,
     lastTickAt: _state.status.lastTickAt,
-    nextTickIn: _state.status.lastTickAt ? Math.max(0, RECHECK_TICK_MS - (now - _state.status.lastTickAt)) : null,
+    nextTickIn: _state.status.lastTickAt ? Math.max(0, RECHECK_WATCHDOG_MS - (now - _state.status.lastTickAt)) : null,
     ticks: _state.status.ticks,
     checks: _state.status.checks,
     events: _state.status.events,
@@ -639,7 +731,7 @@ export function signalRecheckStatus() {
     eventsFeed: _state.events.slice(0, 12),
     autoTradeDeepMonitor,
     rows,
-    note: 'Har STRONG/ACTION signal + Active Auto-Trade har 15s me live-price recheck aur Deep Monitor hota hai (Dynamic SL Trail · Reversal Profit-Book · T1/T2 touch) aur ~60s me committee re-vote. Events Telegram par bhi jate hain.',
+    note: 'Har STRONG/ACTION signal + Active Auto-Trade har live WebSocket tick par price-recheck hota hai (per-row 1s throttle); 30s watchdog board refresh + committee re-vote + REST fallback chalata hai. Deep Monitor: Dynamic SL Trail · Reversal Profit-Book · T1/T2 touch. Events Telegram par bhi jate hain.',
   };
 }
 

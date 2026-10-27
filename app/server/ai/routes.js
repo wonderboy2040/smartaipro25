@@ -163,7 +163,7 @@ import {
   startManualTradeMonitor, manualMonitorStatus, flushManualState as _flushManualState,
   updateExcursion, manualStats,
 } from './manualTrades.js';
-import { getTick as _getTick } from '../liveFeed.js';
+import { getTick as _getTick, subscribe as subscribeLiveFeed } from '../liveFeed.js';
 // v20.7.5 THE 15s SIGNAL RECHECK LOOP — every STRONG/ACTION board
 // signal re-validated against live prices every 15s (SL-through ·
 // adverse drift · T1/T2 touch) + staggered committee re-votes, with
@@ -389,12 +389,36 @@ export function registerAITradingRoutes(app, deps) {
     String(sig?.symbol || '').toUpperCase().trim().replace(/^B-/, ''),
     market,
   );
+  // v21.26.3 [COLD-CACHE FALLBACK]: `warmOnly` answers null until the first
+  // board compute lands. On a fresh server that made EVERY MTF row evaluate
+  // against an empty main board (`signals.board:null` → ELITE rows showed
+  // "AI ENSEMBLE NOT READY" and auto-trade could not fire). We now wait a
+  // BOUNDED time for the canonical single-flight compute before giving up —
+  // board route, 60s sweep, 15s deep tick and the recheck provider all share
+  // this one helper, so none of them can starve on a cold cache again.
+  const BOARD_COLD_WAIT_MS = Math.max(2_000, Math.min(20_000, Number(process.env.MTF_BOARD_COLD_WAIT_MS) || 10_000));
+  const withBoardTimeout = (p, ms) => {
+    let timer = null;
+    const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(null), ms); });
+    return Promise.race([p, timeout]).finally(() => { if (timer) clearTimeout(timer); });
+  };
   const boardSignalsForDesk = async (market, deps = depsForSignals()) => {
     const mkt = String(market || 'INDIA').toUpperCase();
     const scanMarkets = BOARD_SIGNAL_SCAN_MARKETS[mkt] || [mkt];
     const boards = await Promise.all(scanMarkets.map(scanMarket =>
       getSignals(scanMarket, deps, { warmOnly: true }).catch(() => null)
     ));
+    // A null payload (not an empty signal list) means "no cache yet". Ask the
+    // canonical scanner for a REAL compute, but never let a slow cold scan
+    // hold the caller longer than the bounded budget.
+    const cold = [];
+    boards.forEach((b, i) => { if (!b || !Array.isArray(b.signals)) cold.push(i); });
+    if (cold.length > 0) {
+      const fresh = await Promise.all(cold.map(i =>
+        withBoardTimeout(getSignals(scanMarkets[i], deps, {}).catch(() => null), BOARD_COLD_WAIT_MS)
+      ));
+      cold.forEach((boardIdx, k) => { if (fresh[k]) boards[boardIdx] = fresh[k]; });
+    }
     const seen = new Set();
     const out = [];
     // Priority order matters: an alias seen in the primary universe wins.
@@ -4031,6 +4055,9 @@ export function registerAITradingRoutes(app, deps) {
     depsForSignals,
     send: sendTelegram,
     fetchLtp: _recheckFetchLtp,
+    // v21.26.3 REALTIME: every liveFeed socket tick drives the per-row price
+    // recheck immediately. The 30s loop is the watchdog only.
+    subscribeTicks: (fn) => subscribeLiveFeed(fn),
     getMtfDualBoards: async () => {
       const warm = peekDualMtfBoards(90_000);
       if (warm.length > 0) return warm;

@@ -106,6 +106,30 @@ function dirOfBias(bias) {
  *  snap         MTF-6 snapshot (may be null — then the 0.15 weight redistributes)
  *  modeId       'INTRADAY' | 'SWING' | 'SCALP'
  */
+/**
+ * v21.26.3 [ONE AI SCORE]: the AUTHORITATIVE main-board AI snapshot — exactly
+ * the same `superIntel.aiScore` + `superIntel.tier` pair the DEEP ENSEMBLE
+ * modal renders. The MTF `superScore` is a separate fused timing metric and
+ * must never be presented as "the AI score". Both surfaces read this shape,
+ * so a symbol can no longer show 83 in DEEP and 99 in the MTF board.
+ */
+export function mainAiSnapshot(boardSig) {
+  if (!boardSig) return null;
+  return {
+    side: boardSig.side ?? null,
+    aiScore: boardSig.superIntel?.aiScore ?? null,
+    aiTier: boardSig.superIntel?.tier ?? null,
+    grade: boardSig.grade ?? null,
+    confidence: boardSig.confidence ?? null,
+    winProb: (boardSig.superIntel?.winProb && typeof boardSig.superIntel.winProb === 'object') ? {
+      verdict: boardSig.superIntel.winProb.verdict ?? null,
+      pWin: boardSig.superIntel.winProb.pWin ?? null,
+      evR: boardSig.superIntel.winProb.evRealisticR ?? boardSig.superIntel.winProb.evR ?? null,
+      calibrated: !!boardSig.superIntel.winProb.calibrated,
+    } : null,
+  };
+}
+
 export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap = null, modeId = 'INTRADAY' }) {
   const side = normalizeSide(plan?.side);
   const dir = side === 'LONG' ? 1 : side === 'SHORT' ? -1 : 0;
@@ -706,16 +730,10 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
       && Number(boardSig.confidence) >= 60
     ),
     signals: {
-      board: boardSig ? {
-        side: boardSig.side ?? null,
-        aiScore: boardSig.superIntel?.aiScore ?? null, grade: boardSig.grade ?? null, confidence: boardSig.confidence ?? null,
-        winProb: (boardSig.superIntel?.winProb && typeof boardSig.superIntel.winProb === 'object') ? {
-          verdict: boardSig.superIntel.winProb.verdict ?? null,
-          pWin: boardSig.superIntel.winProb.pWin ?? null,
-          evR: boardSig.superIntel.winProb.evRealisticR ?? boardSig.superIntel.winProb.evR ?? null,
-          calibrated: !!boardSig.superIntel.winProb.calibrated,
-        } : null,
-      } : null,
+      // v21.26.3: `aiScore` + `aiTier` are the MAIN ensemble's authoritative
+      // numbers (same ones DEEP shows). `superScore` above stays the separate
+      // MTF fusion metric.
+      board: mainAiSnapshot(boardSig),
       mtf6: snapAligned?.ok && !snapAligned.lightweight ? { consensus: snapAligned.consensus, agreementPct: snapAligned.agreementPct, phase: snapAligned.phase, htfBias: snapAligned.htfBias, ltfTrigger: snapAligned.ltfTrigger, timing: snapAligned.timing?.quality ?? null, tfs: mtfWire6Payload(snapAligned)?.tfs ?? null } : null,
       htf2: snapAligned?.lightweight ? { engine: 'htf2', bias: snapAligned.htfBias, agreementPct: snapAligned.agreementPct, phase: snapAligned.phase, tfs: snapAligned.timeframes || [] } : null,
     },

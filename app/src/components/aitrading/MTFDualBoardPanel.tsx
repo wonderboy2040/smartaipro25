@@ -31,8 +31,11 @@ import type { MarketKind } from './types';
 
 interface Props {
   market: MarketKind;
-  /** Optional: deep analysis kholne ke liye (row ke 🔬 button). */
-  onDeep?: (symbol: string, market: MarketKind) => void;
+  /** Optional: deep analysis kholne ke liye (row ke 🔬 button).
+   *  v21.26.3: the full row is passed too, so the DEEP modal can PIN the
+   *  row's MAIN AI snapshot (same aiScore + tier as this card's headline)
+   *  instead of opening a pin-less fresh run with a different number. */
+  onDeep?: (symbol: string, market: MarketKind, row?: MtfDualRow) => void;
   /** Optional: paper trade khulne ke baad parent ko batao (toast/refresh). */
   onPaperOpened?: (symbol: string, market: MarketKind) => void;
   /** v21.18.0: Live Mode auto/manual execution + Wallet amount for <₹10k=10x / ≥₹10k=5x */
@@ -53,6 +56,12 @@ const tierCls = (tier?: string) =>
       : tier === 'ACTION' ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/40'
         : tier === 'WATCH' ? 'bg-amber-500/15 text-amber-300 border border-amber-500/40'
           : 'bg-slate-500/15 text-slate-400 border border-slate-500/40';
+
+// v21.26.3: the MAIN ensemble tier badge — identical vocabulary to the DEEP
+// ENSEMBLE ring (85+ ELITE / 80+ STRONG / 65+ ACTION / else WATCH). A missing
+// board signal renders neutral, never a fabricated tier.
+const mainAiTierCls = (tier?: string | null) =>
+  tier ? tierCls(tier) : 'bg-slate-600/20 text-slate-400 border border-slate-600/40';
 
 const fitCls = (v?: string | null) =>
   v === 'GOOD' ? 'text-emerald-300 border-emerald-500/40 bg-emerald-500/10'
@@ -1158,6 +1167,22 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             const orderSide = dirCert?.orderSide ?? r.orderSide ?? null;
             const dirVerdict = dirCert?.verdict ?? r.directionVerdict ?? null;
             const scorePct = Math.max(2, Math.min(100, Number(r.superScore) || 0));
+            // v21.26.3 SINGLE AI SCORE: the headline is the MAIN ensemble's
+            // aiScore/tier — the exact pair the DEEP ENSEMBLE modal shows.
+            // The MTF fusion score is rendered separately (never as "AI score").
+            const mainAi = r.signals?.board || null;
+            const mainAiScore = mainAi?.aiScore != null && Number.isFinite(Number(mainAi.aiScore)) ? Number(mainAi.aiScore) : null;
+            const mainAiTier = mainAi?.aiTier || null;
+            const mainAiPct = Math.max(2, Math.min(100, mainAiScore ?? 0));
+            // ✅ only when BOTH engines agree the row is tradeable: MTF gates
+            // cleared AND the main ensemble signal is genuinely available.
+            const isAutoReady = r.autoEligible === true
+              && r.ensembleSignalAvailable === true
+              && (r.side === 'LONG' || r.side === 'SHORT')
+              && r.triggerFired === true;
+            const autoBlockedLabel = r.ensembleSignalAvailable === false
+              ? 'AI ENSEMBLE NOT READY'
+              : (r.autoBlockers?.[0] || 'blocked');
             const key = `${r.symbol}-${r.mode}`;
             const open = !!expanded[key];
             const canPaper = r.ok && !dirBlocked && (r.side === 'LONG' || r.side === 'SHORT') && p?.entry && p?.stopLoss && p?.t1
@@ -1285,16 +1310,38 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                     <div className="mt-0.5 text-[9px] text-slate-500 font-mono">
                       {r.label} · hold {r.holdMin}m · {isRowUsd ? `$ ${fmt(r.ltp ?? p?.entry)} ${r.quoteCcy}` : `₹ ${fmt(r.ltp ?? p?.entry)}`}
                       {r.ltpInr != null && <span className="text-slate-600"> (≈ ₹{fmt(r.ltpInr, 0)})</span>}
-                      {r.signals?.board?.aiScore != null && <span> · board {r.signals.board.side ? `${r.signals.board.side} ` : ''}{r.signals.board.aiScore}</span>}
+                      {r.signals?.board?.aiScore != null && <span> · main AI {r.signals.board.side ? `${r.signals.board.side} ` : ''}{r.signals.board.aiScore}{r.signals.board.aiTier ? ` ${r.signals.board.aiTier}` : ''}</span>}
                       {r.signals?.mtf6?.agreementPct != null && <span> · MTF6 {r.signals.mtf6.agreementPct}%</span>}
                     </div>
                   </div>
                   <div className="text-right shrink-0">
-                    <span className={`px-2 py-0.5 rounded-md text-[10px] font-black tracking-wider ${tierCls(r.tier)}`} title={(r.drivers || []).join(' · ') || 'drivers n/a'}>
-                      {r.superScore ?? '—'} {r.tier}
-                    </span>
-                    <div className="mt-1 h-1.5 w-24 bg-slate-800 rounded-full overflow-hidden ml-auto" title={`Super-score ${r.superScore ?? '—'}/100`}>
-                      <div className={`h-full rounded-full ${scorePct >= 85 ? 'bg-fuchsia-400' : scorePct >= 80 ? 'bg-emerald-400' : scorePct >= 65 ? 'bg-cyan-400' : 'bg-amber-400'}`} style={{ width: `${scorePct}%` }} />
+                    {/* v21.26.3 HEADLINE = MAIN AI SCORE (DEEP ENTROPY PARITY).
+                        Same aiScore + tier as the DEEP ENSEMBLE ring. */}
+                    <div className="flex items-center justify-end gap-1">
+                      <span className="text-[8px] font-black tracking-wider text-slate-500">MAIN AI</span>
+                      <span
+                        data-testid={`mtf-main-ai-${r.symbol}`}
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-black tracking-wider ${mainAiTierCls(mainAiTier)}`}
+                        title={mainAiScore != null
+                          ? `MAIN ENSEMBLE AI score ${mainAiScore} · tier ${mainAiTier || '—'} · grade ${mainAi?.grade || '—'} · conf ${mainAi?.confidence ?? '—'}% — bilkul wahi number jo DEEP ENSEMBLE ANALYSIS ring dikhata hai.`
+                          : 'Main AI-BOARD ensemble par is symbol ka signal nahi hai — MTF fusion score iske bina tradeable nahi.'}
+                      >
+                        {mainAiScore != null ? `${mainAiScore} ${mainAiTier || mainAi?.grade || ''}`.trim() : 'NOT ON BOARD'}
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1.5 w-24 bg-slate-800 rounded-full overflow-hidden ml-auto"
+                      title={mainAiScore != null ? `Main AI ${mainAiScore}/100 (${mainAiTier || mainAi?.grade || '—'})` : 'Main AI score unavailable'}>
+                      <div className={`h-full rounded-full ${mainAiScore == null ? 'bg-slate-600' : mainAiPct >= 85 ? 'bg-fuchsia-400' : mainAiPct >= 80 ? 'bg-emerald-400' : mainAiPct >= 65 ? 'bg-cyan-400' : 'bg-amber-400'}`} style={{ width: `${mainAiPct}%` }} />
+                    </div>
+                    {/* Secondary, clearly-labelled MTF fusion metric (NOT the AI score). */}
+                    <div className="mt-1 flex items-center justify-end gap-1">
+                      <span className="text-[8px] font-black tracking-wider text-slate-500">MTF FUSION</span>
+                      <span className={`px-1.5 py-0.5 rounded border text-[9px] font-black tracking-wider ${tierCls(r.tier)}`} title={(r.drivers || []).join(' · ') || 'MTF dual-timeframe fusion score (context 30% · trigger 25% · plan 20% · HTF bias 15% · board base 10%)'}>
+                        {r.superScore ?? '—'} {r.tier}
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1 w-24 bg-slate-800/70 rounded-full overflow-hidden ml-auto" title={`MTF fusion ${r.superScore ?? '—'}/100 (secondary timing metric)`}>
+                      <div className={`h-full rounded-full ${scorePct >= 85 ? 'bg-fuchsia-400/70' : scorePct >= 80 ? 'bg-emerald-400/70' : scorePct >= 65 ? 'bg-cyan-400/70' : 'bg-amber-400/70'}`} style={{ width: `${scorePct}%` }} />
                     </div>
                   </div>
                 </div>
@@ -1389,9 +1436,9 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                 {/* drivers + auto status + actions */}
                 <div className="mt-2 flex items-center justify-between gap-2 flex-wrap">
                   <div className="min-w-0">
-                    {r.autoEligible
-                      ? <span className="px-1.5 py-0.5 rounded text-[9px] font-black border border-emerald-500/50 text-emerald-300 bg-emerald-500/10" title="Full confirm: score≥bar + trigger fired + TF-fit GOOD/OK + dual aligned + not counter-trend + grade A/B + cost<0.5R">✅ AUTO-READY</span>
-                      : <span className="px-1.5 py-0.5 rounded text-[9px] font-black border border-slate-500/40 text-slate-400" title={(r.autoBlockers || []).join(' · ') || 'blocked'}>⛔ {r.autoBlockers?.[0] || 'blocked'}{(r.autoBlockers?.length || 0) > 1 ? ` +${(r.autoBlockers?.length || 0) - 1}` : ''}</span>}
+                    {isAutoReady
+                      ? <span className="px-1.5 py-0.5 rounded text-[9px] font-black border border-emerald-500/50 text-emerald-300 bg-emerald-500/10" title="Full confirm: main AI ensemble available + score≥bar + trigger fired + TF-fit GOOD/OK + dual aligned + not counter-trend + grade A/B + cost<0.5R">✅ AUTO-READY</span>
+                      : <span className="px-1.5 py-0.5 rounded text-[9px] font-black border border-slate-500/40 text-slate-400" title={[...(r.ensembleSignalAvailable === false ? ['main AI-BOARD ensemble signal unavailable'] : []), ...(r.autoBlockers || [])].join(' · ') || 'blocked'}>⛔ {autoBlockedLabel}{(r.autoBlockers?.length || 0) > 1 ? ` +${(r.autoBlockers?.length || 0) - 1}` : ''}</span>}
                     {r.autoPickBlockers?.length ? <span className="ml-1 text-[8px] text-amber-300/70 font-mono" title={r.autoPickBlockers.join(' · ')}>pick: {r.autoPickBlockers[0]}</span> : null}
                   </div>
                   <div className="flex items-center gap-1.5">
@@ -1423,7 +1470,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                       </button>
                     )}
                     {onDeep && (
-                      <button onClick={() => onDeep(r.symbol, r.market as MarketKind)} title="Deep analysis + MTF trade plan kholo"
+                      <button onClick={() => onDeep(r.symbol, r.market as MarketKind, r)} title="Deep analysis + MTF trade plan kholo"
                         className="px-1.5 py-0.5 rounded text-[9px] font-black border border-cyan-500/40 text-cyan-200 hover:bg-cyan-500/10">🔬</button>
                     )}
                   </div>

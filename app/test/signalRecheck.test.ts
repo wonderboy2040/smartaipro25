@@ -35,7 +35,8 @@ process.env.MTF_AUTO_DATA_DIR = TMP_DATA;
 import {
   selectWatchlist, recheckRow, detectTransition, priceStateTransition,
   formatRecheckEvent, recheckTick, signalRecheckStatus, startSignalRecheckLoop,
-  buildTickStoreResolver, RECHECK_TICK_MS, RECHECK_GRADES,
+  buildTickStoreResolver, applyRealtimeTick, RECHECK_TICK_MS, RECHECK_WATCHDOG_MS,
+  REALTIME_ROW_MIN_MS, RECHECK_GRADES,
   __resetSignalRecheckForTests, __rowsForTests, __eventsForTests, __pushedAtForTests,
 } from '../server/ai/signalRecheck.js';
 
@@ -277,6 +278,68 @@ describe('recheckTick — the 15s loop with injected deps', () => {
   });
 });
 
+// ---------- realtime WebSocket tick path ----------
+describe('applyRealtimeTick — liveFeed socket prices drive the watchlist', () => {
+  const ltp = new Map();
+  beforeEach(async () => {
+    __resetSignalRecheckForTests();
+    process.env.AI_SIGNAL_RECHECK = 'off';
+    ltp.clear();
+    startSignalRecheckLoop({
+      getSignals: async (mkt) => mkt === 'FUTURES'
+        ? board([sig()])
+        : mkt === 'CRYPTO' ? board([sig({ market: 'CRYPTO', symbol: 'SOL', grade: 'ACTION', side: 'SHORT', plan: { entry: 200, stopLoss: 210, target1: 190, target2: 180, atrUsed: 4 } })]) : board([]),
+      getDeepSignal: async () => null,
+      depsForSignals: () => ({}),
+      send: async () => ({ ok: true }),
+      fetchLtp: async () => ltp,
+    });
+    await recheckTick();
+  });
+  afterEach(() => { __resetSignalRecheckForTests(); delete process.env.AI_SIGNAL_RECHECK; });
+
+  it('FUT_ tick re-prices the watched row immediately (no poll wait)', () => {
+    const at = Date.now();
+    expect(applyRealtimeTick('FUT_ETH', { price: 100.5, time: at }, at)).toBe(1);
+    const n = applyRealtimeTick('FUT_ETH', { price: 94.2, time: at + REALTIME_ROW_MIN_MS + 1 }, at + REALTIME_ROW_MIN_MS + 1);
+    expect(n).toBe(1);
+    const eth = __rowsForTests().get('FUTURES:ETH');
+    expect(eth.ltp).toBe(94.2);
+    expect(eth.ltpSrc).toBe('ws-tick');
+    expect(eth.state).toBe('INVALIDATED');
+    expect(eth.checks).toBe(2); // two realtime ticks (watchdog had no quote)
+    expect(__eventsForTests().some(e => e.type === 'INVALIDATED')).toBe(true);
+  });
+
+  it('per-row throttle drops a second tick inside 1s, accepts after it', () => {
+    const at = Date.now();
+    expect(applyRealtimeTick('FUT_ETH', { price: 99.5 }, at)).toBe(1);
+    expect(applyRealtimeTick('FUT_ETH', { price: 94.2 }, at + 100)).toBe(0);
+    expect(__rowsForTests().get('FUTURES:ETH').ltp).toBe(99.5);
+    expect(applyRealtimeTick('FUT_ETH', { price: 94.2 }, at + REALTIME_ROW_MIN_MS + 1)).toBe(1);
+    expect(__rowsForTests().get('FUTURES:ETH').state).toBe('INVALIDATED');
+  });
+
+  it('IN_ ticks address CRYPTO and INDIA watches; GLOB_ maps to equity SIM', async () => {
+    process.env.AI_SIGNAL_RECHECK = 'off';
+    const now = Date.now();
+    expect(applyRealtimeTick('IN_SOL', { price: 195 }, now)).toBe(1);
+    expect(__rowsForTests().get('CRYPTO:SOL').ltp).toBe(195);
+    expect(applyRealtimeTick('GLOB_NVDA', { price: 140 }, now)).toBe(0); // not watched
+    expect(applyRealtimeTick('FUT_UNKNOWN', { price: 1 }, now)).toBe(0);
+  });
+
+  it('status exposes the realtime transport counters', () => {
+    const now = Date.now();
+    applyRealtimeTick('FUT_ETH', { price: 99.5 }, now);
+    const st = signalRecheckStatus();
+    expect(st.tickMs).toBe(RECHECK_WATCHDOG_MS);
+    expect(st.watchdogMs).toBe(RECHECK_WATCHDOG_MS);
+    expect(st.realtimeTicks).toBeGreaterThanOrEqual(1);
+    expect(st.lastRealtimeTickAt).toBe(now);
+  });
+});
+
 // ---------- the tick-store resolver ----------
 describe('buildTickStoreResolver — tick store first, staleness-honest', () => {
   it('fresh IN_/FUT_/GLOB_ ticks resolve; stale and unknown do not', () => {
@@ -303,8 +366,10 @@ describe('buildTickStoreResolver — tick store first, staleness-honest', () => 
 
 // ---------- constants pin ----------
 describe('recheck constants — the user contract', () => {
-  it('15s cadence · STRONG+ACTION grades', () => {
-    expect(RECHECK_TICK_MS).toBe(15_000);
+  it('realtime WS prices · 30s watchdog · STRONG+ACTION grades', () => {
+    expect(RECHECK_WATCHDOG_MS).toBe(30_000);
+    expect(RECHECK_TICK_MS).toBe(RECHECK_WATCHDOG_MS);
+    expect(REALTIME_ROW_MIN_MS).toBe(1_000);
     expect(RECHECK_GRADES).toEqual(['STRONG', 'ACTION']);
   });
 });

@@ -562,8 +562,10 @@ export const OrderConsole = memo(function OrderConsole({ state, positions, entri
         )}
       </div>
 
-      {/* Config editor */}
-      {cfg && <ConfigEditor config={cfg} state={state} busy={busy} onSave={onSaveConfig} venue={venue} />}
+      {/* v21.26.3: CoinDCX "RISK & EXECUTION SETTINGS — COINDCX DESK" block
+          permanently removed per user request. Kill switch (above), risk
+          meters, positions and the MTF panel's own LIVE/PAPER arming stay. */}
+      {cfg && venue !== 'COINDCX' && <ConfigEditor config={cfg} state={state} busy={busy} onSave={onSaveConfig} venue={venue} />}
 
       {/* v6.5: Dhan broker + India LIVE arming (India desk) */}
       {venue !== 'COINDCX' && (
