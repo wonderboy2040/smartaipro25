@@ -1,19 +1,15 @@
 {
-  "name": "advance-pro-intelligence-bot",
-  "version": "21.4.0",
-  "description": "Advance Pro Intelligence — Multi-Engine AI Trading Bot with Telegram Command System, 7-LLM Smart Router, Quant Brain Fallback, and Real-time Market Intelligence",
+  "name": "smartaipro-telegram-bot",
+  "version": "21.25.3",
+  "private": true,
   "type": "module",
+  "description": "Zero-dependency Telegram control surface for SmartAI Pro (site API is the single source of truth)",
   "main": "bot.mjs",
   "scripts": {
     "start": "node bot.mjs",
     "dev": "node --watch bot.mjs",
-    "check": "node --check bot.mjs && node --check ai-chat.mjs && node --check market.mjs && node --check analysis.mjs && node --check algo.mjs && node --check config.mjs && node --check backtester.mjs && node --check siteAgents.mjs && node --check siteSync.mjs && node --check mcp-tools.mjs"
-  },
-  "dependencies": {
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "node-cron": "^4.6.0",
-    "node-telegram-bot-api": "^1.2.0"
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node --check bot.mjs && node --check lib/api.mjs && node --check lib/commands.mjs && node --check lib/config.mjs && node --check lib/format.mjs && node --check lib/lock.mjs && node --check lib/logger.mjs && node --check lib/router.mjs && node --check lib/state.mjs && node --check lib/telegram.mjs && node --check lib/util.mjs && node --test \"test/*.test.mjs\""
   },
   "engines": {
     "node": ">=20"
