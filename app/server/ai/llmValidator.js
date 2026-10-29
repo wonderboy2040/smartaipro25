@@ -29,10 +29,7 @@
 //   • Band tunable: AI_LLM_VALIDATOR_BAND="45,60".
 // NEVER THROWS — every failure path degrades to null.
 // ============================================================
-import { councilAsk, aiKeysPresent } from './llmChain.js';
-// v18.8: keyless local engine awareness — from llmSentinel (NOT
-// llmChain) so existing llmChain mocks in tests stay untouched.
-import { ollamaProbe } from './llmSentinel.js';
+import { councilAsk, aiEngineOnline } from './llmChain.js';
 
 const CANDLE_BUCKET_MS = 15 * 60 * 1000; // one ask per symbol per 15m close
 const CACHE_MAX = 80;
@@ -126,9 +123,9 @@ export async function llmValidateSignal(sig, deps = {}, { now = Date.now(), env 
     // Out-of-band signals never ask the LLM (the plan's scoping rule).
     if (!inBorderlineBand(sig?.confidence, env)) return null;
     const { KEYS, OPENAI_COMPAT } = deps || {};
-    // v18.8: cloud keys OR a reachable local ollama — the second
-    // opinion stays armed for zero-cloud-key local installs too.
-    if (!aiKeysPresent(KEYS) && !(await ollamaProbe().catch(() => false))) return null;
+    // v21.27: mode-aware availability gate (LOCAL = Ollama; CLOUD =
+    // OpenCode or the Ollama fallback). Paid keys no longer count.
+    if (!(await aiEngineOnline(deps))) return null;
 
     const bucket = _bucket(now);
     const key = _cacheKey(market, symbol, bucket);

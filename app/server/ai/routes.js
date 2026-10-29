@@ -23,6 +23,8 @@
 //   POST /api/ai/dhan/connect            v6.5 { clientId, accessToken }
 //   POST /api/ai/dhan/disconnect         v6.5
 //   GET  /api/ai/dhan/status             v6.5 connected + scrip master + profile
+//   GET  /api/ai/mode                    v21.27 site-wide LOCAL/CLOUD mode
+//   POST /api/ai/mode                    v21.27 { mode: "local"|"cloud" }
 //
 // Background loops (unref'd, non-fatal):
 //   • position watcher (60s)   — crypto SL/TP + trailing
@@ -204,6 +206,8 @@ import {
   probeOpenCodeSeats, OPENCODE_SEATS,
 } from './opencodeBridge.js';
 import { councilAskVision } from './llmChain.js';
+// v21.27 site-wide LOCAL/CLOUD engine switch (restart-safe, no restart needed)
+import { getAiModeStatus, setAiMode } from './aiMode.js';
 import { coreSeatGuardStatus } from './seatCorrelation.js';
 import { nearMissList, nearMissStats } from './consensus.js';
 import { sectorDesk } from './sectors.js';
@@ -525,6 +529,26 @@ export function registerAITradingRoutes(app, deps) {
     }
   });
 
+  // ---------------- v21.27: SITE-WIDE LOCAL / CLOUD SWITCH ----------------
+  // LOCAL = Ollama only · CLOUD = OpenCode free models first, Ollama
+  // fallback. Applies to the AI Council, deep analysis, global council
+  // and the borderline LLM validator. No paid provider is ever called.
+  // Server-wide + restart-safe (server/data/ai-mode.json); no restart
+  // needed — councilAsk() re-reads the mode on every ask.
+  app.get('/api/ai/mode', (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true, ...getAiModeStatus() });
+  });
+
+  app.post('/api/ai/mode', (req, res) => {
+    const out = setAiMode(req.body?.mode);
+    if (!out.ok) {
+      return res.status(400).json({ ok: false, error: out.error, modes: ['local', 'cloud'] });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true, ...getAiModeStatus(), persisted: out.persisted });
+  });
+
   // ---------------- v18.7: AI ENGINE SENTINEL (status + recheck) ----------------
   // The "AI language engines offline" fix: the user finally SEES every
   // engine's real state (no-key / cooldown auto-retry / ready), why it
@@ -542,6 +566,7 @@ export function registerAITradingRoutes(app, deps) {
       res.set('Cache-Control', 'no-store');
       res.json({
         ok: true,
+        mode: getAiModeStatus(),
         engines: engineSnapshot(effectiveKeys()),
         ollama: ollamaStatus(),
         opencode,
@@ -563,6 +588,7 @@ export function registerAITradingRoutes(app, deps) {
       res.json({
         ok: true,
         cleared: true,
+        mode: getAiModeStatus(),
         engines: engineSnapshot(effectiveKeys()),
         ollama: ollamaStatus(),
         opencode: opencodeStatus(),

@@ -57,6 +57,7 @@ vi.mock('../server/ai/agent.js', () => ({
 
 import { runCryptoAgent } from '../server/ai/cryptoAgent.js';
 import { councilAsk } from '../server/ai/llmChain.js';
+import { setAiMode, __resetAiModeForTests } from '../server/ai/aiMode.js';
 import { engineTrack, engineSnapshot, __resetSentinelForTests } from '../server/ai/llmSentinel.js';
 
 // ---------------- fetch router mock ----------------
@@ -81,6 +82,10 @@ const ollamaTags = () => async () => ({
   ok: true, status: 200,
   json: async () => ({ models: [{ name: 'llama3.1:8b' }] }),
 });
+const okOllamaNative = (content: string) => async () => ({
+  ok: true, status: 200,
+  json: async () => ({ message: { role: 'assistant', content } }),
+});
 
 const COMPAT = {
   groq: { url: 'https://api.groq.com/openai/v1/chat/completions', defModel: 'openai/gpt-oss-120b' },
@@ -104,6 +109,8 @@ const SOL_SIGNAL = {
 
 beforeEach(() => {
   __resetSentinelForTests();
+  __resetAiModeForTests();
+  setAiMode('local');
   fetchCalls.length = 0;
   routes = {};
   mockGetDeepSignal.mockReset().mockResolvedValue(SOL_SIGNAL);
@@ -212,35 +219,27 @@ describe('v18.7 engine chain — the desk agent', () => {
   });
 });
 
-describe('v18.7 councilAsk (signals/council chain) is sentinel-aware', () => {
-  it('falls through gemini (no-json) to huggingface and records both', async () => {
+describe('v21.27 councilAsk (signals/council chain) — LOCAL mode contract', () => {
+  it('answers via native Ollama and never touches a paid provider', async () => {
     routes = {
-      'generativelanguage': async () => ({ ok: true, status: 200, json: async () => ({ candidates: [] }) }),
-      'router.huggingface.co': okChat('{"verdict":"CONFIRM","confidence":80,"reason":"clean"}'),
+      '127.0.0.1:11434/api/tags': ollamaTags(),
+      '127.0.0.1:11434/api/chat': okOllamaNative('{"verdict":"CONFIRM","confidence":80,"reason":"local"}'),
     };
     const { json, model } = await councilAsk('prompt', {
-      KEYS: { gemini: 'g', huggingface: 'h' },
+      KEYS: { gemini: 'g', groq: 'q', huggingface: 'h' },
       OPENAI_COMPAT: COMPAT,
     });
-    expect(model).toBe('huggingface');
+    expect(model).toBe('ollama:llama3.1:8b');
     expect(json?.verdict).toBe('CONFIRM');
-    const snap = engineSnapshot({ gemini: 'g', huggingface: 'h' });
-    expect(snap.find(e => e.provider === 'gemini')?.consecFails).toBeGreaterThanOrEqual(1);
-    expect(snap.find(e => e.provider === 'huggingface')?.state).toBe('ready');
+    const providerFrags = ['generativelanguage', 'api.groq.com', 'api.cerebras.ai', 'openrouter.ai', 'router.huggingface.co', 'integrate.api.nvidia.com'];
+    expect(fetchCalls.some(u => providerFrags.some(f => u.includes(f)))).toBe(false);
   });
 
-  it('skips a cooled provider with ZERO calls to it', async () => {
-    engineTrack('gemini', new Error('gemini 429'));
-    engineTrack('gemini', new Error('gemini 429'));
-    routes = {
-      'generativelanguage': okChat('should never be reached'),
-      'api.groq.com': okChat('{"verdict":"CONFIRM","confidence":70,"reason":"x"}'),
-    };
-    const { model } = await councilAsk('prompt', {
-      KEYS: { gemini: 'g', groq: 'k' },
-      OPENAI_COMPAT: COMPAT,
-    });
-    expect(model).toBe('groq');
-    expect(fetchCalls.some(u => u.includes('generativelanguage'))).toBe(false);
+  it('a cooled Ollama is fast-skipped with ZERO network calls', async () => {
+    engineTrack('ollama', new Error('ollama 500'));
+    engineTrack('ollama', new Error('ollama 500'));
+    const out = await councilAsk('prompt', { KEYS: { gemini: 'g' }, OPENAI_COMPAT: COMPAT });
+    expect(out).toEqual({ json: null, model: null });
+    expect(fetchCalls.length).toBe(0);
   });
 });

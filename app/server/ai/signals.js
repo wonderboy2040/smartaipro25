@@ -159,12 +159,9 @@ import { verifySignal, verificationWire } from './signalVerifier.js';
 import { verifySignalUltrafast, ultrafastWire, ultrafastGatePatch } from './ultrafastVerifier.js';
 // v13.2 A2: LLM second-opinion validator (borderline band, candle-cached)
 import { llmValidateSignal, llmValidateCached, llmValidatorEnabled, inBorderlineBand } from './llmValidator.js';
-// v18.8 ENGINE CHAIN UNIFICATION: the board's council seats ride the
-// ONE shared provider chain (sentinel + 6 cloud engines + local ollama).
-// ollamaProbe comes from llmSentinel directly so llmChain test mocks
-// (councilAsk/aiKeysPresent only) keep working untouched.
-import { councilAsk, councilAskDeep, aiKeysPresent } from './llmChain.js';
-import { ollamaProbe } from './llmSentinel.js';
+// v21.27 LOCAL/CLOUD: the board's council seats ride the ONE shared
+// mode-aware chain (LOCAL = Ollama, CLOUD = OpenCode → Ollama fallback).
+import { councilAsk, councilAskDeep, aiEngineOnline } from './llmChain.js';
 
 // v9: how many coins the Superintelligence Signal Board scans for the
 // dynamic desks (spot + futures). 40 = every liquid CoinDCX book by
@@ -1148,10 +1145,9 @@ Respond STRICT JSON only (no markdown):
  * just because the debate chain hiccuped.
  */
 export async function aiCouncilVerify(candidates, deps, market, opts = {}) {
-  // v18.8: cloud keys OR a reachable local ollama — the council goes
-  // online for a zero-cloud-key local install too (the "AI language
-  // engines offline" message dies with an Ollama on the machine).
-  if (!candidates?.length || !(aiKeysPresent(deps?.KEYS) || !!(await ollamaProbe().catch(() => false)))) return { verdicts: {}, model: null, online: false };
+  // v21.27: mode-aware availability gate (LOCAL = Ollama; CLOUD =
+  // OpenCode or the Ollama fallback). Paid keys no longer count.
+  if (!candidates?.length || !(await aiEngineOnline(deps))) return { verdicts: {}, model: null, online: false };
   if (councilDebateEnabled()) {
     const debated = await aiCouncilDebate(candidates, deps, market, opts).catch(() => null);
     if (debated && debated.online) return debated;

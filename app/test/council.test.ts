@@ -30,7 +30,7 @@ vi.mock('../server/ai/llmChain.js', () => ({
     if (!_llm.on || !_llm.handler) return { json: null, model: null };
     return _llm.handler(prompt);
   },
-  aiKeysPresent: () => _llm.on,
+  aiEngineOnline: async () => _llm.on,
 }));
 
 // ---- controllable mesh (council only needs funding + price) ----

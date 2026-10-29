@@ -21,6 +21,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { useAuthState } from './hooks/useAuthState';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { AiModeSwitch } from './components/AiModeSwitch';
 import { WifiOff } from 'lucide-react';
 import { APP_VERSION, APP_TITLE } from './version';
 
@@ -312,6 +313,7 @@ export default function App() {
 
             {/* right controls */}
             <div className="flex gap-2 relative order-2 sm:order-3 shrink-0">
+              <AiModeSwitch />
               <button onClick={toggleTheme} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} className="quantum-btn-ghost p-2.5 rounded-xl text-lg min-w-[44px] min-h-[44px] flex items-center justify-center" title={`Toggle ${theme === 'dark' ? 'Light' : 'Dark'} Mode`}>{theme === 'dark' ? '🌞' : '🌙'}</button>
               <button onClick={logout} aria-label="Logout" className="quantum-btn-ghost p-2.5 rounded-xl text-lg min-w-[44px] min-h-[44px] flex items-center justify-center" title="Logout">🔐</button>
             </div>

@@ -26,7 +26,7 @@ import {
 // mock the provider chain BEFORE the module under test imports it
 vi.mock('../server/ai/llmChain.js', () => ({
   councilAsk: vi.fn(),
-  aiKeysPresent: (KEYS) => !!(KEYS && (KEYS.gemini || KEYS.groq || KEYS.cerebras || KEYS.openrouter)),
+  aiEngineOnline: async (deps) => !!(deps?.KEYS && (deps.KEYS.gemini || deps.KEYS.groq || deps.KEYS.cerebras || deps.KEYS.openrouter)),
 }));
 import { councilAsk } from '../server/ai/llmChain.js';
 

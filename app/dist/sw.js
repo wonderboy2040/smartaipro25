@@ -22,7 +22,7 @@
  * fresh cache and the activate-eviction below cleans the orphans.
  * ============================================================ */
 
-const CACHE_VERSION = 'smartai-pro-v20-bmvtb8jyh';
+const CACHE_VERSION = 'smartai-pro-v20-bmvtlajic';
 const SHELL = ['/', '/index.html', '/manifest.json', '/icon.svg'];
 
 self.addEventListener('install', (event) => {

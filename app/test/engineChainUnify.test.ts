@@ -1,24 +1,16 @@
 // ============================================================
-// test/engineChainUnify.test.ts — v18.8 ENGINE CHAIN UNIFICATION
+// test/engineChainUnify.test.ts — v21.27 MODE-AWARE CHAIN
 // ------------------------------------------------------------
-// THE GAP THIS LOCKS: v18.7 upgraded the DESK AGENTS (crypto/intraday)
-// to the sentinel chain with the keyless local ollama engine, but the
-// board's OWN LLM paths silently stayed on the OLD 4-provider ladder:
-//   • llmChain.councilAsk (council + validator + weekly review) — no
-//     ollama, so a zero-cloud-key install still got "AI language
-//     engines offline" while a WORKING local Ollama sat unused.
-//   • signals.js's private councilAsk — gemini/groq/cerebras/openrouter
-//     ONLY: no huggingface, no nvidia, no ollama, NO sentinel tracking.
-//
-// THE v18.8 CONTRACT:
-//   1. councilAsk answers via LOCAL OLLAMA with zero cloud keys
-//      (probe + /v1/chat/completions, long local timeout budget).
+// The v18.8 contract (board/council/validator share ONE chain that
+// answers via keyless local Ollama) still holds in LOCAL mode. v21.27
+// adds the site-wide LOCAL/CLOUD switch and REMOVES the paid provider
+// ladder from these lanes:
+//   1. councilAsk answers via LOCAL OLLAMA with zero cloud keys.
 //   2. councilAsk's ollama ask is sentinel-tracked (success → ready).
-//   3. aiKeysPresent counts huggingface + nvidia keys (6 engines).
+//   3. paid keys alone do NOT make the lane online (no paid fallback).
 //   4. signals.js aiCouncilVerify goes ONLINE with ZERO cloud keys
 //      when ollama is reachable (the "engines offline" killer).
-//   5. signals.js has NO private chain left — it rides llmChain
-//      (gemini no-json → huggingface answers on the BOARD seat too).
+//   5. signals.js has NO private chain left — it rides llmChain.
 //   6. council.js runs its persona batch with zero cloud keys when
 //      ollama is reachable (board + deep gates).
 // ============================================================
@@ -35,7 +27,8 @@ vi.mock('../server/mcp/coindcx.js', () => ({
   coindcxStatus: () => ({ connected: false }),
 }));
 
-import { councilAsk, aiKeysPresent } from '../server/ai/llmChain.js';
+import { councilAsk, aiEngineOnline } from '../server/ai/llmChain.js';
+import { setAiMode, __resetAiModeForTests } from '../server/ai/aiMode.js';
 import { engineSnapshot, __resetSentinelForTests } from '../server/ai/llmSentinel.js';
 import { aiCouncilVerify } from '../server/ai/signals.js';
 import { runCouncilBoard } from '../server/ai/council.js';
@@ -53,10 +46,6 @@ vi.stubGlobal('fetch', vi.fn(async (url: any, _init?: any) => {
   return { ok: false, status: 500, json: async () => ({}) }; // default: refuse
 }));
 
-const okChat = (content: string) => async () => ({
-  ok: true, status: 200,
-  json: async () => ({ choices: [{ message: { role: 'assistant', content, tool_calls: [] } }] }),
-});
 const ollamaTags = () => async () => ({
   ok: true, status: 200,
   json: async () => ({ models: [{ name: 'llama3.1:8b' }] }),
@@ -77,6 +66,8 @@ const COMPAT = {
 
 beforeEach(() => {
   __resetSentinelForTests();
+  __resetAiModeForTests();
+  setAiMode('local'); // v21.27: this suite pins the LOCAL contract
   fetchCalls.length = 0;
   routes = {};
 });
@@ -117,14 +108,18 @@ describe('v18.8 — councilAsk rides the KEYLESS LOCAL ollama engine', () => {
     expect(fetchCalls.some(u => u.includes('127.0.0.1:11434/api/chat'))).toBe(false);
   });
 
-  it('CONTRACT 3 — aiKeysPresent counts ALL SIX cloud engines', () => {
-    expect(aiKeysPresent({})).toBe(false);
-    expect(aiKeysPresent({ huggingface: 'hf' })).toBe(true);
-    expect(aiKeysPresent({ nvidia: 'nv' })).toBe(true);
-    expect(aiKeysPresent({ openrouter: 'or' })).toBe(true);
-    expect(aiKeysPresent({ groq: 'g' })).toBe(true);
-    expect(aiKeysPresent({ cerebras: 'c' })).toBe(true);
-    expect(aiKeysPresent({ gemini: 'gm' })).toBe(true);
+  it('CONTRACT 3 — paid keys alone do NOT make the lane online (no paid fallback)', async () => {
+    // Ollama unreachable; paid keys present. The v1 Council must stay
+    // offline instead of silently spending on Gemini/Groq/etc.
+    const online = await aiEngineOnline({ KEYS: { gemini: 'gm', groq: 'g', nvidia: 'nv' } });
+    expect(online).toBe(false);
+    const providerFrags = ['generativelanguage', 'api.groq.com', 'api.cerebras.ai', 'openrouter.ai', 'router.huggingface.co', 'integrate.api.nvidia.com'];
+    expect(fetchCalls.some(u => providerFrags.some(f => u.includes(f)))).toBe(false);
+  });
+
+  it('CONTRACT 3b — LOCAL mode + reachable ollama → aiEngineOnline true', async () => {
+    routes = { '127.0.0.1:11434/api/tags': ollamaTags() };
+    expect(await aiEngineOnline({ KEYS: {} })).toBe(true);
   });
 });
 
@@ -147,20 +142,12 @@ describe('v18.8 — the BOARD seat (signals.js aiCouncilVerify) is unified', () 
     expect(out.verdicts?.SOL?.verdict).toBe('LONG');
   });
 
-  it('CONTRACT 5 — NO private chain left: gemini no-json falls through to HUGGINGFACE on the board seat', async () => {
-    routes = {
-      'generativelanguage': async () => ({ ok: true, status: 200, json: async () => ({ candidates: [] }) }),
-      'router.huggingface.co': okChat('{"verdicts":{"SOL":{"verdict":"SHORT","confidence":64,"note":"hf","analysis":"ok"}}}'),
-    };
-    const out = await aiCouncilVerify(CAND, { KEYS: { gemini: 'g', huggingface: 'h' }, OPENAI_COMPAT: COMPAT }, 'CRYPTO');
-    // huggingface answered — the OLD private ladder (4 providers, no HF)
-    // could never do this
-    expect(out.online).toBe(true);
-    expect(out.model).toBe('huggingface');
-    expect(out.verdicts?.SOL?.verdict).toBe('SHORT');
-    const snap = engineSnapshot({ gemini: 'g', huggingface: 'h' });
-    expect(snap.find(e => e.provider === 'gemini')?.consecFails).toBeGreaterThanOrEqual(1);
-    expect(snap.find(e => e.provider === 'huggingface')?.state).toBe('ready');
+  it('CONTRACT 5 — paid keys + no Ollama → honest offline, ZERO paid provider calls', async () => {
+    const out = await aiCouncilVerify(CAND, { KEYS: { gemini: 'g', huggingface: 'h', groq: 'q' }, OPENAI_COMPAT: COMPAT }, 'CRYPTO');
+    expect(out.online).toBe(false);
+    expect(out.model).toBeNull();
+    const providerFrags = ['generativelanguage', 'api.groq.com', 'router.huggingface.co'];
+    expect(fetchCalls.some(u => providerFrags.some(f => u.includes(f)))).toBe(false);
   });
 
   it('CONTRACT 5b — no engines at all → honest offline (no crash)', async () => {

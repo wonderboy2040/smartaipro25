@@ -27,10 +27,7 @@
 // with the v10.18 gauntlets (safety-critical design decision).
 // ============================================================
 import { meshQuery, crossValidatePrices } from '../mcp/mesh.js';
-import { councilAsk, aiKeysPresent } from './llmChain.js';
-// v18.8: keyless local engine awareness — imported from llmSentinel
-// (NOT llmChain) so existing llmChain mocks in tests stay untouched.
-import { ollamaProbe } from './llmSentinel.js';
+import { councilAsk, aiEngineOnline } from './llmChain.js';
 import {
   COUNCIL_ROLES, ROLE_IDS, evaluateCouncil, councilWeights, gateThresholds,
 } from './consensus.js';
@@ -463,9 +460,9 @@ export async function runCouncilBoard({ market, signals, regime, deps }) {
 
   // ---- 6 persona batch calls (parallel) ----
   const roles = availableRoles(mkt);
-  // v18.8: cloud keys OR a reachable local ollama — the council runs
-  // for a zero-cloud-key local install too (probed, 90s-cached).
-  const llmOnline = aiKeysPresent(deps?.KEYS) || !!(await ollamaProbe().catch(() => false));
+  // v21.27: mode-aware availability gate (LOCAL = Ollama; CLOUD =
+  // OpenCode or the Ollama fallback), probed and cached.
+  const llmOnline = await aiEngineOnline(deps);
   const verdictsBySymbol = {}; // sym → {role: verdict}
   let model = 'deterministic';
   if (llmOnline) {
@@ -574,8 +571,8 @@ export async function runCouncilDeep({ market, symbol, sig, regime, deps, force 
   });
   const featuresList = [features];
   const roles = availableRoles(mkt);
-  // v18.8: cloud keys OR a reachable local ollama (deep mode too).
-  const llmOnline = aiKeysPresent(deps?.KEYS) || !!(await ollamaProbe().catch(() => false));
+  // v21.27: mode-aware availability gate (deep path too).
+  const llmOnline = await aiEngineOnline(deps);
 
   let verdicts = {};
   let model = 'deterministic';

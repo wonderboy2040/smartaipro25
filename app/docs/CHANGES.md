@@ -1,5 +1,31 @@
 # Changelog
 
+## v21.27.0 — SITE-WIDE LOCAL / CLOUD AI SWITCH (2026-10-29)
+
+**User ask: "site-level ek minimal LOCAL/CLOUD switch — LOCAL = local Ollama, CLOUD = OpenCode free models pehle + Ollama fallback; trading behaviour bilkul same."**
+
+v1 scope: AI Council, deep analysis, global council aur borderline LLM validator. Desk chat/briefing/vision untouched. Signal side, entry, SL, targets, leverage, size/qty, Telegram bot — koi change nahi.
+
+### 1) One server-wide mode (`server/ai/aiMode.js`)
+- `LOCAL` = sirf local Ollama (zero cloud calls). `CLOUD` = OpenCode free models first (GLM scan `glm-5.3-flash-free` / DeepSeek deep `deepseek-v4.1-flash-free`), phir Ollama fallback. **Paid Gemini/Groq/Cerebras/OpenRouter/HuggingFace/NVIDIA fallback v1 lanes se hata diya.**
+- Precedence: runtime switch > `server/data/ai-mode.json` > `AI_MODE` env > `LLM_LOCAL_ONLY` first-boot seed > default LOCAL. Runtime switch turant apply hota hai (restart nahi), file atomic persist hone se restart-safe hai; read-only FS par runtime-only honestly report hota hai.
+- `GET/POST /api/ai/mode`; `/api/ai/engines` + recheck ab `mode` bhi return karte hain.
+
+### 2) Shared chain (`server/ai/llmChain.js`)
+- `councilAsk()` ab mode-aware hai; `aiEngineOnline()` Council/deep/global-council/validator ka single honest availability gate hai (`aiKeysPresent` legacy export rehta hai, decision gate nahi).
+- CLOUD me OpenCode bridge ka apna per-model breaker/rate-limit source of truth hai; busy/cooldown/free-limit/timeout/bad-JSON par seedha Ollama fallback. LOCAL me OpenCode bilkul call nahi hota.
+- `tryParseJson`/`stripThinking` `server/ai/llmJson.js` me move hue — `llmChain ↔ opencodeBridge` import cycle break.
+
+### 3) UI honesty
+- Header me naya LOCAL/CLOUD switch (`src/components/AiModeSwitch.tsx`); mode source + restart-safe state tooltip me.
+- `EngineHealthStrip` ab MODE + OPENCODE chip dikhata hai, mode-specific fix guidance deta hai. `AlertsPanel` mode/OpenCode status + source dikhata hai; legacy paid keys ko "desk agent / report keys" label kiya (v1 Council unhe use nahi karta).
+
+### Verification
+- NEW/updated: `test/llmChainEnv.test.ts` (mode precedence + LOCAL/CLOUD chain + fallback + `aiEngineOnline`), `engineChain`, `engineChainUnify`, `council`, `councilDebate`, `llmValidator`, `llmChainDeepModel` — 85/85 pass.
+- `npm run typecheck` ✓ · `npm run lint` ✓ · `npm run check:version` ✓ (21.27.0) · `npm run build` ✓ · `npm run check:routes` ✓.
+- Real-engine probe (this host): `opencodeProbe` = CLI v2.2.1, logged in, both free models listed; GLM fast seat returned strict JSON; mode persisted to `ai-mode.json` and a fresh Node process read it back as `source:file` (restart-safe). Ollama was offline on this host, so LOCAL honestly reported offline and never touched a paid key.
+- Full `npm test`: 227/243 files pass. 16 failing files are PRE-EXISTING baseline failures outside this change — 4 suites import `telegram-bot/siteAgents.mjs` / `market.mjs` (removed by the earlier bot rebuild `f7c6fe7`), 1 asserts the old bot.mjs `TRUST_PROXY` text, and the rest are the known external-feed/5s-timeout suites (agent/india/options/gauntlet/paper-trading). Zero failures in the AI chain/council/validator/mode suites.
+
 ## v21.25.3 — FULL-SITE DEEP RECHECK: Phase 0 pause honesty + re-anchor money + restart-safe MTF ledger (2026-10-25)
 
 **User ask: "full site ke sabhi features/functions ka deep recheck karo — sabhi working fine hai kya, issues fix kardo."**

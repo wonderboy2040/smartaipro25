@@ -1,36 +1,33 @@
 // ============================================================
-// server/ai/llmChain.js — v18.8 · THE ONE SHARED LLM PROVIDER CHAIN
+// server/ai/llmChain.js — v21.27 · THE ONE SHARED LLM PROVIDER CHAIN
 // ------------------------------------------------------------
 // v11.0: extracted from signals.js so the Global Market Council can
 // ride the SAME chain without a circular import (signals ↔ council).
-// v18.7: sentinel-aware (cooldown fast-fail + auto half-open retry),
-// extended to huggingface + nvidia.
 //
-// v18.8 ENGINE CHAIN UNIFICATION (the "AI language engines offline"
-// superintelligence patch):
-//   • KEYLESS LOCAL OLLAMA joins THIS chain too — the council, the
-//     LLM second-opinion validator, the weekly review and the AI
-//     Council seat used to stop at 4-6 cloud engines and degrade to
-//     "engines offline" while a perfectly good local Ollama sat
-//     UNUSED on 127.0.0.1:11434. Now it answers with ZERO cloud keys.
-//   • PROVIDER-AWARE TIMEOUT — cloud engines keep the 15s bound; the
-//     local ollama engine gets 90s (a CPU-only llama3.1:8b can take
-//     30-60s for a 2k-token JSON verdict — the old shared 15s bound
-//     made it ALWAYS time out on CPU machines).
-//   • aiKeysPresent now counts ALL SIX cloud engines (a saved HF or
-//     NVIDIA key no longer reads as "offline"); the council/validator
-//     combine it with a reachable local ollama probe.
-//   • signals.js's private 4-provider copy is DELETED — one chain,
-//     one health ledger, one place to fix (the exact drift that let
-//     the desk agents get the v18.7 upgrade while the board's AI
-//     Council seat silently stayed on the old ladder).
+// v21.27 SITE-WIDE LOCAL / CLOUD SWITCH (this file):
+//   • LOCAL → keyless Ollama only. Zero cloud calls.
+//   • CLOUD → OpenCode free models FIRST (GLM fast seat / DeepSeek deep
+//     seat), then Ollama as the fallback. Paid provider keys are NEVER
+//     attempted in either mode (Gemini/Groq/Cerebras/OpenRouter/HF/NVIDIA
+//     were removed from this chain).
+//   • aiEngineOnline() is the single availability gate for the Council,
+//     the LLM second-opinion validator and the council/dialogue paths.
+//   • AI mode is server-wide + restart-safe (server/ai/aiMode.js).
+//
+// The v18.x sentinel still owns the LOCAL Ollama breaker; the OpenCode
+// bridge owns its own per-model breaker + rate limits.
 // ============================================================
 import {
   engineSkip, engineTrack, engineOk, ollamaProbe, ollamaCompatCfg, ollamaVisionModel,
   OLLAMA_NUM_CTX, OLLAMA_NUM_CTX_DEEP, OLLAMA_KEEP_ALIVE,
 } from './llmSentinel.js';
+import { tryParseJson, stripThinking } from './llmJson.js';
+import { askOpenCode, resolveSeatModel, opencodeProbe } from './opencodeBridge.js';
+import { getAiMode } from './aiMode.js';
 
-const CLOUD_TIMEOUT_MS = 15_000;   // GPU cloud engines — fast fail
+export { tryParseJson };
+export { stripThinking };
+
 // CPU-local models are slow (first prompt + 14B deep-reasoner especially).
 // deepseek-r1:14b needs ~2-3 min for a real JSON verdict on a 15GB laptop,
 // so the old 90s budget guaranteed deep-path timeouts. Env-overridable.
@@ -39,45 +36,6 @@ const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS) || 240_000;
 // v21.0: the local Ollama base (sentinel ke jaisa hi env resolve — ek
 // hi default, dono modules me consistent).
 const OLLAMA_URL = (process.env.OLLAMA_BASE || 'http://127.0.0.1:11434').replace(/\/+$/, '');
-
-// v21.0 THINK-STRIP: R1/qwen3 reasoning blocks (concat-built, tooling-safe).
-// (deepseek-r1 CoT + qwen3 thinking mode — dono strip hote hain.)
-// String-concat se build kiya hai (tooling/literal safety).
-const THINK_OPEN = '<' + 'think>';
-const THINK_CLOSE = '</' + 'think>';
-
-/** v21.0 THINK-STRIP: JSON parse se pehle thinking blocks hatao —
- * warna tryParseJson ka first-{-to-last-} window thinking ke andar ke
- * fragments pakad leta tha (R1 case). */
-function stripThinking(text) {
-  let t = String(text || '');
-  // closed thinking blocks (greedy non-cross removal — har pair)
-  while (t.includes(THINK_OPEN)) {
-    const s = t.indexOf(THINK_OPEN);
-    const e = t.indexOf(THINK_CLOSE, s);
-    if (e < 0) { t = t.slice(0, s); break; } // unclosed: sab kuch thinking hai
-    t = t.slice(0, s) + t.slice(e + THINK_CLOSE.length);
-  }
-  return t.trim();
-}
-
-export function tryParseJson(text) {
-  const cleaned = stripThinking(String(text || '').replace(/```json|```/gi, '')).trim();
-  const start = cleaned.indexOf('{'), end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  const repair = (raw) => raw.replace(/,\s*([}\]])/g, '$1');
-  try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { /* try repaired / balanced */ }
-  try { return JSON.parse(repair(cleaned.slice(start, end + 1))); } catch { /* scan balanced from end */ }
-  // v21.18.0: agar reasoning text me pehle koi stray '{' aaya ho, to aakhri
-  // balanced {...} JSON object ko reverse-scan se nikaalo — local Ollama
-  // (deepseek-r1 / qwen3 / llama3) par 'no-json response' error zero!
-  for (let i = cleaned.lastIndexOf('{'); i >= start; i = cleaned.lastIndexOf('{', i - 1)) {
-    const slice = cleaned.slice(i, end + 1);
-    try { return JSON.parse(repair(slice)); } catch { /* keep scanning */ }
-    if (i === 0) break;
-  }
-  return null;
-}
 
 /**
  * v21.0 / v21.18.0 NATIVE OLLAMA CALL (/api/chat — ZERO-ERROR UPGRADE).
@@ -148,7 +106,11 @@ async function askOllamaNative(prompt, { deep = false, images = null, system = n
   return null;
 }
 
-/** Sync gate: ANY of the six cloud engine keys present? */
+/**
+ * Legacy export — kept for older imports/tests only. The v1 LOCAL/CLOUD
+ * switch does NOT use paid provider keys: `aiEngineOnline()` is the
+ * decision gate for the Council / deep / validator lanes.
+ */
 export function aiKeysPresent(KEYS) {
   return !!(KEYS && (
     KEYS.gemini || KEYS.groq || KEYS.cerebras
@@ -156,174 +118,90 @@ export function aiKeysPresent(KEYS) {
   ));
 }
 
-async function askGemini(prompt, KEYS) {
-  const models = ['gemini-2.5-flash', 'gemini-2.0-flash'];
-  // v20.9.1 [M]: HTTP failures ab STATUS-CODED throw ke roop me upar jaate
-  // hain — pehle null return hota tha aur councilAsk usse 'no-json response'
-  // treat karta tha (llmSentinel ka 401/403→15min park aur 429→90s ladder
-  // KABHI fire nahi hota tha; har failure generic 30→300s ladder pe girta
-  // tha aur ek permanently-bad key har cycle me re-probe hoti thi).
-  let lastErr = null;
-  for (const model of models) {
-    try {
-      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${KEYS.gemini}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, maxOutputTokens: 2048 },
-        }),
-        signal: AbortSignal.timeout(CLOUD_TIMEOUT_MS),
-      });
-      if (!r.ok) { lastErr = new Error(`gemini http ${r.status}`); continue; }
-      const j = await r.json();
-      const text = j?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || '';
-      const parsed = tryParseJson(text);
-      if (parsed) return parsed;
-    } catch (e) { lastErr = e; /* next model */ }
-  }
-  if (lastErr) throw lastErr;
-  return null;
-}
-
-async function askOpenAICompat(prompt, KEYS, OPENAI_COMPAT, provider, opts = {}) {
-  // v18.8: opts.cfgOverride lets the keyless local ollama engine ride
-  // this exact path (auth header inert for it); opts.timeoutMs makes
-  // the local engine's longer budget explicit.
-  const cfg = opts.cfgOverride || OPENAI_COMPAT?.[provider];
-  const key = String(KEYS?.[provider] || 'local');
-  const timeoutMs = opts.timeoutMs || CLOUD_TIMEOUT_MS;
-  if (!cfg) return null;
-  const r = await fetch(cfg.url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-    body: JSON.stringify({
-      model: cfg.defModel,
-      messages: [
-        { role: 'system', content: 'You are an elite trading desk analyst. Respond with STRICT JSON only.' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0.2,
-      max_tokens: 2048,
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  // v20.9.1 [M]: non-2xx pe STATUS-CODED throw (gemini wale comment
-  // dekho) — sentinel ka status-aware cooldown ladder ab live hai.
-  // (fetch/timeout throws bhi naturally propagate hote hain.)
-  if (!r.ok) throw new Error(`${provider} http ${r.status}`);
-  const j = await r.json();
-  const text = j?.choices?.[0]?.message?.content || '';
-  return tryParseJson(text);
-}
-
 /**
- * v20.6: env-driven chain order + local-only short-circuit.
- *   LLM_PRIORITY=ollama,groq,gemini,...  → comma-separated provider
- *     list in desired order. Cloud providers not in this list are
- *     skipped entirely (no key probe, no fetch).
- *   LLM_LOCAL_ONLY=1  → cloud providers are SKIPPED EVEN IF listed in
- *     LLM_PRIORITY; only the local ollama engine is tried. Designed
- *     for the user's 16GB laptop setup (Chrome + Node + Ollama all
- *     running locally; cloud calls add latency + cost + bandwidth).
- *   default LLM_PRIORITY (env unset): 'gemini,groq,cerebras,openrouter,
- *     huggingface,nvidia,ollama' (the historical order — backward
- *     compatible). To flip the priority to local-first, set
- *     LLM_PRIORITY=ollama,groq,gemini,... or just LLM_LOCAL_ONLY=1.
+ * Is at least one engine usable RIGHT NOW?
+ *   LOCAL → keyless Ollama reachable.
+ *   CLOUD → OpenCode CLI ready (not logged-out) OR Ollama fallback.
+ * Never throws, never returns paid-key state: those providers are no
+ * longer in the v1 Council / deep / validator lanes.
  */
-function _chainOrder() {
-  const envOrder = String(process.env.LLM_PRIORITY || '').split(',')
-    .map(s => s.trim().toLowerCase()).filter(Boolean);
-  if (envOrder.length) return envOrder;
-  return ['gemini', 'groq', 'cerebras', 'openrouter', 'huggingface', 'nvidia', 'ollama'];
-}
-function _localOnly() {
-  return String(process.env.LLM_LOCAL_ONLY || '').toLowerCase() === '1'
-    || String(process.env.LLM_LOCAL_ONLY || '').toLowerCase() === 'true';
+export async function aiEngineOnline(_deps = null) {
+  if (getAiMode() === 'cloud') {
+    const oc = await opencodeProbe().catch(() => null);
+    if (oc?.available && oc?.loggedIn !== false) return true;
+  }
+  return !!(await ollamaProbe().catch(() => false));
 }
 
 /**
- * One ask through the provider chain. Returns { json, model } or
+ * CLOUD leg: OpenCode free model first.
+ *   fast seat → GLM (normal scan / council / validator)
+ *   deep seat → DeepSeek (deep single-symbol analysis)
+ * The bridge owns its per-model breaker + rate limits, so failures
+ * (busy / cooldown / free-limit / timeout / bad JSON) simply return
+ * null here — the caller falls back to Ollama, never to paid APIs.
+ */
+async function _askOpenCodeLeg(prompt, { deep = false } = {}) {
+  const ocModel = resolveSeatModel(deep ? 'deep' : 'fast');
+  if (!ocModel) return { json: null, model: null };
+  try {
+    const out = await askOpenCode(prompt, { model: ocModel, deep });
+    const json = out?.json;
+    if (json && typeof json === 'object' && !Array.isArray(json)) {
+      return { json, model: out.model };
+    }
+    return { json: null, model: null };
+  } catch {
+    // Bridge already recorded the failure in its per-model breaker.
+    return { json: null, model: null };
+  }
+}
+
+/**
+ * LOCAL leg: keyless Ollama (native /api/chat). Sentinel-tracked like
+ * any engine: success clears the breaker, failure arms it, an open
+ * cooldown fast-fails.
+ */
+async function _askOllamaLeg(prompt, { deep = false } = {}) {
+  if (engineSkip('ollama')) return { json: null, model: null };
+  const reachable = await ollamaProbe().catch(() => false);
+  if (!reachable) return { json: null, model: null };
+  let json = null, threw = false;
+  try {
+    json = await askOllamaNative(prompt, { deep });
+  } catch (e) {
+    threw = true;
+    engineTrack('ollama', e);
+  }
+  if (json) {
+    engineOk('ollama');
+    // v21.0.3 HONEST MODEL ATTRIBUTION: provider-name ke bajaye REAL
+    // model naam (scan → ollama:qwen3:8b, deep → ollama:deepseek-r1:14b).
+    return { json, model: `ollama:${ollamaCompatCfg({ deep }).defModel}` };
+  }
+  if (!threw) engineTrack('ollama', new Error('ollama no-json response'));
+  return { json: null, model: null };
+}
+
+/**
+ * One ask through the ACTIVE site mode. Returns { json, model } or
  * { json: null, model: null } — never throws.
- * v18.7: sentinel-aware — cooled providers are skipped, results are
- * tracked (success resets the breaker, failure arms it).
- * v18.8: the chain ENDS at the keyless local ollama engine — with
- * every cloud engine down/unkeyed, an installed Ollama still answers
- * (long timeout, sentinel-tracked like any other engine).
- * v20.6: the chain order is now env-driven (LLM_PRIORITY) and the
- * cloud half can be short-circuited entirely (LLM_LOCAL_ONLY=1).
+ *
+ * LOCAL → Ollama only (no cloud call at all).
+ * CLOUD → OpenCode free model first (GLM scan / DeepSeek deep), then
+ *         the Ollama fallback. Paid cloud APIs are never attempted.
+ *
+ * `deps` is accepted for call-site compatibility but is deliberately
+ * unused — provider keys no longer select the engine. The runtime
+ * switch (server/data/ai-mode.json) does.
  */
-export async function councilAsk(prompt, deps, opts = {}) {
-  const { KEYS, OPENAI_COMPAT } = deps || {};
-  let json = null, model = null;
-
-  // v20.6.1: opts.deep = true → the ollama leg uses OLLAMA_DEEP_MODEL
-  // (deepseek-r1:14b) instead of OLLAMA_MODEL (qwen3:8b). The scan
-  // path always passes opts.deep=false (default); only the deep
-  // single-symbol analysis path (getDeepSignal → councilAskDeep)
-  // passes opts.deep=true. See ollamaCompatCfg({deep:true}).
+export async function councilAsk(prompt, _deps = null, opts = {}) {
   const deep = !!opts.deep;
-
-  // v20.6: build the cloud-half attempts list from env order + skip
-  // cloud entries entirely under LLM_LOCAL_ONLY=1.
-  const localOnly = _localOnly();
-  const order = _chainOrder();
-  const cloudProviderAsk = {
-    gemini: () => askGemini(prompt, KEYS),
-    groq: () => askOpenAICompat(prompt, KEYS, OPENAI_COMPAT, 'groq'),
-    cerebras: () => askOpenAICompat(prompt, KEYS, OPENAI_COMPAT, 'cerebras'),
-    openrouter: () => askOpenAICompat(prompt, KEYS, OPENAI_COMPAT, 'openrouter'),
-    huggingface: () => askOpenAICompat(prompt, KEYS, OPENAI_COMPAT, 'huggingface'),
-    nvidia: () => askOpenAICompat(prompt, KEYS, OPENAI_COMPAT, 'nvidia'),
-  };
-  const attempts = localOnly
-    ? []  // skip cloud entirely
-    : order.filter(p => p !== 'ollama').map(p => [p, cloudProviderAsk[p]]).filter(([, fn]) => typeof fn === 'function');
-
-  for (const [provider, ask] of attempts) {
-    if (json) break;
-    if (!KEYS?.[provider]) continue;
-    if (engineSkip(provider)) continue; // cooldown — fast-fail, auto-retry on expiry
-    try {
-      json = await ask();
-    } catch (e) {
-      engineTrack(provider, e);
-      continue;
-    }
-    if (json) { engineOk(provider); model = provider; }
-    else { engineTrack(provider, new Error(`${provider} no-json response`)); model = null; }
+  if (getAiMode() === 'cloud') {
+    const cloud = await _askOpenCodeLeg(prompt, { deep });
+    if (cloud.json) return cloud;
   }
-
-  // ---- v18.8 KEYLESS LOCAL ENGINE (last in the chain, or FIRST under LLM_LOCAL_ONLY=1) ----
-  // v20.6: 'ollama' is now part of the LLM_PRIORITY list (defaults to
-  // last); under LLM_LOCAL_ONLY=1 it's the ONLY engine tried.
-  // v21.0: ab NATIVE /api/chat path (num_ctx + keep_alive + format:json
-  // + think-strip) — OpenAI-compat layer ka 4k silent-truncation fix.
-  const tryOllama = !json && !engineSkip('ollama') && order.includes('ollama');
-  if (tryOllama) {
-    const reachable = await ollamaProbe().catch(() => false);
-    if (reachable) {
-      let threw = false;
-      try {
-        json = await askOllamaNative(prompt, { deep });
-      } catch (e) {
-        threw = true;
-        engineTrack('ollama', e);
-      }
-      if (json) {
-        engineOk('ollama');
-        // v21.0.3 HONEST MODEL ATTRIBUTION: sirf 'ollama' provider-name
-        // ke bajaye ab REAL model naam jata hai — scan path
-        // ollama:qwen3:8b, deep path ollama:deepseek-r1:14b (🔬 modal
-        // ka "AI COUNCIL · ollama" ab sach me kaunsa model bola wo
-        // dikhata hai; user request: "konsa local ollama model use ho
-        // raha hai accurately show hona chahiye").
-        model = `ollama:${ollamaCompatCfg({ deep }).defModel}`;
-      }
-      else if (!threw) { engineTrack('ollama', new Error('ollama no-json response')); }
-    }
-  }
-  return { json, model };
+  return _askOllamaLeg(prompt, { deep });
 }
 
 /**
@@ -387,4 +265,4 @@ export async function councilAskVision(prompt, images, _deps = null, opts = {}) 
   }
 }
 
-export const __testables = { tryParseJson, _chainOrder, _localOnly, askOllamaNative, stripThinking };
+export const __testables = { tryParseJson, askOllamaNative, stripThinking };

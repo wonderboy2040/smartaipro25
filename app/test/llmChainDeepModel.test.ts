@@ -39,8 +39,11 @@ vi.mock('../server/ai/llmSentinel.js', () => ({
 }));
 
 import { councilAsk, councilAskDeep } from '../server/ai/llmChain.js';
+import { setAiMode, __resetAiModeForTests } from '../server/ai/aiMode.js';
 
 beforeEach(() => {
+  __resetAiModeForTests();
+  setAiMode('local'); // v21.27: this suite pins the LOCAL dual-model flow
   delete process.env.LLM_LOCAL_ONLY;
   delete process.env.LLM_PRIORITY;
   delete process.env.OLLAMA_MODEL;

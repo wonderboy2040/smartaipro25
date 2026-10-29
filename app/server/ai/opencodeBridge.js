@@ -31,7 +31,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tryParseJson } from './llmChain.js';
+import { tryParseJson } from './llmJson.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = path.resolve(__dirname, '..', '..');

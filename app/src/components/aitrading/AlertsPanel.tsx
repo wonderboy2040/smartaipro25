@@ -7,8 +7,32 @@
 // only a masked tail (…abcd) confirms what's saved.
 // ============================================================
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { apiFetch } from '../../utils/api';
 import { desktopNotify, desktopNotifyPermission, desktopNotifySupported, requestDesktopNotifyPermission } from '../../utils/desktopNotify';
 import type { AlertsStatus, MaskedSecret } from './types';
+
+interface AiModeInfo {
+  mode: 'local' | 'cloud';
+  source?: string;
+  persisted?: boolean;
+}
+
+interface OpenCodeInfo {
+  available?: boolean;
+  loggedIn?: boolean | null;
+  models?: string[];
+  lastError?: string | null;
+  callsToday?: number;
+  maxCallsPerDay?: number;
+}
+
+const MODE_SOURCE_LABEL: Record<string, string> = {
+  runtime: 'runtime switch',
+  file: 'saved file',
+  env: 'AI_MODE env seed',
+  'env-local-only': 'LLM_LOCAL_ONLY env seed',
+  default: 'safe default',
+};
 
 function StatusChip({ label, s }: { label: string; s?: MaskedSecret }) {
   return (
@@ -28,6 +52,8 @@ interface Props {
 
 export const AlertsPanel = memo(function AlertsPanel({ fetchAlertsStatus, saveAlertsConfig, testAlert, busy, notify }: Props) {
   const [status, setStatus] = useState<AlertsStatus | null>(null);
+  const [aiMode, setAiMode] = useState<AiModeInfo | null>(null);
+  const [opencode, setOpencode] = useState<OpenCodeInfo | null>(null);
   const [tgToken, setTgToken] = useState('');
   const [tgChat, setTgChat] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
@@ -37,6 +63,24 @@ export const AlertsPanel = memo(function AlertsPanel({ fetchAlertsStatus, saveAl
   const reload = useCallback(async () => {
     const s = await fetchAlertsStatus();
     setStatus(s);
+    // v21.27: honest LOCAL/CLOUD mode + OpenCode status (no secrets).
+    try {
+      const [mRes, eRes] = await Promise.all([
+        apiFetch('/api/ai/mode', { signal: AbortSignal.timeout(8000) }),
+        apiFetch('/api/ai/engines', { signal: AbortSignal.timeout(8000) }),
+      ]);
+      if (mRes.ok) {
+        const m = await mRes.json().catch(() => null);
+        setAiMode(m && (m.mode === 'local' || m.mode === 'cloud') ? m : null);
+      }
+      if (eRes.ok) {
+        const e = await eRes.json().catch(() => null);
+        const oc = e?.opencode;
+        setOpencode(oc && typeof oc === 'object' ? oc : null);
+        const em = e?.mode;
+        if (em && (em.mode === 'local' || em.mode === 'cloud')) setAiMode(em);
+      }
+    } catch { /* aux status — never block the alerts panel */ }
   }, [fetchAlertsStatus]);
 
   useEffect(() => { reload(); }, [reload]);
@@ -62,6 +106,8 @@ export const AlertsPanel = memo(function AlertsPanel({ fetchAlertsStatus, saveAl
   const tgReady = status?.telegram?.configured;
   const tokenLooksSet = status?.status?.telegramBotToken?.configured;
   const chatLooksSet = status?.status?.telegramChatId?.configured;
+  const ocReady = !!opencode?.available && opencode?.loggedIn !== false;
+  const modeSource = aiMode ? (MODE_SOURCE_LABEL[aiMode.source || ''] || aiMode.source || 'unknown') : null;
 
   // v20.2 DESKTOP NOTIFICATIONS — native OS toasts for NEW STRONG
   // signals while the tab is hidden. Permission can ONLY be requested
@@ -155,9 +201,49 @@ export const AlertsPanel = memo(function AlertsPanel({ fetchAlertsStatus, saveAl
         </div>
       </div>
 
+      {/* ---- v21.27 AI ENGINE MODE (LOCAL / CLOUD) ---- */}
+      <div className="pt-1 border-t border-white/5">
+        <div className="flex items-center gap-2 flex-wrap mt-1.5">
+          <div className="text-[10px] font-black text-slate-400 tracking-wider">🧠 AI ENGINE MODE — Council · deep analysis · validator</div>
+          {aiMode && (
+            <span className={`px-2 py-0.5 rounded-lg text-[9px] font-black border ${
+              aiMode.mode === 'cloud'
+                ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                : 'bg-violet-500/15 text-violet-300 border-violet-500/30'
+            }`}>
+              {aiMode.mode.toUpperCase()}
+            </span>
+          )}
+          {opencode && (
+            <span className={`px-2 py-0.5 rounded-lg text-[9px] font-black border ${
+              aiMode?.mode !== 'cloud'
+                ? 'bg-slate-600/20 text-slate-500 border-slate-600/30'
+                : ocReady
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                  : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+            }`}>
+              OPENCODE {aiMode?.mode !== 'cloud' ? 'STANDBY' : ocReady ? 'READY' : opencode.available ? 'NO-AUTH' : 'OFF'}
+            </span>
+          )}
+          {aiMode && (
+            <span className="text-[9px] text-slate-600">
+              {modeSource} · {aiMode.persisted ? 'restart-safe' : 'runtime only (filesystem read-only)'}
+            </span>
+          )}
+        </div>
+        <div className="text-[9px] text-slate-600 leading-relaxed mt-1">
+          LOCAL = local Ollama only (zero cloud calls) · CLOUD = OpenCode free models first (GLM scan / DeepSeek deep), then local Ollama fallback. Paid APIs kabhi nahi. Header ke LOCAL/CLOUD switch se turant apply hota hai — restart ki zaroorat nahi.
+        </div>
+        {aiMode?.mode === 'cloud' && opencode && !ocReady && (
+          <div className="text-[9px] text-amber-400/80 font-mono mt-1">
+            OpenCode ready nahi ({opencode.lastError || 'CLI/login check karo'}) — cloud asks Ollama fallback par jayengi.
+          </div>
+        )}
+      </div>
+
       {/* ---- AI Council keys ---- */}
       <div className="pt-1 border-t border-white/5">
-        <div className="text-[10px] font-black text-slate-400 tracking-wider mb-1.5 mt-1.5">🧠 AI COUNCIL — 9th model ko app se hi online karo (Render env ki zaroorat nahi)</div>
+        <div className="text-[10px] font-black text-slate-400 tracking-wider mb-1.5 mt-1.5">🗝️ DESK AGENT / REPORT KEYS — legacy cloud keys (v1 Council inhe use nahi karta)</div>
         <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] items-end">
           <div>
             <label className="text-[9px] text-slate-500 font-black tracking-wider block mb-1">GEMINI API KEY (aistudio.google.com — FREE)</label>
@@ -183,7 +269,7 @@ export const AlertsPanel = memo(function AlertsPanel({ fetchAlertsStatus, saveAl
           <StatusChip label="gemini" s={status?.status?.geminiApiKey} />
           <StatusChip label="groq" s={status?.status?.groqApiKey} />
           <span className="text-[9px] text-slate-600 self-center ml-1">
-            Save karne ke 30-60s me 9th model board par vote karna shuru karega (key sirf server par rehti hai — browser me kabhi wapas nahi aati).
+            Council/deep/validator ab LOCAL/CLOUD mode se chalte hain. Ye keys legacy askLLM lanes (desk chat, briefing, committee, weekly review) ke liye rehti hain — key sirf server par, browser me kabhi wapas nahi.
           </span>
         </div>
       </div>

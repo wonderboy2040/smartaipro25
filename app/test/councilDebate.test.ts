@@ -10,28 +10,42 @@
 //   • any step failing → null → aiCouncilVerify falls back to the
 //     LEGACY single-shot prompt (resilience first)
 //   • AI_COUNCIL_DEBATE=off → the debate is skipped entirely
-//   • no keys → honest offline (both paths)
-// Global fetch is stubbed with ROLE-based dispatch (askGemini
-// retries across 2 models, so order-based mocks are fragile).
+//   • no engines → honest offline (both paths)
+// v21.27: the shared chain is LOCAL/CLOUD mode-aware; this suite pins
+// the default LOCAL path with Ollama-native fetch mocks (the old
+// Gemini-only mocks no longer exercise the production chain).
 // ============================================================
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-const geminiPayload = (obj) => ({
+const ollamaPayload = (obj) => ({
   ok: true,
-  json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(obj) }] } }] }),
+  json: async () => ({ message: { role: 'assistant', content: JSON.stringify(obj) } }),
 });
 
 // role dispatch: read the PROMPT from the request body
 let _roleResponses = {}; // { bull: obj|null, bear: obj|null, pm: obj|null, legacy: obj|null }
 let _calls = [];         // { role, prompt }
+let _ollamaUp = true;
 
 beforeEach(() => {
+  __resetSentinelForTests();
   _roleResponses = {};
   _calls = [];
-  globalThis.fetch = vi.fn(async (_url, opts = {}) => {
+  _ollamaUp = true;
+  globalThis.fetch = vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/api/tags')) {
+      return _ollamaUp
+        ? { ok: true, json: async () => ({ models: [{ name: 'qwen3:8b' }] }) }
+        : { ok: false, json: async () => ({}) };
+    }
     let body = {};
     try { body = JSON.parse(opts.body || '{}'); } catch { body = {}; }
-    const prompt = String(body.contents?.[0]?.parts?.[0]?.text || '');
+    const prompt = String(
+      body?.messages?.map(m => m?.content).filter(Boolean).join('\n')
+      || body.contents?.[0]?.parts?.[0]?.text
+      || '',
+    );
     // PM first — its prompt QUOTES both advocates ("BULL ADVOCATE:" as a
     // section header), so the bull/bear checks must come after.
     const role = prompt.includes('PORTFOLIO MANAGER') ? 'pm'
@@ -42,7 +56,7 @@ beforeEach(() => {
     _calls.push({ role, prompt });
     const resp = _roleResponses[role];
     if (resp == null) return { ok: false, json: async () => ({}) };
-    return geminiPayload(resp);
+    return ollamaPayload(resp);
   });
 });
 afterEach(() => {
@@ -50,8 +64,9 @@ afterEach(() => {
 });
 
 import { aiCouncilDebate, aiCouncilVerify, councilDebateEnabled } from '../server/ai/signals.js';
+import { __resetSentinelForTests } from '../server/ai/llmSentinel.js';
 
-const DEPS = { KEYS: { gemini: 'test-key' }, OPENAI_COMPAT: {} };
+const DEPS = { KEYS: {}, OPENAI_COMPAT: {} };
 
 const CAND = [{
   ctx: { symbol: 'SOL', ltp: 142, changePct: 2.1, ind: { rsi: 58, adx: { adx: 24 }, atr: 4, vwap: 140 } },
@@ -80,11 +95,12 @@ describe('councilDebateEnabled — the flag', () => {
 
 describe('aiCouncilDebate — the 3-step chain', () => {
   it('bull → bear → PM: exactly 3 LLM calls, PM verdicts returned in the legacy shape', async () => {
+    __resetSentinelForTests();
     _roleResponses = { bull: BULL, bear: BEAR, pm: PM };
     const out = await aiCouncilDebate(CAND, DEPS, 'CRYPTO');
     expect(out).toBeTruthy();
     expect(out.online).toBe(true);
-    expect(out.model).toBe('gemini');
+    expect(out.model).toBe('ollama:qwen3:8b');
     expect(out.verdicts.SOL.verdict).toBe('LONG');
     expect(out.verdicts.SOL.confidence).toBe(71);
     expect(out.debate.bull.SOL.case).toMatch(/momentum room/);
@@ -155,7 +171,9 @@ describe('aiCouncilVerify — debate-first with legacy fallback', () => {
     }
   });
 
-  it('no keys → honest offline, zero calls', async () => {
+  it('no engines → honest offline, zero calls', async () => {
+    __resetSentinelForTests();
+    _ollamaUp = false;
     const out = await aiCouncilVerify(CAND, { KEYS: {}, OPENAI_COMPAT: {} }, 'CRYPTO');
     expect(out).toEqual({ verdicts: {}, model: null, online: false });
     expect(_calls.length).toBe(0);

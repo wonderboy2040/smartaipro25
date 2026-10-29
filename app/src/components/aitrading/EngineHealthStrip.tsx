@@ -44,11 +44,76 @@ interface OllamaInfo {
   checkedAgeSec?: number;
 }
 
+// v21.27 LOCAL/CLOUD mode + OpenCode bridge status (from /api/ai/engines).
+interface AiModeInfo {
+  mode: 'local' | 'cloud';
+  source?: string;
+  persisted?: boolean;
+}
+
+interface OpenCodeBreakerRow {
+  cooldownRemainSec?: number;
+  lastError?: string | null;
+  calls?: number;
+  lastOkAgeSec?: number | null;
+}
+
+interface OpenCodeInfo {
+  available?: boolean;
+  probed?: boolean;
+  version?: string | null;
+  loggedIn?: boolean | null;
+  models?: string[];
+  breaker?: Record<string, OpenCodeBreakerRow>;
+  lastError?: string | null;
+  callsToday?: number;
+  maxCallsPerDay?: number;
+}
+
 const LABEL: Record<string, string> = {
   gemini: 'GEMINI', groq: 'GROQ', cerebras: 'CEREBRAS',
   openrouter: 'OPENROUTER', huggingface: 'HUGGINGFACE', nvidia: 'NVIDIA',
   ollama: 'OLLAMA·LOCAL',
 };
+
+const MODE_SOURCE_LABEL: Record<string, string> = {
+  runtime: 'runtime switch',
+  file: 'saved server/data/ai-mode.json',
+  env: 'AI_MODE env seed',
+  'env-local-only': 'LLM_LOCAL_ONLY env seed',
+  default: 'safe default',
+};
+
+function modeTip(m: AiModeInfo | null): string {
+  if (!m) return 'AI mode unknown — /api/ai/engines se mode nahi aaya';
+  const src = MODE_SOURCE_LABEL[m.source || ''] || m.source || 'unknown';
+  const saved = m.persisted ? 'restart-safe (saved)' : 'runtime only (filesystem read-only)';
+  return m.mode === 'cloud'
+    ? `CLOUD — OpenCode free models first (GLM scan / DeepSeek deep), then local Ollama fallback. No paid APIs. Source: ${src} · ${saved}.`
+    : `LOCAL — local Ollama only, zero cloud calls. Source: ${src} · ${saved}.`;
+}
+
+function opencodeTip(oc: OpenCodeInfo | null, ol?: OllamaInfo | null): string {
+  if (!oc) return 'OpenCode bridge status unavailable';
+  const parts = [
+    oc.available ? `CLI ready${oc.version ? ` (v${oc.version})` : ''}` : 'CLI not available',
+    oc.loggedIn === false ? 'login missing — `opencode auth login` chalao' : oc.loggedIn === true ? 'logged in' : 'login state unknown',
+    oc.models?.length ? `${oc.models.length} models listed` : 'models list empty',
+    oc.callsToday != null ? `calls today ${oc.callsToday}${oc.maxCallsPerDay ? `/${oc.maxCallsPerDay}` : ''}` : undefined,
+    oc.lastError ? `last probe error: ${oc.lastError}` : undefined,
+  ].filter(Boolean) as string[];
+  const breaker = Object.entries(oc.breaker || {})
+    .filter(([, r]) => Number(r?.cooldownRemainSec) > 0 || r?.lastError)
+    .slice(0, 3)
+    .map(([model, r]) => `${model}: ${Number(r?.cooldownRemainSec) > 0 ? `cooldown ${r.cooldownRemainSec}s` : (r.lastError || 'error')}`);
+  if (breaker.length) parts.push(`breaker → ${breaker.join(' | ')}`);
+  if (oc.available && oc.loggedIn !== false) {
+    parts.push(`cloud asks: ${ol?.reachable ? 'OpenCode → Ollama fallback' : 'OpenCode only (Ollama unreachable)'}`);
+  } else {
+    parts.push(`cloud asks fall back to Ollama${ol?.reachable ? '' : ' — but Ollama is offline too'}`);
+  }
+  return parts.join(' · ');
+}
 
 function chipClass(e: EngineRow): string {
   if (e.provider === 'ollama') {
@@ -134,6 +199,9 @@ export const EngineHealthStrip = memo(function EngineHealthStrip({ refreshKey = 
   const [rows, setRows] = useState<EngineRow[]>([]);
   // v21.0: extended ollama info (scan/deep/vision models + ctx + ramGuard)
   const [ollama, setOllama] = useState<OllamaInfo | null>(null);
+  // v21.27: site-wide LOCAL/CLOUD mode + OpenCode cloud bridge
+  const [mode, setMode] = useState<AiModeInfo | null>(null);
+  const [opencode, setOpencode] = useState<OpenCodeInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
 
@@ -145,17 +213,23 @@ export const EngineHealthStrip = memo(function EngineHealthStrip({ refreshKey = 
       if (Array.isArray(d?.engines)) { setRows(d.engines); setFailed(false); }
       // v21.0: extended ollama block (model/deep/vision/ctx/ramGuard)
       setOllama(d?.ollama && typeof d.ollama === 'object' ? d.ollama : null);
+      const m = d?.mode;
+      setMode(m && (m.mode === 'local' || m.mode === 'cloud') ? m : null);
+      setOpencode(d?.opencode && typeof d.opencode === 'object' ? d.opencode : null);
     } catch { setFailed(true); /* silent — strip is auxiliary */ }
   }, []);
 
   const recheck = useCallback(async () => {
     setBusy(true);
     try {
-      const res = await apiFetch('/api/ai/engines/recheck', { method: 'POST', signal: AbortSignal.timeout(12000) });
+      const res = await apiFetch('/api/ai/engines/recheck', { method: 'POST', signal: AbortSignal.timeout(15000) });
       if (res.ok) {
         const d = await res.json().catch(() => ({}));
         if (Array.isArray(d?.engines)) setRows(d.engines);
         if (d?.ollama && typeof d.ollama === 'object') setOllama(d.ollama);
+        const m = d?.mode;
+        setMode(m && (m.mode === 'local' || m.mode === 'cloud') ? m : null);
+        setOpencode(d?.opencode && typeof d.opencode === 'object' ? d.opencode : null);
       }
     } catch { /* silent */ } finally { setBusy(false); }
   }, []);
@@ -167,18 +241,43 @@ export const EngineHealthStrip = memo(function EngineHealthStrip({ refreshKey = 
     return () => clearInterval(t);
   }, [load, refreshKey]);
 
-  if (!rows.length) return null;
+  if (!rows.length && !mode) return null;
 
-  const anyCloudKey = rows.some(e => e.provider !== 'ollama' && e.configured);
-  const anyAlive = rows.some(e => e.configured && (e.state === 'ready' || e.state === 'idle'));
   const ol = rows.find(e => e.provider === 'ollama');
   const cloudRows = rows.filter(e => e.provider !== 'ollama');
+  const ocReady = !!opencode?.available && opencode?.loggedIn !== false;
 
   return (
     <div className="flex items-center gap-1.5 px-3 pb-2 flex-wrap">
       <span className="flex items-center gap-1 text-[9px] font-black font-mono text-slate-500" title="AI language engine health — v18.7 sentinel. Offline engine auto-retry karta hai; RECHECK abhi try karta hai.">
         <Zap size={10} /> AI ENGINES
       </span>
+      {mode && (
+        <span
+          className={`px-1.5 py-0.5 rounded-md text-[9px] font-mono font-bold border ${
+            mode.mode === 'cloud'
+              ? 'bg-cyan-500/15 border-cyan-500/30 text-cyan-300'
+              : 'bg-violet-500/15 border-violet-500/30 text-violet-300'
+          }`}
+          title={modeTip(mode)}
+        >
+          {mode.mode === 'cloud' ? 'CLOUD' : 'LOCAL'} MODE
+        </span>
+      )}
+      {opencode && (
+        <span
+          className={`px-1.5 py-0.5 rounded-md text-[9px] font-mono font-bold border ${
+            mode?.mode !== 'cloud'
+              ? 'bg-white/[0.02] border-white/10 text-slate-600'
+              : ocReady
+                ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                : 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+          }`}
+          title={opencodeTip(opencode, ollama)}
+        >
+          OPENCODE {mode?.mode !== 'cloud' ? 'STANDBY' : ocReady ? '✓' : opencode.available ? 'NO-AUTH' : 'OFF'}
+        </span>
+      )}
       {cloudRows.map(e => (
         <span
           key={e.provider}
@@ -200,18 +299,18 @@ export const EngineHealthStrip = memo(function EngineHealthStrip({ refreshKey = 
         onClick={recheck}
         disabled={busy}
         className="ml-auto flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-black font-mono border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 hover:border-cyan-400/60 hover:text-cyan-200 transition-all disabled:opacity-40"
-        title="cooldowns clear karo + har engine ko abhi dobara try karo (half-open)"
+        title="cooldowns clear karo + local Ollama/OpenCode ko abhi dobara probe karo (half-open)"
       >
         <RefreshCw size={9} className={busy ? 'animate-spin' : ''} /> {busy ? 'CHECKING…' : 'RECHECK'}
       </button>
-      {!anyCloudKey && !ol?.configured && !failed && (
+      {mode?.mode === 'local' && !ol?.configured && !failed && (
         <span className="w-full text-[9px] text-amber-400/80 font-mono leading-relaxed pt-0.5">
-          koi language-engine key configured nahi — Settings &gt; AI Keys me free Gemini ya Groq key daalo (engine turant engage hoga), ya Ollama install karo (localhost:11434, keyless).
+          LOCAL mode: Ollama reachable nahi — <b>ollama serve</b> chalao aur model pull karo (localhost:11434). Council/deep/validator tab tak deterministic rahenge. Paid cloud keys is mode me use nahi hoti.
         </span>
       )}
-      {anyCloudKey && !anyAlive && (
+      {mode?.mode === 'cloud' && !ocReady && !failed && (
         <span className="w-full text-[9px] text-amber-400/80 font-mono leading-relaxed pt-0.5">
-          sab cloud engines cooldown/down hain — auto-retry chalu hai (↻Ns), RECHECK dabao ya key check karo (red chip par hover = exact reason).
+          CLOUD mode: OpenCode ready nahi ({opencode?.lastError || 'CLI/login check karo'}) — har call Ollama fallback par jayegi{!ol?.configured ? ', aur Ollama bhi offline hai' : ''}. Paid APIs kabhi nahi try hote.
         </span>
       )}
     </div>
