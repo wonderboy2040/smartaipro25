@@ -123,8 +123,8 @@ export function useAITrading(active: boolean, scope?: { markets?: Array<'INDIA' 
   // the LATEST request's response applies.
   const posSeqRef = useRef(0);
   // v21.13.x recheck (P3): boards request sequence guard — loadPositions
-  // ka exact pattern. The 30s interval can overlap a slow poll (30s abort
-  // timeout) ya rescan (90s); a LATE older response overwriting a NEWER
+  // ka exact pattern. The 30s interval can overlap a slow poll (90s abort
+  // timeout) ya rescan (180s); a LATE older response overwriting a NEWER
   // board = a brief stale flash (re-ranked cards snap back). Sirf the
   // LATEST loadBoards call applies its responses.
   const boardsSeqRef = useRef(0);
@@ -135,8 +135,12 @@ export function useAITrading(active: boolean, scope?: { markets?: Array<'INDIA' 
     // universe scan (single-flight on the server). Cold scans are
     // heavier than the 60s-cache read — the timeout widens so a slow
     // universe (India 500+ names / 100+ pairs) can never race the abort.
+    // v21.26.4 [UI-TIMEOUT]: the normal poll was still 30s while a cold
+    // FUTURES scan routinely took 35–90s (six browser timeouts observed
+    // 16:40–16:42 UTC) — the UI showed a false "unreachable" even though
+    // the server board landed seconds later. Normal 90s / rescan 180s.
     const rescan = !!opts?.rescan;
-    const timeoutMs = rescan ? 90_000 : 30_000;
+    const timeoutMs = rescan ? 180_000 : 90_000;
     // v12.7 BANDWIDTH: the `t=${Date.now()}` cache-buster is GONE — every
     // 30s poll used to force a full re-download of the (identical)
     // 100-400KB board inside the server's 60s cache window. Without the

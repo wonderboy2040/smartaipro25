@@ -346,19 +346,36 @@ const DOM_HELPERS = `
   const isOrderNumInput = (el) => {
     if (!el || !vis(el)) return false;
     if (el.type !== 'text' && el.type !== 'number' && el.type !== '') return false;
+    // v21.26.4 [BROWSER-FORM-FIX]: a readOnly/disabled preview can never be
+    // user-edited — treating it as an order field caused the CL LONG
+    // "price-verify-fail: set 103.07 par form me (empty)" abort.
+    if (el.readOnly || el.disabled) return false;
     return !/search|pair|symbol|scrip|email|password/i.test(fieldAttrText(el));
+  };
+  // v21.26.4 [BROWSER-FORM-FIX]: Market mode renders a "Market Price" LIVE
+  // preview next to Size. It matches /price/ but is NOT the limit-price
+  // input — writing into it silently does nothing, and the old code then
+  // threw price-verify-fail instead of using the market fallback. Skip the
+  // preview explicitly (targeted phrase, NOT a broad /market/ ban so a real
+  // limit input whose panel class mentions "market" still works).
+  const isMarketPricePreview = (el) => {
+    const attr = fieldAttrText(el);
+    if (/market\\s*(price|px)|mkt\\s*(price|px)/i.test(attr)) return true;
+    return /market\\s*(price|px)/i.test(fieldLabelText(el));
   };
   const findOrderField = (kind) => {
     const wantRe = kind === 'price' ? /price|entry|trigger/i : /qty|quantity|amount|size|total/i;
     const antiRe = kind === 'price' ? /qty|quantity|amount|size|total|search|pair|symbol|scrip/i : /price|entry|trigger|search|pair|symbol|scrip/i;
-    const cands = $$('input').filter(isOrderNumInput);
+    const cands = $$('input').filter(isOrderNumInput).filter((el) => kind !== 'price' || !isMarketPricePreview(el));
     const hit = cands.find((el) => ((wantRe.test(fieldAttrText(el)) || wantRe.test(fieldLabelText(el))) && !antiRe.test(fieldAttrText(el))));
     if (hit) return hit;
     const btn = $$('button, div[role="button"]').filter((el) => vis(el) && /^(buy|long|sell|short)\\b/i.test((el.textContent || '').trim()))[0] || null;
     if (!btn) return null;
     let node = btn.parentElement;
     for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
-      const inputs = $$('input', node).filter(isOrderNumInput);
+      // v21.26.4: positional price pick must also skip the Market Price
+      // preview, otherwise market mode returns the preview as inputs[0].
+      const inputs = $$('input', node).filter(isOrderNumInput).filter((el) => kind !== 'price' || !isMarketPricePreview(el));
       // v20.7.7 FIX: qty ke liye LAST input, inputs[1] nahi — 3-field
       // stop-limit forms [price, trigger, amount] me inputs[1] TRIGGER
       // nikalta tha (galat field me qty likh dete the). CoinDCX futures
@@ -567,8 +584,11 @@ function cxPlaceOrderScript({ side, price, totalINR, leverage, useMargin, qty, l
       let priceInput = null;
       if (PRICE_OK) {
         for (const c of tabCands(/^\\s*limit\\b/i).slice(0, 3)) {
-          clickEl(c); await sleep(600);
-          priceInput = findOrderField('price');
+          clickEl(c);
+          // v21.26.4: 600ms fixed sleep raced React's re-render; poll up to
+          // 1.2s so a real limit form is not missed (preview is now skipped,
+          // so a null here honestly means "market mode" → fallback).
+          priceInput = await waitFor(() => findOrderField('price'), { timeout: 1200, poll: 250, label: 'limit price input' }).catch(() => null);
           if (priceInput) { steps.push('limit-order'); break; }
         }
       }
@@ -618,9 +638,36 @@ function cxPlaceOrderScript({ side, price, totalINR, leverage, useMargin, qty, l
         if (TOTAL > 0 && sizePx > 0) q = TOTAL / sizePx;
         else if (QTY_DIRECT > 0) { q = QTY_DIRECT; viaDirect = true; }
         if (Number.isFinite(q) && q > 0) {
-          intendedQ = q;
-          setVal(qtyInput, String(Math.floor(q * 1e6) / 1e6));
+          // v21.26.4 [QTY-STEP-FIX]: CoinDCX Size input step=0.01. Writing
+          // 0.057756 made React round to 0.05, then the old 5% re-verify
+          // threw "qty re-verify fail" and blocked a valid CL LONG. Align
+          // DOWN to the form's own step BEFORE writing, and verify against
+          // the aligned value (never round up → no risk/notional overshoot).
+          const stepAttr = Number(qtyInput.step);
+          const step = stepAttr > 0 ? stepAttr : 0;
+          const stepDec = step > 0 ? Math.min(8, (String(step).split('.')[1] || '').length) : 6;
+          let aligned = q;
+          if (step > 0) {
+            aligned = Math.floor(q / step + 1e-9) * step;
+            aligned = Number(aligned.toFixed(stepDec));
+          } else {
+            // No declared step: FLOOR at 6dp (never round up — margin/notional
+            // overshoot kabhi nahi; the v20.7.7 contract).
+            const p6 = 1e6;
+            aligned = Math.floor(q * p6 + 1e-9) / p6;
+          }
+          const minAttr = Number(qtyInput.min);
+          if (!(aligned > 0)) throw new Error('qty align fail: step ' + (step || 'auto') + ' ne ' + q + ' ko 0 kar diya');
+          if (minAttr > 0 && aligned < minAttr) {
+            throw new Error('qty below form min: aligned ' + aligned + ' < min ' + minAttr + ' (intended ' + q + ')');
+          }
+          intendedQ = aligned;
+          setVal(qtyInput, String(aligned));
+          // Canonical step name stays EXACT ('qty-set' / 'qty-set:direct') —
+          // journal/tests/execPort consumers array equality pe match karte
+          // hain; step/aligned diagnostics alag step me jaate hain.
           steps.push(viaDirect ? 'qty-set:direct' : 'qty-set');
+          steps.push('qty-step=' + (step || 'auto') + ':aligned=' + aligned);
           qtySet = true;
         }
       } else steps.push('qty:missing');
@@ -654,9 +701,13 @@ function cxPlaceOrderScript({ side, price, totalINR, leverage, useMargin, qty, l
         const readQ = (el) => String((el && (el.value != null ? el.value : el.textContent)) || '').replace(/[^0-9.]/g, '');
         const qOk = (v) => { const x = Number(v); return Number.isFinite(x) && x > 0 && x >= intendedQ * 0.95 && x <= intendedQ * 1.05; };
         if (!qOk(readQ(findOrderField('qty')))) {
-          const reQ = (TOTAL > 0 && sizePx > 0) ? TOTAL / sizePx : QTY_DIRECT;
+          // v21.26.4: re-set the ALIGNED value — recomputing TOTAL/sizePx
+          // here re-introduced the un-aligned 0.057756 and failed again.
+          const reQ = (Number.isFinite(intendedQ) && intendedQ > 0)
+            ? intendedQ
+            : ((TOTAL > 0 && sizePx > 0) ? TOTAL / sizePx : QTY_DIRECT);
           const qNow = findOrderField('qty');
-          if (Number.isFinite(reQ) && reQ > 0 && qNow) { setVal(qNow, String(Math.floor(reQ * 1e6) / 1e6)); await sleep(300); steps.push('qty-reset(after-re-render)'); }
+          if (Number.isFinite(reQ) && reQ > 0 && qNow) { setVal(qNow, String(reQ)); await sleep(300); steps.push('qty-reset(after-re-render)'); }
           const q2 = findOrderField('qty');
           if (!q2 || !qOk(readQ(q2))) throw new Error('qty re-verify fail — form me ' + (q2 ? readQ(q2) : '(missing)') + ' chahiye tha ~' + (Math.round(intendedQ * 1e6) / 1e6) + ' (React reset/default-qty block)');
         }

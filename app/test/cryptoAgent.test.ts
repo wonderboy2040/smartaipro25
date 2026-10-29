@@ -144,6 +144,14 @@ describe('full-ticket prompt discipline (Part 2)', () => {
   // down must still answer a coin deep-dive with the exact-number
   // FULL TICKET from pure tool compute.
   it('runCryptoAgent: engines down + SOL deep-dive ask → deterministic FULL TICKET (ok:true)', async () => {
+    // HERMETIC: the deterministic answer's optional funding line does a real
+    // Binance fapi fetch; on a host where fapi is blocked that burns the full
+    // 8s AbortSignal timeout and vitest's 5s default kills the test (the
+    // deterministic ticket itself is correct — verified at 8s). Funding is
+    // optional (tool honestly reports unavailable) — stub the network out.
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => { throw new Error('offline (hermetic test)'); });
+    try {
     mockGetDeepSignal.mockResolvedValue({
       ok: true, signal: {
         symbol: 'SOL', side: 'LONG', grade: 'STRONG', confidence: 82, agreement: 0.85,
@@ -176,6 +184,9 @@ describe('full-ticket prompt discipline (Part 2)', () => {
     // the UI tool chips light up even in deterministic mode
     expect(out.toolsUsed).toContain('analyze_coin');
     expect(out.toolsUsed).toContain('calculate_position_size');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 

@@ -723,9 +723,17 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
       zeroLossRule: 'T1/T2 auto profit book + dynamic SL trail + confirmed reversal exit above round-trip fees',
     } : null,
     leverageRule: { below10k: 10, above10k: 5, thresholdINR: 10000, walletDeployPct: 95 },
+    // v21.26.0 [DIRECTION-PARITY HARD GATE]: main AI-BOARD ka side MTF row ke
+    // side se EXACT match hona chahiye. Pehle sirf "board side valid + grade +
+    // conf" check hota tha - board OPPOSITE side bol raha ho tab bhi ensemble
+    // "available" ho sakta tha, aur weak paths (directionVerified null) us row
+    // ko auto lane me le ja sakte the. Ab side mismatch = unavailable
+    // (boardSideConflict blocker + capped score already alag se lagte hain).
     ensembleSignalAvailable: Boolean(
       boardSig
       && (boardSig.side === 'LONG' || boardSig.side === 'SHORT')
+      && (fuse.side === 'LONG' || fuse.side === 'SHORT')
+      && String(boardSig.side).toUpperCase() === String(fuse.side).toUpperCase()
       && ['ACTION', 'STRONG', 'ELITE'].includes(String(boardSig.grade || '').toUpperCase())
       && Number(boardSig.confidence) >= 60
     ),
@@ -740,6 +748,29 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
     barCounts: { ctx: ctxCandles?.length ?? 0, trig: trigCandles?.length ?? 0 },
     asOf: Date.now(),
   };
+  // v21.26.4 [AUTO-ELIGIBILITY HONESTY]: row.autoEligible/counts used to be
+  // computed BEFORE the main-AI ensemble gate (ensembleSignalAvailable), so
+  // /mtf-dual/live could report `counts.eligible > 0` for rows that
+  // mtfProEntryGate always rejected ("main AI-BOARD ensemble signal
+  // unavailable"). Fold that gate into the row's own eligibility + blocker
+  // with the REAL main-board state (NEUTRAL 44 vs missing) so the UI/API
+  // counts match execution. This only TIGHTENS labelling — no gate relaxed.
+  if (!row.ensembleSignalAvailable) {
+    const mb = row.signals?.board;
+    const mbGrade = String(mb?.grade || '').toUpperCase();
+    const mbConf = Number(mb?.confidence);
+    const mbTier = String(mb?.aiTier || '').toUpperCase();
+    const mbScore = Number(mb?.aiScore);
+    const mbLabel = mb
+      ? `main AI-BOARD grade ${mbGrade || 'UNKNOWN'}${Number.isFinite(mbConf) ? ' conf ' + mbConf : ''}${mb.side ? ' ' + mb.side : ''}`
+        + `${mbTier ? ` (AI ${mbTier}${Number.isFinite(mbScore) ? ' ' + mbScore : ''})` : ''}`
+      : 'main AI-BOARD signal missing (fresh scan/coverage ka wait)';
+    row.autoEligible = false;
+    row.autoBlockers = Array.from(new Set([
+      ...(row.autoBlockers || []),
+      `${mbLabel} — ACTION+/confidence 60+ aligned signal chahiye`,
+    ]));
+  }
   // v21.23.14 [AUTO/MANUAL PARITY]: expose the main AI-BOARD signal age and
   // make a <5m-old signal auto-ineligible too. Manual PAPER/LIVE already
   // rejects it in mtfProEntryGate, but the auto lane never saw the age.
@@ -1170,7 +1201,10 @@ export function mtfProEntryGate(row, {
   }
   if (!row.ok) push(row.error || 'plan unavailable');
   if (!side) push('no clean LONG/SHORT side');
-  if (row.ensembleSignalAvailable === false) push('main AI-BOARD ensemble signal unavailable — fresh scan ka wait karo');
+  if (row.ensembleSignalAvailable === false
+    && !(Array.isArray(row.autoBlockers) && row.autoBlockers.some(b => /main AI-BOARD/i.test(String(b))))) {
+    push('main AI-BOARD ensemble signal unavailable — fresh scan ka wait karo');
+  }
   if (!row.directionVerified) push('direction not PAKKA verified');
   if (row.triggerFired !== true) push('trigger fire pending');
   if (row.counterHtf) push(`1d+4h HTF bias ${row.htfBias || 'opposite'} against ${side || 'side'}`);

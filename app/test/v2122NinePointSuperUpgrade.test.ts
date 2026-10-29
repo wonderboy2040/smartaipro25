@@ -1116,10 +1116,13 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
     // 2. Clean LONG uptrend & clean SHORT downtrend on buildDualRow both verify pakka direction & triggerFired
     const bull15m = makeHealthyTrendCandles(120, 100, 0.0018, 1, 900_000);
     const bull5m = makeHealthyTrendCandles(120, 110, 0.0014, 1, 300_000);
+    // v21.26.0: autoEligible now requires a MAIN AI-BOARD ensemble signal
+    // whose side EXACTLY matches the row side (side-parity hard gate).
     const longRow = await buildDualRow({
       symbol: 'SOL',
       market: 'CRYPTO',
       modeId: 'INTRADAY',
+      boardSig: { side: 'LONG', grade: 'STRONG', confidence: 85, superIntel: { aiScore: 85 }, agreement: 0.82, voters: 11 },
       candlesFor: async (_s: string, _m: string, tf: string) => (tf === '15m' ? bull15m : bull5m),
     });
     expect(longRow.side).toBe('LONG');
@@ -1134,6 +1137,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       symbol: 'OP',
       market: 'CRYPTO',
       modeId: 'INTRADAY',
+      boardSig: { side: 'SHORT', grade: 'STRONG', confidence: 85, superIntel: { aiScore: 85 }, agreement: 0.82, voters: 11 },
       candlesFor: async (_s: string, _m: string, tf: string) => (tf === '15m' ? bear15m : bear5m),
     });
     expect(shortRow.side).toBe('SHORT');

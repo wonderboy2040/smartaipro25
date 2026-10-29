@@ -188,6 +188,86 @@ export async function fetchMetalsFapiCandles(base, resolution = '60', limit = 30
   } catch { return null; } // honest — caller's chain falls through
 }
 
+// ---------------- v21.26.0: GENERIC BINANCE FUTURES (fapi) KLINE LEG ----------------
+// USER REPORT (2026-10-29): "live market candles ka data Websocket Futures
+// se lelo, Spot se nahi". The MTF dual-board already rides CoinDCX futures
+// REST + CoinDCX futures WS overlay (rawTfCandlesUsdt Leg-1); its fallback
+// though was Binance SPOT klines (fetchBinanceKlines). Spot and perp series
+// can diverge (wick depth, last-print venue basis) - exactly the "signal
+// LONG, trade SHORT" class. This leg is the FUTURES-domain replacement:
+//   Leg 1: Binance USDT-M futures klines (fapi)
+//   Leg 2: Bybit USDT linear perp klines (same USDT domain)
+// Never spot. Returns the house candle shape (ascending), >=30 bars or null.
+const BINANCE_FUT_KLINES = 'https://fapi.binance.com/fapi/v1/klines';
+const BYBIT_LINEAR_KLINES = 'https://api.bybit.com/v5/market/kline';
+const TV_TO_BYBIT = {
+  '1': '1', '3': '3', '5': '5', '15': '15', '30': '30',
+  '60': '60', '120': '120', '240': '240', '360': '360', '480': '480', '720': '720',
+  'D': 'D', '1D': 'D', 'W': 'W', '1W': 'W', 'M': 'M', '1M': 'M',
+};
+const _futKlineCache = new Map(); // key -> { at, candles }
+
+export async function fetchBinanceFutKlines(base, resolution = '60', limit = 300) {
+  const sym = String(base || '').toUpperCase().trim()
+    .replace(/^(FUT_|GLOB_)/, '')
+    .replace(/[-_](USDT|USDC|USD|INR)$/, '');
+  if (!/^[A-Z0-9]{2,20}$/.test(sym)) return null;
+  const interval = toFapiInterval(resolution) || '1h';
+  const lim = Math.max(30, Math.min(1000, Math.floor(Number(limit) || 300)));
+  const cacheKey = `bfk:${sym}:${interval}:${lim}`;
+  const ttl = (interval === '1m' || interval === '5m' || interval === '15m') ? 12_000 : 60_000;
+  const hit = _futKlineCache.get(cacheKey);
+  if (hit && Date.now() - hit.at <= ttl) return hit.candles.slice();
+
+  const remember = (candles) => {
+    if (_futKlineCache.size >= 80) {
+      const entries = [..._futKlineCache.entries()].sort((a, b) => a[1].at - b[1].at);
+      for (let i = 0; i < 16; i++) _futKlineCache.delete(entries[i][0]);
+    }
+    _futKlineCache.set(cacheKey, { at: Date.now(), candles });
+    return candles.slice();
+  };
+
+  // Leg 1 - Binance USDT-M futures (fapi)
+  try {
+    const r = await fetch(
+      `${BINANCE_FUT_KLINES}?symbol=${sym}USDT&interval=${interval}&limit=${lim}`,
+      { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) },
+    );
+    if (ok(r)) {
+      const j = await r.json().catch(() => null);
+      const candles = fapiKlinesToCandles(Array.isArray(j) ? j : null);
+      if (candles) return remember(candles);
+    }
+  } catch { /* next leg */ }
+
+  // Leg 2 - Bybit USDT linear perp (newest-first -> re-sort)
+  try {
+    const bi = TV_TO_BYBIT[String(resolution)] || TV_TO_BYBIT[interval] || '60';
+    const r = await fetch(
+      `${BYBIT_LINEAR_KLINES}?category=linear&symbol=${sym}USDT&interval=${bi}&limit=${Math.min(1000, lim)}`,
+      { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) },
+    );
+    if (r.ok) {
+      const j = await r.json().catch(() => null);
+      const list = j?.result?.list;
+      if (Array.isArray(list) && list.length >= 30) {
+        const candles = list.map(k => ({
+          time: Number(k[0]),
+          open: num(k[1]), high: num(k[2]), low: num(k[3]),
+          close: num(k[4]), volume: num(k[5]) || 0,
+        })).filter(c => c.close > 0 && c.open > 0)
+          .sort((a, b) => a.time - b.time);
+        if (candles.length >= 30) return remember(candles);
+      }
+    }
+  } catch { /* honest null below */ }
+  return null;
+}
+
+/** Test hook - hermetic suites clear the generic futures-kline cache. */
+export function __clearBinanceFutKlineCacheForTest() { _futKlineCache.clear(); }
+
 // ---------------- v21.9.0: METALS YAHOO COMEX CANDLE LEG ----------------
 // Yahoo chart API se GC=F/SI=F candles — house shape, USD domain
 // (caller rescales onto the desk anchor). TTL cache + negative cache,
@@ -598,7 +678,14 @@ export async function fetchFuturesInstrumentMeta(pair, { bust = false } = {}) {
   if (!bust && hit && Date.now() - hit._at < (hit._fallback ? 60_000 : 6 * 3600_000)) return hit;
   if (bust) _instrumentMetaCache.delete(key);
   try {
-    const url = `${INSTRUMENT_URL}?pair=${encodeURIComponent(key.toLowerCase())}&margin_currency_short_name=USDT`;
+    // v21.26.6 [PAIR-CASE]: CoinDCX's instrument endpoint is CASE-SENSITIVE.
+    // Lowercase `pair=b-bnb_usdt` silently returns the DEFAULT instrument
+    // (live-verified 2026-10-29: B-LAB_USDT, minQty 1 / increment 1) — every
+    // perp then inherited LAB's precision (0 dp!) and min-qty, so BNB/ETH/
+    // SOL/BTC qty rounded to 0 and the BNB auto trade died at "Quantity 0
+    // below exchange min (2)". Uppercase returns the REAL row (BNB min 0.01
+    // / inc 0.01). Same uppercase lesson as the candlesticks pcode=f leg.
+    const url = `${INSTRUMENT_URL}?pair=${encodeURIComponent(key.toUpperCase())}&margin_currency_short_name=USDT`;
     const r = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) });
     if (ok(r)) {
       const j = await r.json();

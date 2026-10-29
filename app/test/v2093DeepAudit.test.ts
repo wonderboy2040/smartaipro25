@@ -100,8 +100,11 @@ describe('v20.9.3 A — ultrafast verifier currency-domain guard', () => {
 
   it('the FUTURES desk fetches USDT-domain futures candles (source-lock)', () => {
     const s = src('server/ai/ultrafastVerifier.js');
-    expect(s).toMatch(/import \{ fetchFuturesCandles, futuresPairFor \} from '\.\/futures\.js'/);
+    // v21.26.0: Binance/Bybit USDT-M futures fallback imported alongside the
+    // CoinDCX futures leg (futures-only chain — spot fallback removed).
+    expect(s).toMatch(/import \{ fetchFuturesCandles, fetchBinanceFutKlines, futuresPairFor \} from '\.\/futures\.js'/);
     expect(s).toMatch(/market === 'FUTURES'[\s\S]{0,220}fetchFuturesCandles\(futuresPairFor\(base\)/);
+    expect(s).toMatch(/return await fetchBinanceFutKlines\(base, tf\)/);
     // the defensive guard is in the check itself
     expect(s).toMatch(/Math\.abs\(tickPct\) > 20/);
   });

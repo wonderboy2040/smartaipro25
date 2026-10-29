@@ -50,6 +50,44 @@ const MODES: Array<{ id: TradePlanModeId; label: string; tf: string; hold: numbe
   { id: 'SWING', label: '🕐 1h Deep + 15m Action', tf: '1h deep · 15m action', hold: 120 },
 ];
 
+// v21.26.0 [AUTO-MODE PARITY]: the board MUST open on the mode the AUTO
+// engine actually trades. Pehle default INTRADAY tha aur SWING auto engine
+// ke saath first board fetch INTRADAY rows dikha deta tha (user-visible
+// "LONG signal" vs executed SWING "SHORT" mismatch, WLD 2026-10-29).
+// Last server-confirmed auto mode localStorage me persist hota hai, taaki
+// first paint se hi wahi mode render ho (server hydration baad me confirm
+// karta hai). Storage read failure = honest INTRADAY fallback.
+const AUTO_MODE_STORE_KEY = 'mtf-auto-view-v1';
+const readStoredAutoView = (): { mode: TradePlanModeId; holdMin: number; minScore: number } => {
+  try {
+    const raw = typeof window !== 'undefined' ? window.localStorage.getItem(AUTO_MODE_STORE_KEY) : null;
+    const j = raw ? JSON.parse(raw) : null;
+    const mode = MODES.some(x => x.id === j?.mode) ? (j.mode as TradePlanModeId) : 'INTRADAY';
+    const hold = Number(j?.holdMin);
+    const ms = Number(j?.minScore);
+    return {
+      mode,
+      holdMin: hold > 0 ? hold : (MODES.find(x => x.id === mode)?.hold ?? 45),
+      minScore: ms >= 65 && ms <= 95 ? ms : 75,
+    };
+  } catch {
+    return { mode: 'INTRADAY', holdMin: 45, minScore: 75 };
+  }
+};
+const STORED_AUTO_VIEW = readStoredAutoView();
+const persistAutoView = (v: { mode?: TradePlanModeId; holdMin?: number | null; minScore?: number | null }) => {
+  try {
+    if (typeof window === 'undefined') return;
+    const prev = readStoredAutoView();
+    const mode = MODES.some(x => x.id === v.mode) ? (v.mode as TradePlanModeId) : prev.mode;
+    window.localStorage.setItem(AUTO_MODE_STORE_KEY, JSON.stringify({
+      mode,
+      holdMin: Number(v.holdMin) > 0 ? Number(v.holdMin) : prev.holdMin,
+      minScore: Number(v.minScore) >= 65 && Number(v.minScore) <= 95 ? Number(v.minScore) : prev.minScore,
+    }));
+  } catch { /* storage unavailable - mode still hydrates from /status */ }
+};
+
 const tierCls = (tier?: string) =>
   tier === 'ELITE' ? 'bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/40'
     : tier === 'STRONG' ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/40'
@@ -93,9 +131,9 @@ const fmtAge = (ms?: number | null) => {
 const dirArrow = (d?: number | null) => (d == null ? '·' : d > 0 ? '▲' : d < 0 ? '▼' : '·');
 
 export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDeep, onPaperOpened, canLive = false, walletINR = null, onExecuteLive }: Props) {
-  const [mode, setMode] = useState<TradePlanModeId>('INTRADAY');
-  const [holdMin, setHoldMin] = useState<number>(45);
-  const [minScore, setMinScore] = useState<number>(75);
+  const [mode, setMode] = useState<TradePlanModeId>(STORED_AUTO_VIEW.mode);
+  const [holdMin, setHoldMin] = useState<number>(STORED_AUTO_VIEW.holdMin);
+  const [minScore, setMinScore] = useState<number>(STORED_AUTO_VIEW.minScore);
   const [deskFilter, setDeskFilter] = useState<'ALL' | 'MAIN' | 'METALS' | 'EQUITY_SIM'>('ALL');
   const [board, setBoard] = useState<MtfDualBoardView | null>(null);
   const [boardBusy, setBoardBusy] = useState(false);
@@ -165,6 +203,13 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             if (Number(a.minScore) >= 65 && Number(a.minScore) <= 95) setMinScore(Number(a.minScore));
           }
         }
+        // v21.26.0 [AUTO-MODE PARITY]: server auto mode ko viewer mode ke
+        // saath pinned rakho (user mid-click nahi hai to). Persist bhi karo
+        // taaki next mount first paint se hi AUTO mode render kare.
+        if (!userTouchedRef.current && a.mode && MODES.some(x => x.id === a.mode)) {
+          setMode(a.mode);
+          persistAutoView({ mode: a.mode, holdMin: a.holdMin, minScore: a.minScore });
+        }
       } else {
         // v21.23.18 [LIVE STABILITY]: ek failed/timeout poll button ko OFF
         // nahi karta. 3 consecutive failures (~30s+) ke baad hi status stale
@@ -195,6 +240,9 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       return s;
     });
     setAutoFresh(true);
+    // v21.26.0: persist the server-confirmed auto mode for the next mount's
+    // first paint (partial responses fall back to the previous stored view).
+    persistAutoView({ mode: s.mode, holdMin: s.holdMin, minScore: s.minScore });
   }, []);
 
   useEffect(() => { void loadBoard(); }, [loadBoard]);
@@ -739,6 +787,21 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
               {m.label}
             </button>
           ))}
+          {/* v21.26.0 [AUTO-MODE PARITY]: jo mode AUTO engine trade karega,
+              wahi explicitly dikhta hai; viewed-mode mismatch par loud warning
+              (WLD 2026-10-29: user INTRADAY LONG card dekh raha tha jabki
+              auto SWING SHORT le raha tha). */}
+          <span
+            data-testid="mtf-auto-mode-badge"
+            className={`px-2 py-0.5 rounded text-[10px] font-black border ${auto?.mode && auto.mode !== mode ? 'border-rose-500/60 text-rose-200 bg-rose-500/15' : 'border-emerald-500/50 text-emerald-200 bg-emerald-500/10'}`}
+            title="AUTO TRADE engine isi mode ke rows pick karta hai (server config authoritative)">
+            🤖 AUTO MODE: {auto?.mode ?? mode}
+          </span>
+          {auto?.mode && auto.mode !== mode && (
+            <span data-testid="mtf-auto-mode-mismatch" className="px-2 py-0.5 rounded text-[10px] font-black border border-rose-500/70 text-rose-100 bg-rose-500/25">
+              ⚠ Board {mode} dikha raha hai par AUTO engine {auto.mode} pe chal raha hai — auto entry {auto.mode} rows se hogi
+            </span>
+          )}
           <span className="text-slate-600 mx-0.5">|</span>
           <button
             type="button"

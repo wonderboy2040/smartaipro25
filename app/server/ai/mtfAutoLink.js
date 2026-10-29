@@ -2671,6 +2671,9 @@ export async function mtfAutoTick(p = {}) {
       && (r.side === 'LONG' || r.side === 'SHORT')
       && r.ensembleSignalAvailable !== false
       && r.directionVerified !== false
+      // v21.26.0 [DIRECTION-PARITY]: board-vs-MTF side conflict primary lane
+      // me bhi hard-block (fallback path me pehle se tha; ye gap tha).
+      && !r.boardSideConflict
       && !r.reversalRisk
       && !r.trigger?.reversalRisk
       && !r.trigger?.opposingFlow

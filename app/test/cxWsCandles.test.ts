@@ -325,19 +325,25 @@ describe('v21.23.5 wiring pins — mtf.js + ultrafastVerifier.js', () => {
     expect(MTF_SRC).toContain('return cxSpotOverlayCandles(base, tf, c)');
   });
 
-  it('mtf.js USDT legs: futures Leg-1 + spot Leg-3 (BEFORE the ÷fx scaling) both overlaid', () => {
+  it('mtf.js USDT legs: futures Leg-1 overlaid; v21.26.0 spot legs removed (futures-only chain)', () => {
     expect(MTF_SRC).toContain('candles: cxFutOverlayCandles(base, tf, fc)');
-    expect(MTF_SRC).toContain('cxSpotOverlayCandles(base, tf, cdc).map('); // overlay in INR domain, THEN scale
+    // v21.26.0: old Leg-3 CoinDCX INR spot -> USDT scaling HATA diya. Crypto
+    // rows ab spot par kabhi degrade nahi hote (Binance/Bybit USDT-M fapi
+    // fallback; futures unavailable => null).
+    expect(MTF_SRC).not.toContain('cxSpotOverlayCandles(base, tf, cdc).map(');
+    expect(MTF_SRC).toContain('fetchBinanceFutKlines(base, tf, 240)');
   });
 
   it('Binance fallback legs stay UN-overlaid (cross-domain by design) — exact occurrence counts', () => {
-    expect((MTF_SRC.match(/cxSpotOverlayCandles\(/g) || []).length).toBe(2); // CRYPTO branch + Leg-3 only
+    expect((MTF_SRC.match(/cxSpotOverlayCandles\(/g) || []).length).toBe(1); // CRYPTO INR branch only (Leg-3 removed)
     // v21.23.10 [METALS-LEGS] honest-update: 1 → 5 — naye 4 wires sab METALS
     // chain me hain (rawTfCandlesUsdt Leg-1.5 fapi + COMEX-rescaled, aur
     // _metalsCandlesFor fapi + COMEX). Domain-matched: cxFutOverlayCandles
     // sirf B-XAU_USDT/B-XAG_USDT futures-book ticks lagata hai USDT-domain
-    // metals candles par (koi cross-domain apply NAHI). Binance fallback
-    // legs (rawTfCandlesUsdt Leg-2 generic / CRYPTO branch) ab bhi UN-overlaid.
+    // metals candles par (koi cross-domain apply NAHI). Binance/Bybit
+    // futures fallback legs (rawTfCandlesUsdt Leg-2) ab bhi UN-overlaid
+    // (different venue, same USDT domain - CoinDCX WS tick sirf CoinDCX
+    // series par lagta hai).
     expect((MTF_SRC.match(/cxFutOverlayCandles\(/g) || []).length).toBe(5);  // Leg-1 + 4 metals-chain wires
     // v21.23.9 [F2] honest-update: 2 → 3 — naya 3rd wire = chartCandles
     // INDIA/GLOBALFUTURES cache-hit per-READ overlay refresh (same-domain

@@ -66,7 +66,7 @@ import { fetchCoinDcxCandles, fetchBinanceKlines } from './data.js';
 // futures verdict (and the mirror +8 on hosts where the Binance USDT
 // fallback served the CRYPTO desk against an IN_ INR tick). Futures
 // candles are the SAME USDT domain as the FUT_ tick — fetch those.
-import { fetchFuturesCandles, futuresPairFor } from './futures.js';
+import { fetchFuturesCandles, fetchBinanceFutKlines, futuresPairFor } from './futures.js';
 // v21.23.5 CoinDCX Ultrafast WS live-bar overlay — the verifier's 1m/5m
 // candles stop freezing for the REST TTL; the forming bar tracks the WS
 // book print (~1s). Binance fallback legs stay UN-overlaid (cross-domain
@@ -461,7 +461,9 @@ async function _candlesFor(symbol, market, tf) {
       // v21.23.5: futures WS book ka ~1s mark/last print live bar pe —
       // the realtime verifier ka micro-trend ab tick-fresh.
       if (Array.isArray(a) && a.length >= 25) return cxFutOverlayCandles(base, tf, a);
-      return await fetchBinanceKlines(base, tf).catch(() => null);
+      // v21.26.0 [FUTURES-ONLY]: verifier fallback bhi USDT-M futures
+      // (Binance fapi -> Bybit linear), Binance SPOT nahi.
+      return await fetchBinanceFutKlines(base, tf).catch(() => null);
     }
     if (market === 'CRYPTO') {
       const a = await fetchCoinDcxCandles(base, tf).catch(() => null);

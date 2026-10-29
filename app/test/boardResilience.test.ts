@@ -120,4 +120,24 @@ describe('v9.2.1 warmOnly — status polls never compute inline', () => {
     // single background refresh for the aged board — never 3
     expect(await waitFor(() => tvIndiaCalls === 1)).toBe(true);
   }, 20_000);
+
+  it('v21.26.5 EMPTY-PAYLOAD NO-POISON: a transient empty scan never overwrites the last GOOD board', async () => {
+    // The live incident: one WAF/timeout hit made the FUTURES scan return
+    // contexts=0; the empty payload overwrote the last-good cache and
+    // EVERY MTF auto row read "main AI-BOARD grade UNKNOWN conf 0" for the
+    // next minute (auto-trade blind). A last GOOD board must survive the
+    // transient empty scan inside the 5-min grace window.
+    const good = {
+      ok: true, market: 'INDIA',
+      signals: [{ symbol: 'RELIANCE', market: 'INDIA', side: 'LONG', grade: 'STRONG', confidence: 82, signalAge: { ageMs: 600_000 } }],
+      topFive: [], generatedAt: Date.now(),
+    };
+    __setBoardCacheForTests('INDIA', good, 120_000); // expired for the API TTL, inside the grace window
+    const v = await getSignals('INDIA', {}, { limit: 6, warmOnly: true });
+    expect(v).toBe(good); // stale good served immediately
+    expect(await waitFor(() => tvIndiaCalls === 1)).toBe(true); // background warm DID run (offline → empty payload)
+    const v2 = await getSignals('INDIA', {}, { limit: 6, warmOnly: true });
+    expect(v2?.ok).toBe(true);           // empty scan did NOT poison the cache
+    expect(v2?.signals?.length).toBe(1);
+  }, 20_000);
 });

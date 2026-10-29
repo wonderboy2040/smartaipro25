@@ -22,7 +22,7 @@ import {
 // cadence (T1 base∪hot every cycle · T2 rotating slices) + hot
 // promotion. Flag AI_INDIA_FULL_UNIVERSE=off reverts to the static base.
 import { tieredScanUniverse, absorbScanRows, fullIndiaUniverseEnabled as _fullIndiaUniverseEnabled, boardUniverseOverrides } from './indiaUniverse.js';
-import { FUTURES_UNIVERSE, futuresPairFor, fetchFuturesPrices, fetchFuturesCandles, METALS_BASES, isMetalsBase, fetchMetalsFapiCandles, fetchMetalsPrices, fetchMetalsYahooCandles } from './futures.js';
+import { FUTURES_UNIVERSE, futuresPairFor, fetchFuturesPrices, fetchFuturesCandles, fetchBinanceFutKlines, METALS_BASES, isMetalsBase, fetchMetalsFapiCandles, fetchMetalsPrices, fetchMetalsYahooCandles } from './futures.js';
 // v20.7.12 [M-2]: USDINR last-known-good fallback (disk-backed) — flat-84
 // hardcode (signals.js:2240) TV-only fallback contexts ko ~6% misprice
 // kar raha tha jab real USDINR ~89 ho (v20.2 ne baaki sab sites fix kiye the,
@@ -823,7 +823,10 @@ async function fetchCrypto15mTape(base, ltp, tvRow, mkt) {
           // v21.9.0: fapi (interval FIXED) → Yahoo COMEX 15m rescaled.
           candles = await fetchMetalsCandleChain(base, '15', ltp, 240).catch(() => null);
         } else {
-          candles = await fetchBinanceKlines(base, '15m').catch(() => null);
+          // v21.26.0 [FUTURES-ONLY]: FUTURES desk ka fallback Binance/USDT-M
+          // fapi (+ Bybit linear) hai - Binance SPOT nahi (spot-vs-perp wick
+          // divergence direction vote flip kar sakti thi).
+          candles = await fetchBinanceFutKlines(base, '15m').catch(() => null);
         }
       }
     } else {
@@ -1727,6 +1730,14 @@ async function _computeBoard(mkt, deps, opts = {}) {
       if (!(ltp > 0)) return null;
       const c = await fetchFuturesCandles(futuresPairFor(b), '60').catch(() => null);
       if (Array.isArray(c) && c.length >= 30) return c;
+      // v21.26.5 [FUTURES BOARD CANDLE FALLBACK]: CoinDCX candle legs
+      // (WAF / endpoint drift) dark hone par main AI-BOARD dead nahi hota —
+      // Binance USDT-M fapi -> Bybit linear perp, SAME USDT futures domain
+      // (spot fallback nahi). Isi absence me board har kuch second me
+      // "No futures data" empty payload cache kar deta tha aur MTF auto
+      // lane ko "main AI-BOARD grade UNKNOWN" dikhta tha.
+      const bf = await fetchBinanceFutKlines(b, '60').catch(() => null);
+      if (Array.isArray(bf) && bf.length >= 30) return bf;
       if (isMetalsBase(b)) {
         // v21.9.0: fapi (FIXED interval mapping) → Yahoo COMEX rescaled —
         // chaar-leg candle chain, Binance geo-block ke against bhi zinda.
@@ -1866,7 +1877,7 @@ async function _computeBoard(mkt, deps, opts = {}) {
       ok: false, market: mkt, reason: mkt === 'CRYPTO'
         ? 'No crypto data reachable right now (every leg of the chain is down: CoinDCX INR prices + Binance/Bybit + TV scanner + Yahoo candles)'
         : mkt === 'FUTURES'
-          ? 'No futures data reachable right now (TV + CoinDCX futures RT unavailable)'
+          ? 'No futures data reachable right now (CoinDCX futures candles + Binance fapi/Bybit + TV scanner + futures RT prices — saari legs down)'
           : mkt === 'METALS'
             ? 'No metals data reachable right now (CoinDCX futures RT + Binance fapi + Yahoo COMEX + gold-api — saari legs down for XAU/XAG)'
             : mkt === 'GLOBALFUTURES'
@@ -1876,7 +1887,20 @@ async function _computeBoard(mkt, deps, opts = {}) {
       topFive: [],
       signals: [], models: modelStatus(null, depsSafe), regime, generatedAt: Date.now(),
     };
-    cacheSet(cacheKey, payload);
+    // v21.26.5 [EMPTY-PAYLOAD NO-POISON]: ek transient WAF/timeout ne abhi
+    // wala GOOD board cache overwrite kar diya to `warmOnly` readers (MTF
+    // dual board / auto lane) ko HAR row "main AI-BOARD grade UNKNOWN conf 0"
+    // dikhta tha — auto-trade 60s+ tak blind. Ab last GOOD payload 5-min
+    // grace tak cache me rehta hai (API caller ko ye degraded payload
+    // honest milta rahega — sirf cache overwrite roka hai; grace ke baad
+    // honest empty hi cache hota hai).
+    const priorEntry = _cache.get(cacheKey);
+    const prior = priorEntry?.payload;
+    const priorAgeMs = priorEntry ? Date.now() - Number(priorEntry.at || 0) : Infinity;
+    const priorGood = !!prior && prior.ok === true
+      && Array.isArray(prior.signals) && prior.signals.length > 0
+      && priorAgeMs < 5 * 60_000;
+    if (!priorGood) cacheSet(cacheKey, payload);
     return payload;
   }
 

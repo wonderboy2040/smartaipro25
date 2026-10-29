@@ -31,8 +31,7 @@
 //     "N/A" chip and is excluded from the vote (never blocks the board)
 // ============================================================
 import { fetchCoinDcxCandles, fetchBinanceKlines, isNseOpen } from './data.js';
-import { fetchFuturesCandles, futuresPairFor, isMetalsBase, fetchMetalsFapiCandles, fetchMetalsYahooCandles } from './futures.js';
-import { usdInrFallback } from './lib/usdinr.js';
+import { fetchFuturesCandles, futuresPairFor, isMetalsBase, fetchMetalsFapiCandles, fetchMetalsYahooCandles, fetchBinanceFutKlines } from './futures.js';
 import { computeIndicatorsFromCandles, atr as atrOf } from './lib/indicators.js';
 // v21.23.11 MIRROR-SHIELD: descending (time-mirrored) series → ascending
 // before ANY vote/resample/overlay consumes it.
@@ -528,6 +527,23 @@ function _structureStop(candles15mIn, side, ltp) {
 const HTF_SNAP_TTL_MS = 90_000;
 const _htfSnapCache = new Map();
 
+/** v21.26.0 [FUTURES-DOMAIN HTF]: the 4h/1d bias MUST ride the same candle
+ *  family as the plan (rawTfCandlesUsdt: CoinDCX USDT-perp REST + futures
+ *  WS overlay -> Binance/Bybit USDT-perp fallback). Previously this used
+ *  `_candlesFor` = CoinDCX INR **spot** (or Binance spot) while the plan
+ *  priced USDT **futures**; spot-vs-perp wick/structure divergence could
+ *  flip the HTF bias against the plan (the "signal LONG, trade SHORT"
+ *  class). Spot data ab crypto/futures/metals HTF bias me KABHI nahi
+ *  jaata - futures unavailable => bias honestly UNAVAILABLE. */
+async function _htfCandlesFor(symbol, market, tf) {
+  const mkt = String(market || 'INDIA').toUpperCase();
+  if (mkt === 'CRYPTO' || mkt === 'FUTURES' || mkt === 'METALS') {
+    const r = await rawTfCandlesUsdt(symbol, tf).catch(() => null);
+    return Array.isArray(r?.candles) && r.candles.length >= 30 ? r.candles : null;
+  }
+  return await _candlesFor(symbol, mkt, tf).catch(() => null);
+}
+
 export async function buildHtfBiasSnapshot(symbol, market) {
   const sym = String(symbol || '').trim().toUpperCase();
   const mkt = String(market || 'INDIA').toUpperCase();
@@ -537,8 +553,8 @@ export async function buildHtfBiasSnapshot(symbol, market) {
   if (hit && Date.now() - hit.at < HTF_SNAP_TTL_MS) return hit.payload;
 
   const [c4, c1] = await Promise.all([
-    _candlesFor(sym, mkt, '4h').catch(() => null),
-    _candlesFor(sym, mkt, '1d').catch(() => null),
+    _htfCandlesFor(sym, mkt, '4h'),
+    _htfCandlesFor(sym, mkt, '1d'),
   ]);
   const votes = [
     c4 && c4.length ? _tfVote(c4, '4h') : null,
@@ -869,11 +885,13 @@ export async function rawTfCandles(symbol, market, tf) {
 // to har crypto row ₹ me render hoti thi (BTC ₹95,00,000-class),
 // jabki Superintelligence board aur USDT futures desk $ domain me.
 //
-// FIX: dual board ke liye ek alag USDT-first resolver —
-//   Leg 1: Binance USDT klines (api.binance.com + data-api.binance.vision
-//          keyless mirror — geo-robust, jaisa data.js ka chain use karta hai)
-//   Leg 2: CoinDCX INR candles × (1/USDINR) — Binance down ho to bhi
-//          prices USDT me hi dikhte hain (fx honest, usdInr.js se)
+// FIX: dual board ke liye ek alag USDT-first resolver. v21.26.0 ke baad
+// chain puri tarah FUTURES-domain hai (SPOT kabhi nahi):
+//   Leg 1:   CoinDCX USDT-M perp candles (pcode=f) + CoinDCX futures WS
+//            live-bar overlay (cxFutOverlayCandles)
+//   Leg 1.5: metals — Binance fapi XAUUSDT/XAGUSDT -> COMEX rescaled
+//   Leg 2:   Binance USDT-M fapi klines -> Bybit USDT linear perp klines
+//   (old spot legs REMOVED: Binance/Bybit spot + CoinDCX INR spot scaled)
 // Votes wahi rehte hain (scale-invariant), sirf PRICE DOMAIN badalta hai.
 // ============================================================
 const FUT_TF_RES = { '1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1d': '1D' };
@@ -928,28 +946,21 @@ export async function rawTfCandlesUsdt(symbol, tf, opts = {}) {
       return { candles: cxFutOverlayCandles(base, tf, candles), ccy: 'USDT', src: 'yahoo-comex-metals', fx: null, base };
     }
   }
-  // Leg 2 — Binance/Bybit USDT (data.js chain: spot + keyless mirror + Bybit 200-bar cached)
+  // Leg 2 — v21.26.0 [FUTURES-ONLY FALLBACK]: Binance USDT-M fapi klines ->
+  // Bybit USDT linear perp klines (fetchBinanceFutKlines). Pehle ye leg
+  // `fetchBinanceKlines` = Binance/Bybit **SPOT** thi - spot wick depth /
+  // venue basis plan (USDT perp) se diverge karke direction flip kar sakti
+  // thi. Ab crypto/futures rows SPOT pe kabhi degrade nahi hoti:
+  // futures unavailable => null (honest "candles unavailable").
   try {
-    const bk = await fetchBinanceKlines(base, tf, { limit: 200, ...opts }).catch(() => null);
+    const bk = await fetchBinanceFutKlines(base, tf, 240).catch(() => null);
     if (Array.isArray(bk) && bk.length >= 30) {
-      return { candles: bk, ccy: 'USDT', src: 'binance-usdt', fx: null, base };
+      return { candles: bk, ccy: 'USDT', src: 'binance-fut-usdt', fx: null, base };
     }
   } catch { /* fall through */ }
-  // Leg 3 — CoinDCX INR scaled to USDT (usdInr.js last-known-good)
-  try {
-    const cdc = await fetchCoinDcxCandles(base, tf).catch(() => null);
-    if (Array.isArray(cdc) && cdc.length >= 30) {
-      const fx = Number(opts.fx) > 40 && Number(opts.fx) < 150 ? Number(opts.fx) : usdInrFallback();
-      // v21.23.5: overlay INR domain me PEHLE (spot WS ka INR print), phir
-      // ÷fx USDT scaling — tick/candle domain hamesha matched.
-      const scaled = cxSpotOverlayCandles(base, tf, cdc).map(c => ({
-        ...c,
-        open: c.open / fx, high: c.high / fx, low: c.low / fx, close: c.close / fx,
-        // volume ratio-invariant hai (indicators sirf relative use karte hain)
-      }));
-      return { candles: scaled, ccy: 'USDT', src: 'coindcx-inr-scaled', fx, base };
-    }
-  } catch { /* none */ }
+  // v21.26.0: old Leg-3 (CoinDCX INR **spot** scaled to USDT) REMOVED - it
+  // was the last silent spot leg in the auto/plan candle chain. Futures
+  // unavailable => null (honest), never a spot-derived auto-trade plan.
   return null;
 }
 
