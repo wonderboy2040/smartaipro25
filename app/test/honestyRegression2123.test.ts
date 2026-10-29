@@ -1,76 +1,85 @@
 // ============================================================
-// v21.23.3 — HONESTY REGRESSION LOCKS
+// v21.23.3 — HONESTY REGRESSION LOCKS (rebuilt-bot edition)
 // ------------------------------------------------------------
-// WHY: v21.23.1/v21.23.2 ne MTFDualBoardPanel header + mtfDualBoard
-// server ladder honest kiya, par 3 un-swept paths par fabrications
-// zinda reh gaye the (fresh-eyes deep audit ne pakde):
+// v21.23.1/v21.23.2 ne MTFDualBoardPanel header + mtfDualBoard
+// server ladder honest kiya, par un-swept paths par fabrications
+// zinda reh gaye the:
 //   1. Row-level OLLAMA chip raw `verdict` ("3/3 OLLAMA AI LOCK")
 //      render karta tha — Ollama OFFLINE ho tab bhi — plus
 //      `latencyMs ?? 12` fabricated latency.
-//   2. Telegram siteAgents row: `?? 88` winrate + `?? 8` guessed
-//      alignment + raw verdict tag.
+//   2. Telegram board rows: `?? 88` winrate + guessed alignment +
+//      raw verdict tag.
 //   3. bot.mjs digest header flat "95% Win-Rate" claim.
 //   4. TradePlanPanel: `?? 7` guessed "7/8" + synthetic formula
 //      bare "% Winrate" ke roop me.
 //   5. mtfDualBoard API payload note "95% Win-Rate Confluence".
 //   6. India/CoinDcx tab headers "(95% Win-Rate Target)".
 //   7. llmSentinel cache-init `latencyMs || 18` placeholder leak.
-// Ye file in sab ko behavior + source pins se lock karti hai.
+//
+// f7c6fe7 rebuilt the Telegram bot: the old siteAgents formatter is
+// gone, and the new `formatBoard` never renders winrate/alignment/
+// verdict tags at all. These locks now pin the rebuilt renderer.
 // ============================================================
 import { describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
-import { formatMtfDualBoardLines } from '../telegram-bot/siteAgents.mjs';
+import { formatBoard } from '../telegram-bot/lib/format.mjs';
 
 const readSrc = (rel: string) => fs.readFileSync(path.resolve(rel), 'utf8');
 
-describe('v21.23.3 — honesty: telegram MTF row fabrications removed', () => {
-  it('unmeasured row → "Winrate: calibrating", NOT guessed 88%/8-of-8', () => {
-    const txt = formatMtfDualBoardLines({
-      rows: [{ symbol: 'BTC', side: 'LONG', superScore: 80, tier: 'ELITE', plan: { entry: 67000, stopLoss: 66500, t1: 68000, t2: 69000 } }],
-    }, { label: 'TEST BOARD', max: 6 });
-    expect(txt).toBeTruthy();
-    expect(txt).toContain('Winrate: calibrating');
-    expect(txt).not.toContain('88% Winrate');
-    // guessed alignment bhi nahi — unknown pe "—" (em-dash) indicator
-    expect(txt).toContain('—/8 Inst · —/10 Top Ind');
-    expect(txt).not.toContain('8/8 Inst');
+const row = (over = {}) => ({
+  ok: true,
+  symbol: 'BTC',
+  side: 'LONG',
+  tier: 'ELITE',
+  superScore: 80,
+  plan: { entry: 67000, stopLoss: 66500, t1: 68000, t2: 69000 },
+  ...over,
+});
+
+const board = (rows = [row()]) => ({
+  ok: true,
+  market: 'CRYPTO',
+  quoteCcy: 'USDT',
+  modeLabel: 'INTRADAY',
+  scannedCount: 10,
+  asOf: Date.now(),
+  rows,
+});
+
+describe('v21.23.3 — honesty: telegram MTF board fabrications removed', () => {
+  it('unmeasured row → no fabricated winrate / alignment / verdict tag', () => {
+    const txt = formatBoard(board([row({
+      winRatePct: 95,
+      worldIndicators: { alignedCount: 9, aligned8Count: 9 },
+      ollamaTrio: { verdict: '3/3 OLLAMA AI LOCK', honestLabel: 'Rule-Based Guard 3/3', ruleBasedGuard: true },
+    })]), { title: 'TEST BOARD' });
+    expect(txt).toContain('BTC');
+    // The rebuilt formatter renders signal/order state + plan only.
+    expect(txt).not.toContain('Winrate');
+    expect(txt).not.toContain('95%');
+    expect(txt).not.toContain('OLLAMA AI LOCK');
+    expect(txt).not.toMatch(/\d+\/8 Inst/);
+    expect(txt).not.toMatch(/\d+\/10 Top Ind/);
   });
 
-  it('measured row → real winRatePct + real alignment counts render', () => {
-    const txt = formatMtfDualBoardLines({
-      rows: [{
-        symbol: 'BTC', side: 'LONG', superScore: 80, tier: 'ELITE',
-        winRatePct: 72,
-        worldIndicators: { alignedCount: 7, aligned8Count: 6 },
-        plan: { entry: 67000, stopLoss: 66500, t1: 68000, t2: 69000 },
-      }],
-    }, { label: 'TEST BOARD', max: 6 });
-    expect(txt).toContain('72% Winrate');
-    expect(txt).toContain('6/8 Inst · 7/10 Top Ind');
+  it('executed order side opposite to signal side → flagged, never hidden', () => {
+    const txt = formatBoard(board([row({ orderSide: 'SELL' })]), { title: 'X' });
+    expect(txt).toContain('SIDE MISMATCH');
+    expect(txt).toContain('order SELL');
   });
 
-  it('offline Ollama → honestLabel ("Rule-Based Guard n/3") renders, raw "3/3 OLLAMA AI LOCK" NOT', () => {
-    const txt = formatMtfDualBoardLines({
-      rows: [{
-        symbol: 'BTC', side: 'LONG', superScore: 80, tier: 'ELITE',
-        ollamaTrio: { verdict: '3/3 OLLAMA AI LOCK', honestLabel: 'Rule-Based Guard 3/3', ruleBasedGuard: true },
-        plan: { entry: 67000, stopLoss: 66500, t1: 68000, t2: 69000 },
-      }],
-    }, { label: 'TEST BOARD', max: 6 });
-    expect(txt).toContain('Rule-Based Guard 3/3');
-    expect(txt).not.toContain('3/3 OLLAMA AI LOCK');
+  it('matching order side → no false mismatch flag', () => {
+    const txt = formatBoard(board([row({ orderSide: 'BUY' })]), { title: 'X' });
+    expect(txt).not.toContain('SIDE MISMATCH');
+    expect(txt).toContain('order BUY');
   });
 
-  it('legacy rows (no honestLabel) → verdict fallback still works (back-compat)', () => {
-    const txt = formatMtfDualBoardLines({
-      rows: [{
-        symbol: 'BTC', side: 'LONG', superScore: 80, tier: 'ELITE',
-        ollamaTrio: { verdict: '2/3 OLLAMA AI STRONG' },
-        plan: { entry: 67000, stopLoss: 66500, t1: 68000, t2: 69000 },
-      }],
-    }, { label: 'TEST BOARD', max: 6 });
-    expect(txt).toContain('2/3 OLLAMA AI STRONG');
+  it('row error → secrets redacted before Telegram sees them', () => {
+    const txt = formatBoard(board([row({ ok: false, error: 'token=abcdef123456 api_key=supersecret' })]), { title: 'X' });
+    expect(txt).toContain('[redacted]');
+    expect(txt).not.toContain('supersecret');
+    expect(txt).not.toContain('abcdef123456');
   });
 });
 
@@ -93,9 +102,11 @@ describe('v21.23.3 — honesty: UI/server source pins', () => {
     expect(src).toContain('est. win-rate');
   });
 
-  it('bot.mjs digest header: no flat 95% win-rate claim', () => {
-    const src = readSrc('telegram-bot/bot.mjs');
-    expect(src).not.toContain('(95% Win-Rate');
+  it('rebuilt bot: no flat 95% win-rate claim + no secret commands', () => {
+    const bot = readSrc('telegram-bot/bot.mjs');
+    const commands = readSrc('telegram-bot/lib/commands.mjs');
+    expect(bot).not.toContain('(95% Win-Rate');
+    expect(commands).not.toMatch(/\/(?:setkey|debug_env|env)\b/);
   });
 
   it('mtfDualBoard API payload note: no "95% Win-Rate Confluence"', () => {
@@ -119,10 +130,11 @@ describe('v21.23.3 — honesty: UI/server source pins', () => {
     expect(inr).toContain('Ledger-Calibrated Win-Rate');
   });
 
-  it('siteAgents: fabricated fallbacks (?? 88 / ?? 8) gone from source', () => {
-    const src = readSrc('telegram-bot/siteAgents.mjs');
-    expect(src).not.toContain('?? r.plan?.winProbPct ?? 88');
+  it('rebuilt board formatter: fabricated fallbacks (?? 88 / alignedCount ?? 8) gone', () => {
+    const src = readSrc('telegram-bot/lib/format.mjs');
+    expect(src).not.toContain('?? 88');
     expect(src).not.toContain('alignedCount ?? 8');
-    expect(src).toContain('honestLabel');
+    expect(src).toContain('SIDE MISMATCH');
+    expect(src).toContain('redactSecrets(row?.error');
   });
 });

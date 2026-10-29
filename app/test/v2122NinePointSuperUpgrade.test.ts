@@ -57,11 +57,8 @@ import {
   signalRecheckStatus,
   __resetSignalRecheckForTests,
 } from '../server/ai/signalRecheck.js';
-import {
-  formatMtfDualBoardLines,
-  formatMtfDeepMonitorLines,
-  inferDeskFromText,
-} from '../telegram-bot/siteAgents.mjs';
+import { formatAutoStatus, formatBoard } from '../telegram-bot/lib/format.mjs';
+import { inferDesk } from '../telegram-bot/lib/commands.mjs';
 import {
   executeMtfDualLiveOrder,
   __resetMtfLiveOrderLockForTests,
@@ -308,12 +305,16 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
   });
 
   it('8 & 9) Superfast Telegram Bot formatters + Intraday TAB & Crypto TAB integration', () => {
-    const tgBoardTxt = formatMtfDualBoardLines({
+    const tgBoardTxt = formatBoard({
+      ok: true,
       market: 'CRYPTO',
       quoteCcy: 'USDT',
       modeLabel: '15m Deep + 5m Action',
+      scannedCount: 3,
+      asOf: Date.now(),
       rows: [
         {
+          ok: true,
           symbol: 'BTC',
           side: 'LONG',
           superScore: 89,
@@ -326,6 +327,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       ],
       metalsRows: [
         {
+          ok: true,
           symbol: 'XAU',
           side: 'LONG',
           superScore: 86,
@@ -338,6 +340,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       ],
       equitySimRows: [
         {
+          ok: true,
           symbol: 'NVDA',
           side: 'LONG',
           superScore: 84,
@@ -350,17 +353,19 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       ],
     });
     expect(tgBoardTxt).toContain('BTC');
-    expect(tgBoardTxt).toContain('95% Winrate');
-    expect(tgBoardTxt).toContain('GOLD &amp; SILVER PERPS');
+    expect(tgBoardTxt).toContain('GOLD / SILVER (USDT)');
     expect(tgBoardTxt).toContain('XAU');
     expect(tgBoardTxt).toContain('NVDA');
+    // v21.23.3 HONESTY: rebuilt formatter never prints unmeasured winrates.
+    expect(tgBoardTxt).not.toContain('95% Winrate');
+    expect(tgBoardTxt).not.toContain('OLLAMA AI LOCK');
 
     setMtfAutoEnabled(true);
     updateMtfAutoConfig({ executionMode: 'live', walletDeployPct: 95, walletAmountINR: 1163.93 });
     const st = mtfAutoStatus();
-    const tgDmTxt = formatMtfDeepMonitorLines(st);
-    expect(tgDmTxt).toContain('95% CoinDCX Wallet Deployment');
-    expect(inferDeskFromText('XAU gold perp signal batao')).toBe('crypto');
+    const tgDmTxt = formatAutoStatus(st);
+    expect(tgDmTxt).toContain('95% deploy');
+    expect(inferDesk('XAU gold perp signal batao')).toBe('crypto');
 
     const cxSrc = fs.readFileSync(path.resolve('src/components/tabs/CoinDcxTab.tsx'), 'utf8');
     const inSrc = fs.readFileSync(path.resolve('src/components/tabs/IndiaIntradayTab.tsx'), 'utf8');

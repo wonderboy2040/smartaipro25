@@ -49,8 +49,11 @@ process.env.OPTIONS_AUTO_SCRATCH = SCRATCH;
 import { optionsAutoTick, optionsAutoStatus, setOptionsAutoEnabled } from '../server/ai/optionsAutoEntry.js';
 import { agentTradesToday } from '../server/ai/agent.js';
 
-const cfgFile = path.join(APP_ROOT, 'server', 'data', 'options-auto-config.json');
-const stateFile = path.join(APP_ROOT, 'server', 'data', 'options-auto-state.json');
+// v21.27.1: module now honors OPTIONS_AUTO_SCRATCH — test writes must use
+// the same scratch dir (pehle ye suite REAL server/data files backup/restore
+// karti thi; crash = live options-auto state corrupt).
+const cfgFile = path.join(SCRATCH, 'options-auto-config.json');
+const stateFile = path.join(SCRATCH, 'options-auto-state.json');
 let cfgBak: string | null = null;
 let stateBak: string | null = null;
 

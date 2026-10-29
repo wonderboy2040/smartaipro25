@@ -31,7 +31,11 @@ export const MTF_ROW_LEDGER_FILE = 'mtf-row-ledger.json';
 export const MTF_ROW_LEDGER_LEGACY_FILE = 'mtf-row-ledger-legacy.json';
 const LEGACY_ARCHIVE_MAX = 5_000;
 
-const _dataDir = () => process.env.MTF_AUTO_DATA_DIR || DATA_DIR;
+// v21.27.1 FIX: SMARTAI_DATA_DIR fallback (same contract as mtfAutoLink) —
+// hermetic boot ke board scan real ledger file ko overwrite nahi karega.
+const _dataDir = () =>
+  process.env.MTF_AUTO_DATA_DIR ||
+  (process.env.SMARTAI_DATA_DIR ? path.resolve(process.env.SMARTAI_DATA_DIR) : DATA_DIR);
 const _file = (name) => path.join(_dataDir(), name);
 
 function _readJson(name, fallback) {

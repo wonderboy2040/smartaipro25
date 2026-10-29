@@ -129,20 +129,32 @@ describe('v6.9 computeTopFive — pure ranking', () => {
 // ---------------- board payload integration ----------------
 describe('v6.9 board payload carries topFive', () => {
   it('getSignals payload shape includes topFive on all three desks (cached honest fallback)', async () => {
-    const { getSignals } = await import('../server/ai/signals.js');
-    // Live network from this box is unreliable (CF-blocks) — the board
-    // either resolves (ok:true + topFive array of ≤5) or degrades
-    // honestly (ok:false + topFive:[]). Both are contract-compliant.
-    for (const market of ['INDIA', 'CRYPTO', 'FUTURES'] as const) {
-      const payload = await getSignals(market, {}, { noCache: true, limit: 10 });
-      expect(Array.isArray(payload.topFive)).toBe(true);
-      expect(payload.topFive.length).toBeLessThanOrEqual(5);
-      if (payload.ok) {
-        expect(payload.topFive.every(p => p.rank >= 1 && p.rank <= 5)).toBe(true);
-        expect(payload.topFive.every(p => typeof p.score === 'number' && typeof p.rankReason === 'string')).toBe(true);
-      } else {
-        expect(payload.topFive).toEqual([]);
+    // v21.27.1: this test asserts the PAYLOAD CONTRACT, not local-model
+    // speed. With a wedged/slow Ollama daemon the full board scan (debate +
+    // fallback) can legitimately exceed the test budget, so bound the scan
+    // engine here; the app-side default is 45s (llmChain.js) and the
+    // timeout→abstain path is exactly the honest degradation under test.
+    const prevScanTimeout = process.env.OLLAMA_SCAN_TIMEOUT_MS;
+    process.env.OLLAMA_SCAN_TIMEOUT_MS = '3000';
+    try {
+      const { getSignals } = await import('../server/ai/signals.js');
+      // Live network from this box is unreliable (CF-blocks) — the board
+      // either resolves (ok:true + topFive array of ≤5) or degrades
+      // honestly (ok:false + topFive:[]). Both are contract-compliant.
+      for (const market of ['INDIA', 'CRYPTO', 'FUTURES'] as const) {
+        const payload = await getSignals(market, {}, { noCache: true, limit: 10 });
+        expect(Array.isArray(payload.topFive)).toBe(true);
+        expect(payload.topFive.length).toBeLessThanOrEqual(5);
+        if (payload.ok) {
+          expect(payload.topFive.every(p => p.rank >= 1 && p.rank <= 5)).toBe(true);
+          expect(payload.topFive.every(p => typeof p.score === 'number' && typeof p.rankReason === 'string')).toBe(true);
+        } else {
+          expect(payload.topFive).toEqual([]);
+        }
       }
+    } finally {
+      if (prevScanTimeout == null) delete process.env.OLLAMA_SCAN_TIMEOUT_MS;
+      else process.env.OLLAMA_SCAN_TIMEOUT_MS = prevScanTimeout;
     }
   }, 120_000);
 });

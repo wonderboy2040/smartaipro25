@@ -86,7 +86,13 @@ const DATA_DIR = path.resolve(__dirname, '..', 'data');
 // the — vitest suite REAL server/data/ me config/state likh deti thi aur
 // boot ke waqt user ka saved auto-config uda sakti thi. Ab: runtime data
 // kabhi test se touch nahi hota; suite apna tmp dir set karti hai.
-const _dataDir = () => process.env.MTF_AUTO_DATA_DIR || DATA_DIR;
+// v21.27.1 FIX (pro-level recheck): SMARTAI_DATA_DIR bhi honor karo. Pehle
+// sirf MTF_AUTO_DATA_DIR dekha jata tha, isliye hermetic boot jo sirf
+// SMARTAI_DATA_DIR set karta hai REAL server/data/mtf-auto-config.json +
+// state ko likh deta tha (live auto-trade toggle pollution).
+const _dataDir = () =>
+  process.env.MTF_AUTO_DATA_DIR ||
+  (process.env.SMARTAI_DATA_DIR ? path.resolve(process.env.SMARTAI_DATA_DIR) : DATA_DIR);
 const CFG_FILE = () => path.join(_dataDir(), 'mtf-auto-config.json');
 const STATE_FILE = () => path.join(_dataDir(), 'mtf-auto-state.json');
 

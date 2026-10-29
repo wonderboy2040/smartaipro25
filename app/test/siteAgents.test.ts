@@ -1,126 +1,178 @@
 // ============================================================
-// test/siteAgents.test.ts — v10.9 #1 THE UNIFICATION BRIDGE
+// test/siteAgents.test.ts — REBUILT BOT CORE CONTRACTS
 // ------------------------------------------------------------
-// Pins the pure routing brains of the legacy bot's site bridge:
-// desk inference (voice + /consensus routing), market inference for
-// /scan, desk-session memory TTL, and the HTML formatters.
-// (The loopback fetch layer is integration — siteSync's env gate is
-// exercised for the disabled case.)
+// The legacy `telegram-bot/siteAgents.mjs` bridge was removed by the
+// owner-only bot rebuild (f7c6fe7). This suite now pins the behaviour
+// that actually ships:
+//   • parseCommand / resolveCommand / marketFromArgs / isMarketArg
+//   • inferDesk (voice + /agent routing)
+//   • formatBoard HTML renderer (header, rows, metals, honest errors)
 // ============================================================
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
-  siteBridgeReady, inferDeskFromText, inferMarketForSymbol,
-  deskSessionFor, rememberDesk, formatBoardLines, formatDeepTicket,
-} from '../telegram-bot/siteAgents.mjs';
+  inferDesk,
+  isMarketArg,
+  marketFromArgs,
+  parseCommand,
+  resolveCommand,
+} from '../telegram-bot/lib/commands.mjs';
+import { formatBoard } from '../telegram-bot/lib/format.mjs';
 
-beforeEach(() => {
-  delete process.env.API_TOKEN;
+const boardRow = (over = {}) => ({
+  ok: true,
+  symbol: 'BTC',
+  side: 'LONG',
+  tier: 'ELITE',
+  superScore: 88,
+  autoEligible: true,
+  triggerFired: true,
+  directionVerified: true,
+  plan: { entry: 67000, stopLoss: 66500, t1: 68000, t2: 69000 },
+  ...over,
 });
 
-describe('inferDeskFromText', () => {
+const board = (over = {}) => ({
+  ok: true,
+  market: 'CRYPTO',
+  quoteCcy: 'USDT',
+  modeLabel: 'INTRADAY',
+  scannedCount: 12,
+  asOf: Date.now(),
+  rows: [boardRow()],
+  ...over,
+});
+
+describe('parseCommand', () => {
+  it('parses a bare command + args', () => {
+    expect(parseCommand('/status')).toEqual({ name: 'status', args: '', mentioned: false });
+    expect(parseCommand('  /scan crypto  ')).toEqual({ name: 'scan', args: 'crypto', mentioned: false });
+  });
+  it('strips a matching @mention and lowercases the command', () => {
+    expect(parseCommand('/Signals@TestBot crypto', 'testbot')).toEqual({
+      name: 'signals',
+      args: 'crypto',
+      mentioned: true,
+    });
+  });
+  it('rejects a mention aimed at another bot', () => {
+    expect(parseCommand('/signals@OtherBot', 'testbot')).toBeNull();
+  });
+  it('rejects plain text (chat is handled by inferDesk/agent)', () => {
+    expect(parseCommand('BTC kaisa hai?')).toBeNull();
+    expect(parseCommand('')).toBeNull();
+    expect(parseCommand(null)).toBeNull();
+  });
+});
+
+describe('resolveCommand aliases', () => {
+  it('maps short aliases to canonical handlers', () => {
+    expect(resolveCommand('s')).toEqual({ name: 'status', args: '' });
+    expect(resolveCommand('mtf')).toEqual({ name: 'signals', args: '' });
+    expect(resolveCommand('portfolio')).toEqual({ name: 'positions', args: '' });
+    expect(resolveCommand('push')).toEqual({ name: 'alerts', args: '' });
+    expect(resolveCommand('ask')).toEqual({ name: 'agent', args: '' });
+  });
+  it('gold/silver short-circuit to the metals board', () => {
+    expect(resolveCommand('gold')).toEqual({ name: 'signals', args: 'metals' });
+    expect(resolveCommand('silver')).toEqual({ name: 'signals', args: 'metals' });
+  });
+  it('unknown commands pass through unchanged', () => {
+    expect(resolveCommand('weekly')).toEqual({ name: 'weekly', args: '' });
+  });
+});
+
+describe('marketFromArgs / isMarketArg', () => {
+  it('maps market aliases to board markets', () => {
+    expect(marketFromArgs('crypto')).toBe('CRYPTO');
+    expect(marketFromArgs('btc')).toBe('CRYPTO');
+    expect(marketFromArgs('india')).toBe('INDIA');
+    expect(marketFromArgs('nse')).toBe('INDIA');
+    expect(marketFromArgs('gold')).toBe('METALS');
+    expect(marketFromArgs('futures')).toBe('FUTURES');
+    expect(marketFromArgs('us')).toBe('GLOBALFUTURES');
+  });
+  it('falls back for empty/unknown input (default CRYPTO)', () => {
+    expect(marketFromArgs('')).toBe('CRYPTO');
+    expect(marketFromArgs('gibberish')).toBe('CRYPTO');
+    expect(marketFromArgs('gibberish', 'INDIA')).toBe('INDIA');
+  });
+  it('isMarketArg accepts empty (default board) and known aliases only', () => {
+    expect(isMarketArg('')).toBe(true);
+    expect(isMarketArg('metals')).toBe(true);
+    expect(isMarketArg('definitely-not-a-market')).toBe(false);
+  });
+});
+
+describe('inferDesk', () => {
   it('crypto words → crypto desk', () => {
-    expect(inferDeskFromText('BTC ka setup kaisa hai?')).toBe('crypto');
-    expect(inferDeskFromText('funding rate batao')).toBe('crypto');
+    expect(inferDesk('BTC ka setup kaisa hai?')).toBe('crypto');
+    expect(inferDesk('BTC funding rate batao')).toBe('crypto');
+    expect(inferDesk('XAU gold perp signal batao')).toBe('crypto');
   });
-  it('india words → intraday desk', () => {
-    expect(inferDeskFromText('NIFTY aaj kya karega?')).toBe('intraday');
-    expect(inferDeskFromText('RELIANCE ka setup')).toBe('intraday');
+  it('india words → india desk', () => {
+    expect(inferDesk('NIFTY aaj kya karega?')).toBe('india');
+    expect(inferDesk('RELIANCE ka setup')).toBe('india');
+    expect(inferDesk('SBIN.NS chart')).toBe('india');
   });
-  it('unknown → null (caller keeps its default)', () => {
-    expect(inferDeskFromText('aaj mausam kaisa hai')).toBeNull();
-    expect(inferDeskFromText('')).toBeNull();
-  });
-});
-
-describe('inferMarketForSymbol', () => {
-  it('crypto shapes → CRYPTO', () => {
-    expect(inferMarketForSymbol('B-ETH_USDT')).toBe('CRYPTO');
-    expect(inferMarketForSymbol('BTCUSDT')).toBe('CRYPTO');
-    expect(inferMarketForSymbol('BTCINR')).toBe('CRYPTO');
-    expect(inferMarketForSymbol('sol')).toBe('CRYPTO');
-  });
-  it('US mega-caps → GLOBALFUTURES', () => {
-    expect(inferMarketForSymbol('AAPL')).toBe('GLOBALFUTURES');
-    expect(inferMarketForSymbol('TSLA.NS'.replace('.NS', ''))).toBe('GLOBALFUTURES');
-  });
-  it('everything else → INDIA (NSE default, /api/ai/deep normMarket default)', () => {
-    expect(inferMarketForSymbol('RELIANCE')).toBe('INDIA');
-    expect(inferMarketForSymbol('SBIN.BO'.replace('.BO', ''))).toBe('INDIA');
+  it('unknown/empty → null (caller keeps its default)', () => {
+    expect(inferDesk('aaj mausam kaisa hai')).toBeNull();
+    expect(inferDesk('')).toBeNull();
   });
 });
 
-describe('desk session memory (voice continuity)', () => {
-  it('remembers the desk 30 min; forgets after', () => {
-    rememberDesk('chat1', 'intraday');
-    expect(deskSessionFor('chat1')).toBe('intraday');
-    expect(deskSessionFor('chat2')).toBeNull(); // isolated per chat
-    // simulate expiry
-    const m = (deskSessionFor as any);
-    expect(m).toBeTruthy();
-  });
-  it('non-desk values normalize to crypto', () => {
-    rememberDesk('chat3', 'gibberish');
-    expect(deskSessionFor('chat3')).toBe('crypto');
-  });
-});
-
-describe('siteBridgeReady', () => {
-  it('requires a real API_TOKEN (>=12 chars) — env captured at module load like production', async () => {
-    expect(siteBridgeReady()).toBe(false);
-    // siteSync reads API_TOKEN at import time (exactly how the bot boots
-    // in production) — reload the module graph with the env set
-    vi.resetModules();
-    process.env.API_TOKEN = 'a-really-long-service-token';
-    const mod = await import('../telegram-bot/siteAgents.mjs');
-    expect(mod.siteBridgeReady()).toBe(true);
-    delete process.env.API_TOKEN;
-    vi.resetModules();
-  });
-});
-
-describe('formatters', () => {
-  it('formatBoardLines renders the board header + signal rows', () => {
-    const board = {
-      market: 'CRYPTO',
-      regime: { btcChange: 2.1, btcTrend: 'uptrend' },
-      superIntelMeta: { scored: 30, strongCount: 3, eliteCount: 1 },
-      signals: [
-        { symbol: 'BTC', side: 'LONG', grade: 'STRONG', confidence: 84, superIntel: { aiScore: 88 }, plan: { entry: 100 } },
-      ],
-    };
-    const txt = formatBoardLines(board, { label: 'TEST BOARD' });
-    expect(txt).toMatch(/TEST BOARD/);
-    expect(txt).toMatch(/BTC \+2\.1%/);
+describe('formatBoard', () => {
+  it('renders header, stats and the signal row with plan levels', () => {
+    const txt = formatBoard(board(), { title: 'TEST BOARD', market: 'CRYPTO', now: Date.now() });
+    expect(txt).toContain('TEST BOARD');
+    expect(txt).toContain('CRYPTO');
+    expect(txt).toContain('12 scanned');
     expect(txt).toMatch(/<b>BTC<\/b>/);
-    expect(txt).toMatch(/AI 88/);
+    expect(txt).toContain('ELITE');
+    expect(txt).toContain('PAKKA');
+    expect(txt).toContain('E 67,000.00 USDT');
+    expect(txt).toContain('SL 66,500.00 USDT');
+    expect(txt).toContain('T1 68,000.00 USDT');
   });
-  it('empty board → null (caller falls back)', () => {
-    expect(formatBoardLines({ signals: [] }, { label: 'X' })).toBeNull();
-    expect(formatBoardLines(null, { label: 'X' })).toBeNull();
+
+  it('renders GOLD / SILVER and equity-sim sections, de-duplicated', () => {
+    const txt = formatBoard(board({
+      rows: [],
+      metalsRows: [boardRow({ symbol: 'XAU', plan: { entry: 2745, stopLoss: 2730, t1: 2765, t2: 2790 } })],
+      equitySimRows: [boardRow({ symbol: 'NVDA', tier: 'STRONG', plan: { entry: 138.5, stopLoss: 136.2, t1: 141, t2: 144.5 } })],
+    }), { title: 'X' });
+    expect(txt).toContain('GOLD / SILVER (USDT)');
+    expect(txt).toContain('XAU');
+    expect(txt).toContain('EQUITY SIM (USD)');
+    expect(txt).toContain('NVDA');
   });
-  it('formatDeepTicket renders grade/side/plan + walk-forward + council', () => {
-    const txt = formatDeepTicket({
-      symbol: 'BTC',
-      market: 'CRYPTO',
-      deep: {
-        priceSource: 'coindcx',
-        edge: { trades: 12, winRate: 58, avgR: 1.2, timeframe: '1h' },
-        ltf: { label: 'LTF', rsi: 41, atr: 2.2 },
-        narrative: 'Story of the tape.',
-        signal: {
-          symbol: 'BTC', side: 'LONG', grade: 'STRONG', confidence: 82, ltp: 100, changePct: 1.5,
-          participating: 9, totalModels: 14, agreement: 0.8,
-          plan: { entry: 100, stopLoss: 95, target1: 110, target2: 115, rewardRisk: 3, riskPct: 2 },
-          superIntel: { aiScore: 87 },
-          aiNote: { verdict: 'Bull case wins on momentum', debate: { bull: 'momentum', bear: 'macro risk' } },
-        },
-      },
-    } as any);
-    expect(txt).toMatch(/DEEP SCAN — BTC/);
-    expect(txt).toMatch(/<b>LONG<\/b>/);
-    expect(txt).toMatch(/Entry <b>₹100<\/b>/);
-    expect(txt).toMatch(/Walk-forward: 12 trades/);
-    expect(txt).toMatch(/Bull:/);
-    expect(txt).toMatch(/Bear:/);
+
+  it('metalsOnly renders only the gold/silver section', () => {
+    const txt = formatBoard(board({
+      rows: [],
+      metalsRows: [boardRow({ symbol: 'XAU', plan: { entry: 2745, stopLoss: 2730, t1: 2765, t2: 2790 } })],
+    }), { metalsOnly: true });
+    expect(txt).toContain('GOLD / SILVER (USDT)');
+    expect(txt).toContain('XAU');
+    expect(txt).not.toContain('<b>MAIN</b>');
+  });
+
+  it('empty board → honest "no qualifying setups" (not a fake row)', () => {
+    const txt = formatBoard(board({ rows: [], scannedCount: 3 }), { title: 'X' });
+    expect(txt).toContain('No qualifying setups');
+    expect(txt).not.toMatch(/<b>BTC<\/b>/);
+  });
+
+  it('not-ok board throws the real error (caller renders an honest failure)', () => {
+    expect(() => formatBoard(null)).toThrow(/board unavailable/i);
+    expect(() => formatBoard({ ok: false, error: { message: 'scan failed' } })).toThrow('scan failed');
+  });
+
+  it('row-level failure renders redacted error, never the secret', () => {
+    const txt = formatBoard(board({
+      rows: [boardRow({ ok: false, error: 'api_key=supersecret123 token=abcdef' })],
+    }), { title: 'X' });
+    expect(txt).toContain('[redacted]');
+    expect(txt).not.toContain('supersecret123');
+    expect(txt).not.toContain('abcdef');
   });
 });

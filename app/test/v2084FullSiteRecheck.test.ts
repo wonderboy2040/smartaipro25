@@ -370,10 +370,22 @@ describe('v20.8.4 F. source contracts (deploy/bat/frontend/bot.mjs)', () => {
     expect(h).not.toContain('two-desk');
     expect(h).toContain('JEV Bot Lab');
   });
-  it('bot.mjs: XFF only trusted behind TRUST_PROXY=1 + rate cleanup fixed', () => {
-    const b = read('app/telegram-bot/bot.mjs');
-    expect(b).toContain("TRUST_PROXY === '1'");
-    expect(b).toContain('now - v[v.length - 1] > 60_000'); // the FIXED cleanup condition
+  it('telegram-bot: owner allowlist + confirmation gate + no secrets / direct exchange calls', () => {
+    const bot = read('app/telegram-bot/bot.mjs');
+    const router = read('app/telegram-bot/lib/router.mjs');
+    const commands = read('app/telegram-bot/lib/commands.mjs');
+    const api = read('app/telegram-bot/lib/api.mjs');
+    // owner-only gate (rebuilt bot, f7c6fe7): unknown chats are ignored
+    expect(router).toContain('config.ownerIds.some');
+    expect(router).toContain('owner-only');
+    // dangerous auto/live actions require an inline confirm tap
+    expect(commands).toContain('confirmationResult');
+    // no secret-reading commands
+    expect(commands).not.toMatch(/setkey|debug_env/i);
+    // the site API stays the single source of truth; no exchange calls
+    expect(api).not.toMatch(/api\.binance\.com|api\.coindcx\.com/);
+    // long-polling bot never binds an HTTP port
+    expect(bot).not.toContain('app.listen');
   });
   it('webhook.js: _inflight.add is synchronous and ADJACENT to setImmediate (TOCTOU fix)', () => {
     const w = read('app/server/telegram/webhook.js');

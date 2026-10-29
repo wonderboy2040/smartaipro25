@@ -32,6 +32,23 @@ export { stripThinking };
 // deepseek-r1:14b needs ~2-3 min for a real JSON verdict on a 15GB laptop,
 // so the old 90s budget guaranteed deep-path timeouts. Env-overridable.
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS) || 240_000;
+// v21.27.1 FIX (pro-level recheck): SCAN seats need their own bounded budget.
+// Sharing the 240s deep budget parked a whole board cycle for minutes when
+// the local daemon accepted the request but never generated (observed: board
+// cold scan >120s on INDIA alone; debate = up to 3 calls). 45s keeps the
+// board responsive; a timeout arms the sentinel breaker so later calls in the
+// same cycle fast-fail instead of each paying the full budget.
+const OLLAMA_SCAN_TIMEOUT_MS = Number(process.env.OLLAMA_SCAN_TIMEOUT_MS) || 45_000;
+
+/** Per-call Ollama budget: explicit caller override → deep 240s / scan 45s.
+ *  Env is read at call time so tests/smokes can bound a wedged daemon. */
+function _ollamaTimeoutMs(deep, timeoutMs) {
+  const explicit = Number(timeoutMs);
+  if (Number.isFinite(explicit) && explicit > 0) return explicit;
+  if (deep) return OLLAMA_TIMEOUT_MS;
+  const scanEnv = Number(process.env.OLLAMA_SCAN_TIMEOUT_MS);
+  return Number.isFinite(scanEnv) && scanEnv > 0 ? scanEnv : OLLAMA_SCAN_TIMEOUT_MS;
+}
 
 // v21.0: the local Ollama base (sentinel ke jaisa hi env resolve — ek
 // hi default, dono modules me consistent).
@@ -43,9 +60,10 @@ const OLLAMA_URL = (process.env.OLLAMA_BASE || 'http://127.0.0.1:11434').replace
  *   • Auto-fallback on HTTP 404 (if deepModel isn't pulled, falls back to scan model)
  *   • Auto-retry without format:'json' if a reasoning model returns empty content under grammar lock
  */
-async function askOllamaNative(prompt, { deep = false, images = null, system = null, model = null, timeoutMs = OLLAMA_TIMEOUT_MS } = {}) {
+async function askOllamaNative(prompt, { deep = false, images = null, system = null, model = null, timeoutMs = null } = {}) {
   const cfg = ollamaCompatCfg({ deep });
   const useModel = model || cfg.defModel;
+  const budgetMs = _ollamaTimeoutMs(deep, timeoutMs);
   const ollamaBase = String(cfg.url || '').replace(/\/v1\/chat\/completions$/, '') || OLLAMA_URL;
   const buildBody = (m, useJsonFormat = true) => ({
     model: m,
@@ -70,7 +88,7 @@ async function askOllamaNative(prompt, { deep = false, images = null, system = n
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildBody(useModel, true)),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: AbortSignal.timeout(budgetMs),
   });
   // v21.18.0: agar deep model locally pull nahi hai (HTTP 404), turant
   // scan model pe fallback karo — zero error!
@@ -81,7 +99,7 @@ async function askOllamaNative(prompt, { deep = false, images = null, system = n
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildBody(scanModel, true)),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(budgetMs),
       });
     }
   }
@@ -96,7 +114,7 @@ async function askOllamaNative(prompt, { deep = false, images = null, system = n
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildBody(useModel, false)),
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: AbortSignal.timeout(budgetMs),
   }).catch(() => null);
   if (r2?.ok) {
     const j2 = await r2.json().catch(() => null);
@@ -162,13 +180,13 @@ async function _askOpenCodeLeg(prompt, { deep = false } = {}) {
  * any engine: success clears the breaker, failure arms it, an open
  * cooldown fast-fails.
  */
-async function _askOllamaLeg(prompt, { deep = false } = {}) {
+async function _askOllamaLeg(prompt, { deep = false, timeoutMs = null } = {}) {
   if (engineSkip('ollama')) return { json: null, model: null };
   const reachable = await ollamaProbe().catch(() => false);
   if (!reachable) return { json: null, model: null };
   let json = null, threw = false;
   try {
-    json = await askOllamaNative(prompt, { deep });
+    json = await askOllamaNative(prompt, { deep, timeoutMs });
   } catch (e) {
     threw = true;
     engineTrack('ollama', e);
@@ -201,7 +219,7 @@ export async function councilAsk(prompt, _deps = null, opts = {}) {
     const cloud = await _askOpenCodeLeg(prompt, { deep });
     if (cloud.json) return cloud;
   }
-  return _askOllamaLeg(prompt, { deep });
+  return _askOllamaLeg(prompt, { deep, timeoutMs: opts.timeoutMs });
 }
 
 /**

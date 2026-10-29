@@ -36,8 +36,19 @@ import { isNseMarketOpen, freshEntriesAllowedFor } from '../intraday/time.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
-const CFG_FILE = path.join(DATA_DIR, 'options-auto-config.json');
-const STATE_FILE = path.join(DATA_DIR, 'options-auto-state.json');
+// v21.27.1 FIX (pro-level recheck): test/smoke isolation. optionsAutoEntry.test
+// pehle se OPTIONS_AUTO_SCRATCH set karta tha par module use hi nahi karta —
+// suite REAL server/data/options-auto-*.json likh ke manually restore karti
+// thi (crash = live state corruption). Ab: scratch env > SMARTAI_DATA_DIR >
+// production default. Paths lazy — module load pe env bind nahi hota.
+const _dataDir = () =>
+  process.env.OPTIONS_AUTO_SCRATCH
+    ? path.resolve(process.env.OPTIONS_AUTO_SCRATCH)
+    : process.env.SMARTAI_DATA_DIR
+      ? path.resolve(process.env.SMARTAI_DATA_DIR)
+      : DATA_DIR;
+const CFG_FILE = () => path.join(_dataDir(), 'options-auto-config.json');
+const STATE_FILE = () => path.join(_dataDir(), 'options-auto-state.json');
 
 const DEFAULT_CFG = {
   enabled: false,        // opt-in — user toggle karega (UI/API)
@@ -67,14 +78,14 @@ function _readJson(file, fallback) {
   catch { return { ...fallback }; }
 }
 function _writeJson(file, obj) {
-  try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(file, JSON.stringify(obj, null, 2)); }
+  try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(obj, null, 2)); }
   catch { /* best-effort — runtime state hai, restart pe fresh */ }
 }
 
-export function loadOptionsAutoCfg() { return _readJson(CFG_FILE, DEFAULT_CFG); }
-export function saveOptionsAutoCfg(cfg) { _writeJson(CFG_FILE, cfg); }
+export function loadOptionsAutoCfg() { return _readJson(CFG_FILE(), DEFAULT_CFG); }
+export function saveOptionsAutoCfg(cfg) { _writeJson(CFG_FILE(), cfg); }
 function _loadState() {
-  const s = _readJson(STATE_FILE, DEFAULT_STATE);
+  const s = _readJson(STATE_FILE(), DEFAULT_STATE);
   const today = _todayIST();
   if (s.day !== today) {
     // day rollover — counters reset
@@ -82,7 +93,7 @@ function _loadState() {
   }
   return s;
 }
-function _saveState(s) { _writeJson(STATE_FILE, s); }
+function _saveState(s) { _writeJson(STATE_FILE(), s); }
 
 // ---- status view (API + UI ke liye) ----
 export function optionsAutoStatus() {

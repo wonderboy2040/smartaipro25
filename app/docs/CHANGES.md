@@ -1,5 +1,31 @@
 # Changelog
 
+## v21.27.1 — PRO-LEVEL RECHECK: DATA-DIR ISOLATION + BOUNDED BOARD LLM (2026-10-29)
+
+**User ask: "full site code advance pro level pe recheck karo aur issues fix kardo — sab features/functions working flow theek se kaam kar raha hai kya nhi."**
+
+Patch release. Koi trading behaviour, signal side, entry/SL/targets, leverage, size/qty, Telegram bot ya v1 LOCAL/CLOUD scope nahi badla.
+
+### 1) Hermetic data-dir isolation (real defect, live state touched)
+- `server/ai/mtfAutoLink.js` + `mtfRowLedgerStore.js` sirf `MTF_AUTO_DATA_DIR` dekhte the; `SMARTAI_DATA_DIR` (documented dev/test isolation) ignore hota tha. Ek hermetic smoke ne isliye **REAL `server/data/mtf-auto-config.json` + state + row ledger** likh diya aur auto-trade toggle OFF kar diya. Ab precedence: `MTF_AUTO_DATA_DIR` > `SMARTAI_DATA_DIR` > production default.
+- `optionsAutoEntry.js` paths module-load pe hardcoded the aur uski suite ka `OPTIONS_AUTO_SCRATCH` env read hi nahi hota tha (suite real `options-auto-*.json` backup/restore karti thi). Ab lazy paths: `OPTIONS_AUTO_SCRATCH` > `SMARTAI_DATA_DIR` > default; `_writeJson` bhi sahi dir create karta hai.
+- `phase0Audit.js` read path ko same `SMARTAI_DATA_DIR` fallback diya (audit wahi dir padhe jo runtime likhta hai).
+- **Restore:** smoke ke 2 config audit events hataye, `mtf-auto-config.json` `enabled:true` par wapas (prior 17:29:59 audit value), state `updatedAt` 1793284155822. Live XAU SHORT protective exit jo smoke tick ne kiya (`UC_FLIP_MINIMAL_LOSS_EXIT`, -0.27R) — exchange side effect, code se reverse nahi kiya.
+
+### 2) Bounded board LLM budget (real latency defect)
+- Board Council scan pehle deep seat ka 240s Ollama budget share karta tha. Wedged/slow local daemon par cold board scan minutes tak park ho sakta tha (debate = 3 calls + legacy fallback; observed: INDIA alone >120s).
+- Ab: scan seats `OLLAMA_SCAN_TIMEOUT_MS` default **45s**, deep R1 seat **240s** unchanged. `councilAsk` explicit per-call `timeoutMs` forward karta hai; timeout sentinel breaker arm karke same cycle ke baaki calls fast-fail karta hai.
+- v69 board payload test scan budget 3s par bound karke payload contract verify karta hai (model speed par flaky nahi).
+
+### 3) Locks + gates
+- New `test/dataDirIsolation2127.test.ts` (5 locks): MTF config/state/ledger + options config sandbox me, real files byte-identical; explicit overrides still win.
+- New `test/llmScanBudget2127.test.ts` (3 locks): hung `/api/chat` caller budget par abort, scan 45s / deep 240s split, deep model lane intact.
+- `test/optionsAutoEntry.test.ts` ab scratch dir hi use karta hai (real files touch nahi).
+- `test/cryptoAgent.test.ts` hermetic pin: keyless local Ollama ko probe-off mock kiya (no-keys contract host ke Ollama install par depend nahi karta).
+- Rewritten bot/honesty suites retained: 142/142.
+- **Full suite: 245 files / 4550 tests ✓** · `npm run typecheck` ✓ · `npm run lint` ✓ · `npm run check:version` ✓ (21.27.1) · `npm run build` ✓ · `npm run check:routes` ✓.
+- Hermetic boot (v21.27.1, port 18080, sirf `SMARTAI_DATA_DIR`): mode runtime→file restart-safe, bot SiteApi contracts + renderers green, real `server/data` MTF/options files hash+mtime byte-identical.
+
 ## v21.27.0 — SITE-WIDE LOCAL / CLOUD AI SWITCH (2026-10-29)
 
 **User ask: "site-level ek minimal LOCAL/CLOUD switch — LOCAL = local Ollama, CLOUD = OpenCode free models pehle + Ollama fallback; trading behaviour bilkul same."**

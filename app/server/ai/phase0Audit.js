@@ -27,7 +27,11 @@ import { normalizeSide } from './directionCertificate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
-const _dataDir = () => process.env.MTF_AUTO_DATA_DIR || DATA_DIR;
+// v21.27.1: SMARTAI_DATA_DIR fallback — audit reads wahi dir jo runtime
+// (mtfAutoLink) use karta hai, warna isolated boot real state report karta.
+const _dataDir = () =>
+  process.env.MTF_AUTO_DATA_DIR ||
+  (process.env.SMARTAI_DATA_DIR ? path.resolve(process.env.SMARTAI_DATA_DIR) : DATA_DIR);
 
 const CACHE_MS = 30_000;
 let _cache = null;

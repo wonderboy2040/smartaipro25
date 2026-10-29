@@ -41,7 +41,8 @@ const src = {
   panel: S('src/components/aitrading/ProTraderAutoPanel.tsx'),
   useAIT: S('src/components/aitrading/useAITrading.ts'),
   sw: S('public/sw.js'),
-  market: S('telegram-bot/market.mjs'),
+  botApi: S('telegram-bot/lib/api.mjs'),
+  botCommands: S('telegram-bot/lib/commands.mjs'),
   calibrate: S('scripts/botlab-calibrate.mjs'),
   compose: S(path.join('..', 'deploy', 'docker-compose.yml')),
   pkg: JSON.parse(S('package.json')),
@@ -445,9 +446,13 @@ describe('M. data & LLM robustness', () => {
     expect(src.data).toMatch(/indicatorsDegraded/);
     expect(src.data).toMatch(/const S = \(v\) => \(scale != null && v != null \? v \* scale : null\);/);
   });
-  it('llmChain: non-2xx throws a status-coded error (sentinel ladder live)', () => {
-    expect(src.llmChain).toMatch(/throw new Error\(`\$\{provider\} http \$\{r\.status\}`\);/);
-    expect(src.llmChain).toMatch(/lastErr = new Error\(`gemini http \$\{r\.status\}`\); continue;/);
+  it('llmChain: mode-aware OpenCode→Ollama leg (no paid providers), HTTP errors status-coded', () => {
+    // v21.27 LOCAL/CLOUD switch: paid providers removed from this chain.
+    expect(src.llmChain).toContain("import { getAiMode } from './aiMode.js'");
+    expect(src.llmChain).toContain('askOpenCode');
+    expect(src.llmChain).toMatch(/throw new Error\(`ollama http \$\{r\.status\}`\);/);
+    expect(src.llmChain).not.toMatch(/generativelanguage\.googleapis\.com/);
+    expect(src.llmChain).not.toMatch(/api\.groq\.com|api\.cerebras\.ai|openrouter\.ai/);
   });
   it('tradingCosts: remaining entry-side fees counted WITHOUT lastPrice', async () => {
     const m = await import('../server/ai/tradingCosts.js') as { estimateRoundTripCostForTrade?: unknown } & Record<string, unknown>;
@@ -487,9 +492,11 @@ describe('N. frontend & ops', () => {
     expect(src.mcpTools).toMatch(/priceSource: 'stale-fallback/);
     expect(src.mcpTools).toMatch(/priceWarning/);
   });
-  it('telegram market.mjs routes BINANCE: tickers to the crypto scanner batch', () => {
-    expect(src.market).toMatch(/cryptoTickers\.push\(t\)/);
-    expect(src.market).toMatch(/scanBatch\('crypto', cryptoTickers\)/);
+  it('rebuilt telegram bot: delegates market data to the site API (no direct exchange calls)', () => {
+    expect(src.botApi).toContain("'/api/ai/mtf-dual/board'");
+    expect(src.botApi).not.toMatch(/api\.binance\.com|api\.coindcx\.com/);
+    expect(src.botCommands).toContain('marketFromArgs');
+    expect(src.botCommands).not.toMatch(/cryptoTickers\.push|scanBatch\('crypto'/);
   });
   it('docker backup sidecar snapshots ai-trading-config.json (risk envelope)', () => {
     expect(src.compose).toContain('ai-trading-config.json');
