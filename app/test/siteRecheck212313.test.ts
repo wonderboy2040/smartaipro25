@@ -381,7 +381,7 @@ describe('v21.23.13 D5 — directionLiveCert cdc-official chain', () => {
   it('skipNetwork payload is honest (version stamp current)', async () => {
     const cert = await runLiveDirectionCertificate({ skipNetwork: true });
     expect(cert.pass).toBe(true);
-    expect(cert.version).toBe('v21.27.1'); // was v21.23.17
+    expect(cert.version).toBe('v21.27.2'); // was v21.23.17
     expect(cert.chains).toEqual([]);
   });
 
@@ -396,12 +396,12 @@ describe('v21.23.13 D5 — directionLiveCert cdc-official chain', () => {
 // D6 — VERSION + STAMP AGREEMENT (release gate)
 // ============================================================
 describe('v21.23.18 D6 — version stamps', () => {
-  it('package.json === src/version.ts === 21.27.1; watchdog bat stamped, no stale versions', () => {
+  it('package.json === src/version.ts === 21.27.2; watchdog bat stamped, no stale versions', () => {
     const pkg = JSON.parse(read('package.json'));
-    expect(pkg.version).toBe('21.27.1');
-    expect(read('src/version.ts')).toContain("APP_VERSION = '21.27.1'");
+    expect(pkg.version).toBe('21.27.2');
+    expect(read('src/version.ts')).toContain("APP_VERSION = '21.27.2'");
     const bat = read('Start-SmartAI-Watchdog.bat');
-    expect(bat).toContain('v21.27.1');
+    expect(bat).toContain('v21.27.2');
     expect(bat).not.toContain('v21.23.14');
     expect(bat).not.toContain('v21.23.12');
     expect(bat).not.toContain('v21.23.11');

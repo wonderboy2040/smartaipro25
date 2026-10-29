@@ -365,7 +365,18 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     && auto?.executionMode === 'live'
     && deskReadiness?.ready === true;
   const liveExecEnabled = canLive || engineLiveReady;
-  const canArmLive = liveExecEnabled && (!auto?.deskArmable || deskArmable?.armable === true);
+  // v21.27.2 [LIVE BUTTON CAN ARM]: `deskArmable.crypto` is the server's
+  // honest "arming prerequisites met" signal (desk on + kill switch off +
+  // CoinDCX creds). The old guard demanded liveExecEnabled BEFORE arming, so
+  // an unarmed crypto desk could never use this button — it always said
+  // "arm it in the desk console first". The button now arms crypto LIVE
+  // itself (server still enforces typed-LIVE + creds); India stays
+  // typed-LIVE-only and GLOBALFUTURES stays PAPER-only.
+  const cryptoClickArmable = deskKey === 'crypto'
+    && market !== 'GLOBALFUTURES'
+    && deskArmable?.armable === true;
+  const canArmLive = (!auto?.deskArmable || deskArmable?.armable === true)
+    && (liveExecEnabled || cryptoClickArmable);
   // v21.23.18 [STABLE LIVE + HONEST READINESS]:
   // Pehle isLiveAuto volatile `autoFresh` + `deskReadiness.ready` par depend
   // karta tha — ek slow /status poll ya India typed-LIVE arming missing hone
@@ -556,20 +567,42 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
 
   /** ⚡ SINGLE LIVE BUTTON — turns ON Auto-Trade Intelligence, fetches CoinDCX Wallet, deploys 100% of it on strictly 1 Verified Strong Trade per session, and takes Full Control! */
   const onAutoLiveExecute = useCallback(async () => {
-    if (!liveExecEnabled) {
-      notify(false, '⛔ LIVE execution is not enabled for this desk/tab — arm it in the desk console first.');
-      return;
-    }
-    const status = auto ?? await loadAuto();
+    // v21.27.2: when the site is not live yet, refresh readiness before any
+    // arm attempt — stale status must never arm against old prerequisites.
+    const status = (!liveExecEnabled || !auto) ? ((await loadAuto()) ?? auto) : auto;
     if (status?.liveEntryPaused) {
       notify(false, `⏸ LIVE entries Phase 0 me PAUSED hain — pehle "RESUME ENTRIES" dabao. Existing positions ka SL management chalu hai.`);
       return;
     }
     const arm = status?.deskArmable?.[deskKey];
+    if (!liveExecEnabled) {
+      if (market === 'GLOBALFUTURES') {
+        notify(false, '⛔ GLOBALFUTURES SIM desk PAPER-only hai — LIVE execution available nahi. (LIVE button crypto/India desks ke liye hai.)');
+        return;
+      }
+      if (deskKey !== 'crypto') {
+        notify(false, `⛔ LIVE execution is not enabled for this desk/tab — ${arm?.why || 'India console me typed LIVE se arm karo (crypto se alag).'}`);
+        return;
+      }
+      if (arm?.armable !== true) {
+        notify(false, `⛔ LIVE arm blocked — ${arm?.why || 'server desk readiness unavailable — refresh karo ya desk console me prerequisites check karo'}`);
+        return;
+      }
+      // The click is the user's LIVE intent, but it arms REAL orders — keep
+      // an explicit confirm (same safety class as RESUME ENTRIES).
+      const ok = typeof window === 'undefined' || window.confirm(
+        `⚡ CRYPTO LIVE arm karein? REAL CoinDCX orders possible honge — ${walletDeployPct}% wallet (₹${deployed95WalletINR.toLocaleString('en-IN')}) @ ${activeLeverage}x, 1% risk/trade, 1 session = 1 trade. Server typed-LIVE + creds verify karega.`,
+      );
+      if (!ok) return;
+    }
     if (status?.deskArmable && arm?.armable === false) {
       notify(false, `⛔ LIVE arm blocked — ${arm.why || 'LIVE prerequisites are not met'}`);
       return;
     }
+    // The MTF config route below syncs the crypto site LIVE with the typed
+    // phrase once creds exist; remember whether THIS click had to arm it so
+    // the response can be verified honestly.
+    const clickArmedCrypto = !liveExecEnabled && deskKey === 'crypto';
     setBusy(true);
     try {
       const cfgPatch: Record<string, unknown> = {
@@ -625,6 +658,16 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
         await loadAuto();
         setBusy(false); return;
       }
+      // v21.27.2: if THIS click had to arm crypto, verify the server really
+      // flipped the site LIVE — never claim success on an unconfirmed arm.
+      if (clickArmedCrypto) {
+        const rd = stArm?.deskReady?.[deskKey];
+        if (rd && rd.ready !== true) {
+          notify(false, `⛔ CRYPTO LIVE arm server ne confirm nahi kiya — ${rd.why || 'site LIVE still off'}. LIVE ON nahi hua. Retry karo.`);
+          await loadAuto();
+          setBusy(false); return;
+        }
+      }
 
       // Strictly 1 trade per session: if an active LIVE position is already
       // open, do NOT place a 2nd trade! PAPER test rows live lock nahi khaate.
@@ -673,7 +716,7 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     } finally {
       setBusy(false);
     }
-  }, [mode, holdMin, minScore, activeLeverage, walletDeployPct, effectiveWalletINR, deployed95WalletINR, liveFutMarginCcy, activeLiveRows, auto, liveExecEnabled, deskKey, notify, loadAuto, applyAutoStatus]);
+  }, [mode, holdMin, minScore, activeLeverage, walletDeployPct, effectiveWalletINR, deployed95WalletINR, liveFutMarginCcy, activeLiveRows, auto, liveExecEnabled, deskKey, market, notify, loadAuto, applyAutoStatus]);
 
   /** v21.24.0 PHASE 0 — live entries pause/resume. Pause is instant; resume
    *  needs explicit confirmation because it re-arms real-money entries. */

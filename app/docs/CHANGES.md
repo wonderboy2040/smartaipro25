@@ -1,5 +1,32 @@
 # Changelog
 
+## v21.27.2 — MTF DUAL BOARD LIVE BUTTON FIX: CLICK CAN ARM CRYPTO LIVE (2026-10-30)
+
+**User ask: "sirf isko theek kardo localhost me run karke dekho button"** — MTF Dual Board ka ⚡ LIVE button har baar `LIVE execution is not enabled for this desk/tab — arm it in the desk console first` par ruk raha tha.
+
+Patch release. Signal side, entry, SL, targets, leverage, size/qty aur Telegram bot behaviour **nahi badla**. GLOBALFUTURES abhi bhi PAPER-only, India abhi bhi apni alag typed-LIVE arming maangta hai.
+
+### Root cause
+- `MTFDualBoardPanel.tsx` ka guard pehle `liveExecEnabled` demand karta tha, phir hi arm karne deta tha — lekin button ka kaam hi LIVE arm karna hai. Crypto desk armable (`deskArmable.crypto.armable=true`: desk ON + kill switch OFF + CoinDCX creds) hone par bhi `canLive` / `engineLiveReady` false the, isliye button disabled + misleading "desk console first" error.
+- Server `/api/ai/mtf-auto/config` already MTF `executionMode:'live'` par crypto site LIVE ko typed phrase (`liveConfirmPhrase:'LIVE'`) ke saath sync karta tha — UI guard us route tak pahunchne hi nahi deta tha.
+
+### Fix (`src/components/aitrading/MTFDualBoardPanel.tsx`)
+- Naya `cryptoClickArmable` = crypto desk + non-GLOBALFUTURES + `deskArmable.armable === true`. `canArmLive` ab is par bhi true hota hai, sirf `liveExecEnabled` par nahi.
+- Click par jab site live not armed ho: fresh `/status` readiness fetch, phir:
+  - crypto armable → explicit REAL-orders confirm → existing MTF config save (server typed-LIVE site sync) → toggle → post-arm `deskReady` verification. Agar server arm confirm na kare to `CRYPTO LIVE arm server ne confirm nahi kiya` + LIVE ON claim nahi.
+  - crypto not armable → server ka exact `arm.why` (jaise CoinDCX keys not connected).
+  - India → `arm.why` (typed-LIVE India console), auto-arm bilkul nahi.
+  - GLOBALFUTURES → honest PAPER-only message.
+- Button disabled-state ab armable crypto par enable hota hai; creds missing par disabled + amber `deskArmable.why` (pehle reason invisible tha).
+- `NEW test/mtfLiveArm21272.test.ts` (5 locks): armable enable path, server typed-phrase sync, India/GLOBALFUTURES no-auto-arm, unconfirmed-arm abort, honest armability reason.
+
+### Localhost verification (isolated, no real data/orders)
+- Isolated `SMARTAI_DATA_DIR` + minimal `DOTENV_CONFIG_PATH` (no real Telegram/providers), server on 8080 + Vite on 5173, headless Chrome CDP.
+- Armable crypto (dummy creds, `/tick` browser-stubbed only): before click `⚡ LIVE` **enabled**; click → confirm → `🟢 LIVE ON (5x · 100% WALLET)`; server `mode:'live'`, `executionMode:'live'`, `deskReady.crypto.ready:true`, `siteLiveByDesk.crypto:true`. Real `server/data` MTF config/state mtime unchanged.
+- No CoinDCX creds: button **disabled**, title + amber warning = exact `CoinDCX API keys not connected — add COINDCX_API_KEY + COINDCX_SECRET...`; no old desk-console hint.
+- Focused suites: `siteRecheck212313` + `recheck212315` 41/41, new `mtfLiveArm21272` 5/5.
+- **Full suite: 246 files / 4555 tests ✓** · `npm run typecheck` ✓ · `npm run lint` ✓ · `npm run check:version` ✓ (21.27.2) · `npm run build` ✓ (stamp 21.27.2) · `npm run check:routes` ✓.
+
 ## v21.27.1 — PRO-LEVEL RECHECK: DATA-DIR ISOLATION + BOUNDED BOARD LLM (2026-10-29)
 
 **User ask: "full site code advance pro level pe recheck karo aur issues fix kardo — sab features/functions working flow theek se kaam kar raha hai kya nhi."**
