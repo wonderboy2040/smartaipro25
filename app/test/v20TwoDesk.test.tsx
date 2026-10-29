@@ -89,12 +89,16 @@ describe('v20.0 useAuthState — auth + heartbeat contracts', () => {
     expect(src).not.toMatch(/VITE_SECURE_PIN/);
   });
 
-  it('heartbeat: /api/ping, 30s interval, 4s abort timeout', () => {
+  it('heartbeat: /api/ping, 30s LIVE interval, 3s retry, 8s abort timeout, boot grace', () => {
     const src = read('src/hooks/useAuthState.ts');
     expect(src).toMatch(/HEARTBEAT_MS = 30_000/);
-    expect(src).toMatch(/HEARTBEAT_TIMEOUT_MS = 4_000/);
+    expect(src).toMatch(/HEARTBEAT_RETRY_MS = 3_000/);
+    expect(src).toMatch(/HEARTBEAT_TIMEOUT_MS = 8_000/);
+    expect(src).toMatch(/BOOT_GRACE_MS = 90_000/);
     expect(src).toMatch(/\/api\/ping/);
     expect(src).toMatch(/AbortController/);
+    // v21.26.7: background tab se wapas aate hi turant re-check
+    expect(src).toMatch(/visibilitychange/);
   });
 
   it('session restore is instant (no await before setIsAuthenticated)', () => {

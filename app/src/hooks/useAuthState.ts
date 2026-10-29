@@ -21,7 +21,12 @@ export type BackendStatus = 'checking' | 'live' | 'down';
 export type Theme = 'dark' | 'light';
 
 const HEARTBEAT_MS = 30_000;
-const HEARTBEAT_TIMEOUT_MS = 4_000;
+const HEARTBEAT_RETRY_MS = 3_000;
+const HEARTBEAT_TIMEOUT_MS = 8_000;
+// Watchdog ke neeche server pehla request answer karne me ~45-60s leta hai.
+// Itne waqt me "SERVER DOWN" dikhana galat hai — page pehle 90s "CHECKING"
+// rehta hai, phir hi DOWN (server genuinely band ho to).
+const BOOT_GRACE_MS = 90_000;
 
 export function useAuthState() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -140,37 +145,96 @@ export function useAuthState() {
     apiFetch(`${getProxyBase()}/api/auth/logout`, { method: 'POST' }).catch(() => { /* best-effort */ });
   }, []);
 
-  // --- backend heartbeat: ONE zero-work ping per 30s ---
+  // --- backend heartbeat: ONE zero-work ping per 30s while LIVE ---
   // This is also what the external anti-freeze supervisor probes —
   // the shell status dot and the supervisor share the same truth.
+  //
+  // v21.26.7 WATCHDOG-BOOT FIX ("Start-SmartAI-Watchdog.bat ke baad SERVER
+  // DOWN"): the supervised server boot (~45-60s) se pehle koi request answer
+  // nahi karta, aur background tab me Chrome purana 30s interval throttle kar
+  // deta hai (1 tick/min) — badge minutes tak DOWN atka rehta tha bhale server
+  // UP ho chuka ho. Ab: NOT-LIVE par har 3s retry, 8s ping timeout (busy boot
+  // loop), pehle 90s "CHECKING" (false DOWN nahi), aur tab visible/focused
+  // hote hi turant ek beat. LIVE steady-state wahi 1 ping / 30s.
   const hbRef = useRef<number | null>(null);
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
+    let wasLive = false;
+    let fails = 0;
+    const startedAt = Date.now();
+
+    const schedule = (ms: number) => {
+      if (cancelled) return;
+      if (hbRef.current) window.clearTimeout(hbRef.current);
+      hbRef.current = window.setTimeout(beat, ms);
+    };
+
     const beat = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
       const ctl = new AbortController();
-      const kill = setTimeout(() => ctl.abort(), HEARTBEAT_TIMEOUT_MS);
+      const kill = window.setTimeout(() => ctl.abort(), HEARTBEAT_TIMEOUT_MS);
+      let next = HEARTBEAT_RETRY_MS;
       try {
-        const res = await fetch(`${getProxyBase()}/api/ping`, { signal: ctl.signal });
-        if (!cancelled) setBackend(res.ok ? 'live' : 'down');
-        // v20.8.3: version capture — ping zero-work hai, `v` bhi wahi JSON me
-        // aata hai (koi extra request nahi). Shape change = silent ignore.
+        const res = await fetch(`${getProxyBase()}/api/ping`, { signal: ctl.signal, cache: 'no-store' });
+        if (cancelled) return;
         if (res.ok) {
+          wasLive = true;
+          fails = 0;
+          setBackend('live');
+          next = HEARTBEAT_MS;
+          // v20.8.3: version capture — ping zero-work hai, `v` bhi wahi JSON me
+          // aata hai (koi extra request nahi). Shape change = silent ignore.
           try {
             const d = await res.json();
             if (d && typeof d.v === 'string' && d.v) setServerVersion(d.v);
           } catch { /* ping shape change — ignore */ }
+        } else {
+          // Server ne HTTP answer diya par healthy nahi — ye DOWN hai.
+          fails++;
+          setBackend('down');
         }
       } catch {
-        if (!cancelled) setBackend('down');
+        if (!cancelled) {
+          fails++;
+          if (wasLive) {
+            // v21.26.7: ek transient timeout (heavy tick) badge ko turant
+            // DOWN na kare — 3s me recheck, do lagatar fail par DOWN.
+            if (fails >= 2) setBackend('down');
+          } else if (Date.now() - startedAt < BOOT_GRACE_MS) {
+            setBackend('checking');
+          } else {
+            setBackend('down');
+          }
+        }
       } finally {
-        clearTimeout(kill);
+        inFlight = false;
+        window.clearTimeout(kill);
+        schedule(next);
       }
     };
+
+    // Background tab se wapas aate hi status turant sach dikhe (throttled
+    // timer ka intezaar nahi).
+    const wake = () => {
+      if (cancelled || inFlight) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      schedule(0);
+    };
+
     beat();
-    hbRef.current = window.setInterval(beat, HEARTBEAT_MS);
+    document.addEventListener('visibilitychange', wake);
+    window.addEventListener('online', wake);
+    window.addEventListener('focus', wake);
+    window.addEventListener('pageshow', wake);
     return () => {
       cancelled = true;
-      if (hbRef.current) { clearInterval(hbRef.current); hbRef.current = null; }
+      if (hbRef.current) { window.clearTimeout(hbRef.current); hbRef.current = null; }
+      document.removeEventListener('visibilitychange', wake);
+      window.removeEventListener('online', wake);
+      window.removeEventListener('focus', wake);
+      window.removeEventListener('pageshow', wake);
     };
   }, []);
 
