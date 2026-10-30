@@ -415,12 +415,12 @@ describe('v20.8.3 frontend stale-build visibility', () => {
     const m = VERSION_TS.match(/APP_VERSION = '([^']+)'/);
     expect(m).toBeTruthy();
     expect(m![1]).toBe(PKG.version);
-    expect(PKG.version).toBe('21.29.0'); // v21.29.0 minor (R0a–R11 audit completion)
+    expect(PKG.version).toBe('21.29.1'); // v21.29.1 patch (CoinDCX mandatory IP binding)
   });
 
-  it('Watchdog bat: v21.29.0 stamps + auto-build line + NO stale version stamps', () => {
+  it('Watchdog bat: v21.29.1 stamps + auto-build line + NO stale version stamps', () => {
     const bat = readFileSync(path.join(APP_ROOT, 'Start-SmartAI-Watchdog.bat'), 'utf8');
-    expect(bat).toContain('v21.29.0');
+    expect(bat).toContain('v21.29.1');
     expect(bat).not.toContain('v21.23.14');
     // v21.23.12 [D3]: title/REM lines me STALE stamps chhupe the (banner hi
     // bumped hota tha) — console window title purana version dikhata tha.

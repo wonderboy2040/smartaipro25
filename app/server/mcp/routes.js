@@ -21,6 +21,7 @@
 //   POST /api/mcp/coindcx/connect      → save + validate API keys
 //   POST /api/mcp/coindcx/disconnect   → forget keys + drop assets
 //   GET  /api/mcp/coindcx/status       → connection + last balance sync
+//   GET  /api/mcp/coindcx/ip           → server outbound IPv4 for IP binding
 //
 //   Tapetide (India stock-research MCP, v4.7):
 //   GET  /api/mcp/tapetide/status      → connection + tools catalog state
@@ -46,6 +47,7 @@ import {
 } from './coindcx.js';
 import { getSettings, setSetting } from './settings.js';
 import { durableStatus } from './durable.js';
+import { getOutboundIPv4 } from '../lib/outboundIp.js';
 import * as tapetide from './tapetide.js';
 
 const router = Router();
@@ -311,6 +313,26 @@ router.post('/api/mcp/indmoney/sync', async (req, res) => {
 router.get('/api/mcp/coindcx/status', (_req, res) => {
   try {
     res.json({ ok: true, ...coindcxStatus(), durable: durableStatus() });
+  } catch (err) { return fail(res, err); }
+});
+
+// v21.29.1 CoinDCX IP-binding helper: the API Dashboard needs the
+// server's public IPv4, and Node can egress from more than one address
+// (IPv6/NAT64 vs IPv4). This returns the SAME family:4 address the
+// signed private calls are pinned to, so the operator can copy it.
+router.get('/api/mcp/coindcx/ip', async (_req, res) => {
+  try {
+    if (rateLimited('coindcx-ip')) throw new IndmError('Too many requests — try again shortly', 429, 'RATE_LIMITED');
+    const ip = await getOutboundIPv4({ refresh: true });
+    return res.json({
+      ok: true,
+      ip: ip || null,
+      ipv4: ip || null,
+      checkedAt: Date.now(),
+      hint: ip
+        ? `CoinDCX → Profile → API Dashboard → purani key DELETE → naya key banayein → ${ip} bind karein → COINDCX_API_KEY + COINDCX_SECRET update karke server restart.`
+        : 'Outbound IPv4 detect nahi hua — server par `npm run coindcx:check` chalayein.',
+    });
   } catch (err) { return fail(res, err); }
 });
 

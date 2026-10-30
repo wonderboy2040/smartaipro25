@@ -22,18 +22,32 @@
 // stream + /api/crypto-prices (one cached upstream fetch, see
 // server/cryptoStream.js) — no extra load on the 0.1-vCPU box.
 //
-// NOTE (v21.1.0 — stale comment corrected): the API key needs
-// view/balance + TRADE permission (orders YAHAN se hi jaate hain —
-// coindcxOrders.js / futures.js / proTraderAuto.js). Withdrawal
-// permission OFF rakho + CoinDCX dashboard me IP whitelist ON karo.
+// NOTE (v21.29.1 — CoinDCX 28 Oct 2026 security update): the API
+// key needs view/balance + TRADE permission (orders YAHAN se hi jaate
+// hain — coindcxOrders.js / futures.js / proTraderAuto.js). Withdrawal
+// permission OFF rakho. IP binding ab MANDATORY hai: CoinDCX API
+// Dashboard me purani key DELETE karke NAYI key banayein aur is
+// server ka outbound IPv4 bind karein (`npm run coindcx:check` wahi
+// address print karta hai). Purani/bina-bound key ab generic
+// "401 Invalid credentials" deti hai.
 // Agar sirf pricing/balance chahiye to read-only key bhi chalega —
 // par LIVE trading modes us key se fire nahi honge.
 // ============================================================
 import crypto from 'node:crypto';
+import dns from 'node:dns';
 import https from 'node:https';
 import { loadJSON, saveJSON } from '../lib/store.js';
 import { fetchCoinDcxTickers } from '../cryptoStream.js';
 import { durablePut } from './durable.js';
+import { getOutboundIPv4, getCachedOutboundIPv4 } from '../lib/outboundIp.js';
+
+// v21.29.1 IP-BINDING PIN: CoinDCX binds an IPv4 address, but Node's
+// fetch/DNS can prefer IPv6 (live incident: same box egressed from
+// 152.57.142.92 over the default path and 152.57.132.146 over IPv4).
+// `ipv4first` keeps every authenticated REST call on the address the
+// operator actually pasted into the CoinDCX dashboard. Ignored safely
+// on very old Node versions.
+try { dns.setDefaultResultOrder('ipv4first'); } catch { /* Node < 17 */ }
 
 const CREDS_FILE = 'mcp-coindcx.json';
 const API_BASE = 'https://api.coindcx.com';
@@ -157,6 +171,23 @@ export function coindcxStatus() {
   };
 }
 
+// ---------------- auth-error IP-binding hint ----------------
+// CoinDCX returns the SAME generic "Invalid credentials" body for a
+// wrong secret AND for an IP that is not bound to the key. The 28 Oct
+// 2026 update made IP binding mandatory, so every 401/403 gets an
+// actionable suffix with the server's cached outbound IPv4 (no extra
+// network call on the error path — the boot check/route warms it).
+function ipBindingAuthHint() {
+  const ip = getCachedOutboundIPv4();
+  return ip
+    ? `CoinDCX IP binding mandatory (28 Oct 2026): server ka outbound IPv4 ${ip} CoinDCX API Dashboard me bind karke NAYA key banayein (purani key DELETE), phir COINDCX_API_KEY + COINDCX_SECRET update karein`
+    : 'CoinDCX IP binding mandatory (28 Oct 2026): server ka outbound IPv4 `npm run coindcx:check` se dekhein, usi IP ko CoinDCX API Dashboard me bind karke NAYA key banayein (purani key DELETE), phir COINDCX_API_KEY + COINDCX_SECRET update karein';
+}
+function apiErrorMessage(status, msg) {
+  const base = `[${status}] ${String(msg).slice(0, 180)}`;
+  return status === 401 || status === 403 ? `${base} — ${ipBindingAuthHint()}` : base;
+}
+
 // ---------------- signed private REST call ----------------
 // CoinDCX auth: JSON body MUST include `timestamp` (ms epoch);
 // signature = HMAC-SHA256(secret, exact request body string) hex;
@@ -183,7 +214,7 @@ export async function coindcxPrivate(path, apiKey, secret, body = {}) {
     // Status prefix so a 404/401 is unmistakable in user-facing errors
     // ("[404] ..." = CoinDCX endpoint, vs a body-less route 404 = the app
     // is running on a static mirror — see StaticMirrorBanner).
-    const err = new Error(`[${r.status}] ${String(msg).slice(0, 180)}`);
+    const err = new Error(apiErrorMessage(r.status, msg));
     err.status = r.status;
     throw err;
   }
@@ -232,6 +263,9 @@ function _httpsGetJson(path, headers, bodyStr) {
       hostname: API_HOST,
       path,
       method: 'GET',
+      // IP-binding pin: always leave from the IPv4 address the operator
+      // bound in CoinDCX (Node may otherwise pick an IPv6/NAT64 egress).
+      family: 4,
       headers: {
         ...headers,
         ...(bodyBuf ? { 'Content-Length': bodyBuf.length } : {}),
@@ -320,7 +354,7 @@ export async function coindcxPrivateGET(path, apiKey, secret, params = {}, { uni
   }
   if (!r.ok) {
     const msg = (r.json && (r.json.message || r.json.error || r.json.error_description)) || `CoinDCX API ${r.status}`;
-    const err = new Error(`[${r.status}] ${String(msg).slice(0, 180)}`);
+    const err = new Error(apiErrorMessage(r.status, msg));
     err.status = r.status;
     throw err;
   }
@@ -434,10 +468,16 @@ export function coindcxDisconnect() {
 //   • no saved creds + BOTH env sides present → validate with a REAL
 //     balances call (the same coindcxConnect the UI uses) + persist →
 //     the whole app wakes up connected, exactly like a UI connect.
-//   • saved creds already present → env is IGNORED (the UI store wins;
-//     a user who connected via UI keeps that identity).
+//   • saved creds already present AND identical to .env → no reconnect.
+//   • v21.29.1 IP-BINDING UPDATE: saved creds DIFFER from .env → the
+//     .env pair is the operator's newer key and is validated + persisted.
+//     Before this, the old saved key silently won and a freshly created
+//     IP-bound key in .env was never even tried (the live user report).
 //   • env keys invalid → one loud log line, app continues in paper
-//     mode (never a brick — the v18.8.1 Telegram lesson).
+//     mode (never a brick — the v18.8.1 Telegram lesson). Auth failures
+//     (401/403) are NOT persisted as fake "connected" creds — CoinDCX
+//     now returns 401 for an unbound IP too, so a false LIVE badge would
+//     be dangerous.
 //   • memoized: one attempt per process, even when callers race.
 const ENV_KEY_NAMES = ['COINDCX_API_KEY', 'COINDCX_KEY', 'COINDCX_APIKEY', 'COINDCX_PUBLIC_KEY'];
 const ENV_SECRET_NAMES = ['COINDCX_SECRET', 'COINDCX_API_SECRET', 'COINDCX_SECRET_KEY', 'COINDCX_PRIVATE_KEY'];
@@ -451,6 +491,17 @@ export function coindcxEnvCreds() {
 }
 
 let _envBootPromise = null;
+
+/** Best-effort boot line: the exact IPv4 the operator must bind. */
+function _logOutboundIp(log) {
+  void getOutboundIPv4()
+    .then((ip) => {
+      if (ip) log(`[coindcx-env] server outbound IPv4 = ${ip} — CoinDCX API Dashboard me YAHI IP bind karke NAYA key banayein (IP binding mandatory since 28 Oct 2026). Verify: npm run coindcx:check`);
+      else log('[coindcx-env] outbound IPv4 detect nahi hua — `npm run coindcx:check` chalayein, wahan dikha IPv4 CoinDCX API Dashboard me bind karein');
+    })
+    .catch(() => { /* best-effort only */ });
+}
+
 /**
  * Boot-time env connect. `log` = console-line sink; `connector` is
  * injectable for hermetic tests (defaults to the REAL coindcxConnect).
@@ -459,25 +510,39 @@ let _envBootPromise = null;
 export function coindcxEnvBootstrap(log = () => {}, { connector } = {}) {
   if (_envBootPromise) return _envBootPromise;
   const connect = connector || coindcxConnect;
+  const logIp = () => { if (!connector) _logOutboundIp(log); };
   _envBootPromise = (async () => {
-    if (coindcxConnected()) {
-      log('[coindcx-env] already connected (saved creds) — .env COINDCX keys ignored');
+    const saved = loadCreds();
+    const savedConnected = !!(saved && typeof saved.apiKey === 'string' && saved.apiKey && typeof saved.secret === 'string' && saved.secret);
+    const creds = coindcxEnvCreds();
+    const sameAsSaved = !!(savedConnected && creds && creds.apiKey === saved.apiKey && creds.secret === saved.secret);
+
+    if (savedConnected && (!creds || sameAsSaved)) {
+      log(creds
+        ? '[coindcx-env] already connected (saved creds match .env) — reconnect skip'
+        : '[coindcx-env] already connected (saved creds) — .env COINDCX keys ignored');
+      logIp();
       return { ok: true, source: 'already-connected' };
     }
-    const creds = coindcxEnvCreds();
     if (!creds) {
       log('[coindcx-env] no COINDCX_API_KEY + COINDCX_SECRET in .env — Portfolio tab → Connect CoinDCX ya .env me dono daalo (v18.10 se .env se bhi connect hota hai)');
       return { ok: false, source: 'no-env-creds' };
     }
+    if (savedConnected) {
+      log('[coindcx-env] .env COINDCX keys DIFFER from saved creds — naya .env pair validate ho raha hai (CoinDCX IP-binding update; purani saved key replace hogi)');
+    }
     try {
       const out = await connect(creds.apiKey, creds.secret);
-      log(`[coindcx-env] .env COINDCX keys CONNECTED${out?.balanceCount != null ? ` (${out.balanceCount} balances)` : ''} — wallet live, LIVE mode unblocked, UI Connect ki zarurat nahi`);
-      return { ok: true, source: 'env', ...(out || {}) };
+      log(`[coindcx-env] .env COINDCX keys ${savedConnected ? 'UPDATED + ' : ''}CONNECTED${out?.balanceCount != null ? ` (${out.balanceCount} balances)` : ''} — wallet live, LIVE mode unblocked, UI Connect ki zarurat nahi`);
+      logIp();
+      return { ok: true, source: savedConnected ? 'env-updated' : 'env', ...(out || {}) };
     } catch (e) {
-      // v21.20.0: In production (no test `connector` override), even if the spot
-      // balance endpoint hiccups or key is futures-scoped, persist the .env keys
-      // so Futures Live orders & MTF Dual Board Live buttons work out of the box!
-      if (!connector) {
+      const authFailure = e && (e.status === 401 || e.status === 403);
+      // v21.20.0 fallback is preserved ONLY for non-auth failures (spot
+      // endpoint hiccup / futures-scoped key / network): those keys may
+      // still execute futures orders. A 401/403 is a bad or unbound key —
+      // persisting it would light a false "LIVE · API CONNECTED" badge.
+      if (!connector && !authFailure) {
         try {
           saveCreds({
             apiKey: creds.apiKey,
@@ -486,14 +551,21 @@ export function coindcxEnvBootstrap(log = () => {}, { connector } = {}) {
             lastSyncAt: Date.now(),
             balanceCount: 0,
             source: 'env-fallback',
-            lastError: String(e?.message || e).slice(0, 140),
+            lastError: String(e?.message || e).slice(0, 300),
           });
           log(`[coindcx-env] .env COINDCX keys saved for Futures/Live execution (spot probe note: ${String(e?.message || e).slice(0, 100)})`);
+          logIp();
           return { ok: true, source: 'env', fallback: true, warning: String(e?.message || e) };
         } catch { /* ignore */ }
       }
-      log(`[coindcx-env] .env COINDCX keys INVALID — ${String(e?.message || e).slice(0, 140)} — paper mode continue; Portfolio tab → Connect se sahi key daalo (CoinDCX app me API key banate waqt view/balance + trade permission)`);
-      return { ok: false, source: 'env-invalid', error: String(e?.message || e) };
+      log(`[coindcx-env] .env COINDCX keys INVALID — ${String(e?.message || e).slice(0, 260)} — paper mode continue${savedConnected ? '; purani saved key preserve ki gayi hai' : ''}. CoinDCX IP binding mandatory hai: naya key banate waqt server ka outbound IPv4 bind karein (verify: npm run coindcx:check)`);
+      logIp();
+      return {
+        ok: false,
+        source: 'env-invalid',
+        error: String(e?.message || e),
+        ...(savedConnected ? { savedPreserved: true } : {}),
+      };
     }
   })();
   return _envBootPromise;
@@ -900,6 +972,7 @@ export function __resetCoinDcxForTests() {
 export function __setCredsForTests(apiKey, secret, extra = {}) {
   saveCreds({ apiKey, secret, connectedAt: Date.now(), ...extra });
 }
+export function __getCredsForTests() { return loadCreds(); }
 export function __coindcxPrivateForTests() { return coindcxPrivate; }
 export function __fetchBalancesSignedForTests() { return fetchBalancesSigned; }
 export function __fetchCoinDcxTradesForTests() { return (...args) => fetchCoinDcxTrades(...args); }

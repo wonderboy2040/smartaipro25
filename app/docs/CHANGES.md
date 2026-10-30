@@ -1,5 +1,31 @@
 # Changelog
 
+## v21.29.1 — COINDCX MANDATORY IP BINDING (28 OCT 2026) CONNECT FIX (2026-10-30)
+
+**User ask: CoinDCX wallet/account connect ho aur LIVE execution phir se kaam kare — CoinDCX ne 28 Oct 2026 se API-key IP binding mandatory kar di, purani plain key+secret ab 401 deti hai.**
+
+Patch release. CoinDCX ka change code se bypass nahi ho sakta — key sirf usi IPv4 se chalti hai jo API Dashboard me bound hai. App ab wahi address detect/print karta hai, authenticated calls ko IPv4 par pin karta hai, aur 401/403 par exact reset steps deta hai.
+
+### Root cause
+- CoinDCX ne 28 Oct 2026 security update me IP binding mandatory ki. Purani key (ya bina-bound nayi key) har signed call par generic `[401] Invalid credentials` deti hai — wrong secret jaisa hi response.
+- Live box ke do egress IPv4 the: default/IPv6-NAT64 path `152.57.142.92`, IPv4 path `152.57.132.146`. CoinDCX dashboard IPv4 bind karta hai, isliye galat address bind ho sakta tha.
+- Boot bootstrap me saved creds `.env` ko hamesha override karte the — CoinDCX par nayi IP-bound key banane ke baad `.env` update karne se bhi purani saved key hi use hoti thi.
+
+### Fixes
+- `server/lib/outboundIp.js` (new): cached outbound IPv4 lookup over `family: 4` (api.ipify.org -> ipv4.icanhazip.com -> v4.ident.me), 10-min cache, provider failover, never throws, test seams.
+- `server/mcp/coindcx.js`: `dns.setDefaultResultOrder('ipv4first')` + `family: 4` on signed calls; 401/403 errors append actionable IP-binding hint with the cached IPv4; boot logs the exact IPv4 to bind.
+- `server/mcp/routes.js`: `GET /api/mcp/coindcx/ip` returns the same family:4 egress IPv4 + reset hint (rate-limited).
+- Env bootstrap priority: saved creds + SAME `.env` pair = skip; DIFFERENT `.env` pair = validate then replace saved creds (`source: 'env-updated'`); auth-failed pair is NOT persisted (`savedPreserved` when an older saved pair exists); non-auth probe failures keep the v21.20 futures fallback.
+- `scripts/coindcx-check.mjs` (new): `npm run coindcx:check` (IPv4 + read-only `.env`/saved key validation) and `npm run coindcx:ip` (IPv4 only). Secrets are never printed.
+- Portfolio/CoinDCX wallet card: when disconnected or a 401/403 is up, shows the server outbound IPv4 + CoinDCX API Dashboard reset steps + Recheck button.
+- Tests: `test/coindcxIpBindingV21291.test.ts` (14) + updated `test/v1810UltraFast.test.ts` env-priority/saved-preserved locks.
+
+### Operator action required (one-time)
+1. `npm run coindcx:ip` se IPv4 note karein.
+2. CoinDCX -> Profile -> API Dashboard -> purani key DELETE -> naya key banayein -> "Bind IP Address to the API Key" me wahi IPv4 paste karein.
+3. `.env` me naya `COINDCX_API_KEY` + `COINDCX_SECRET` daalein -> server restart.
+4. `npm run coindcx:check` se verify karein — dono (env + saved) keys ka verdict milega. 401 aaye to key/secret/IP binding dobara check karein.
+
 ## v21.29.0 — R0a–R11 AUDIT COMPLETION (SHADOW-FIRST SAFETY RELEASE) (2026-10-30)
 
 **User ask: R0a–R11 audit items accurately implement karo — safe bot-port reduce, V3 missing-candle fallback, order hygiene/idempotency, risk-arm blockers/presets/flatten-all, reversal/event/regime/derivatives filters, score calibration, runner/stall exits, correlation guard, UI telemetry, validation harness; direction certificate + 1-active-trade lock + real-money safety preserve rahe.**

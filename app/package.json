@@ -1,7 +1,7 @@
 {
   "name": "advance-pro-intelligence",
   "private": true,
-  "version": "21.29.0",
+  "version": "21.29.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -20,7 +20,9 @@
     "check:version": "node scripts/check-version.mjs",
     "audit:all": "npm audit --omit=dev && npm --prefix telegram-bot audit --omit=dev",
     "calibrate": "node scripts/botlab-calibrate.mjs",
-    "backup-state": "node scripts/backup-state.mjs"
+    "backup-state": "node scripts/backup-state.mjs",
+    "coindcx:check": "node scripts/coindcx-check.mjs",
+    "coindcx:ip": "node scripts/coindcx-check.mjs --ip-only"
   },
   "dependencies": {
     "compression": "^1.8.2",

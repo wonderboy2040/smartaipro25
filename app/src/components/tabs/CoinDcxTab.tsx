@@ -125,6 +125,29 @@ const WalletCard = memo(function WalletCard() {
   const futINR = w?.futures?.inr as { free?: number; locked?: number; total?: number; crossUserMargin?: number | null } | undefined;
   const err = w?.spot?.error || w?.futures?.error;
   const showReconnect = !!(w?.futures?.error) || !!(w?.futures?.scope === 'no_scope');
+  // v21.29.1 CoinDCX IP BINDING (mandatory since 28 Oct 2026): a key only
+  // works from the IPv4 entered in the CoinDCX API Dashboard. Show the
+  // exact address THIS server sends signed calls from + the reset steps
+  // whenever the wallet is disconnected or a 401/403 auth error is up.
+  const [ipBind, setIpBind] = useState<{ ip: string | null; hint?: string } | null>(null);
+  const [ipChecking, setIpChecking] = useState(false);
+  const needsIpHint = !!w && (!w.connected || /401|403|invalid credentials|ip binding/i.test(String(err || '')));
+  const loadIpBind = useCallback(async () => {
+    setIpChecking(true);
+    try {
+      const r = await apiFetch(`${getProxyBase()}/api/mcp/coindcx/ip`, { signal: AbortSignal.timeout(15000) });
+      const j = await r.json().catch(() => ({}));
+      setIpBind({ ip: typeof j?.ip === 'string' ? j.ip : null, hint: j?.hint });
+    } catch {
+      setIpBind({ ip: null });
+    } finally {
+      setIpChecking(false);
+    }
+  }, []);
+  useEffect(() => {
+    if (!needsIpHint) return;
+    void loadIpBind();
+  }, [needsIpHint, loadIpBind]);
   const onReconnect = useCallback(async () => {
     if (reconnecting) return;
     setReconnecting(true);
@@ -154,7 +177,7 @@ const WalletCard = memo(function WalletCard() {
           <span className={`px-2 py-0.5 rounded-lg text-[9px] font-black border ${w.connected
             ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
             : 'bg-slate-600/20 text-slate-400 border-slate-600/30'}`}>
-            {w.connected ? 'LIVE · API CONNECTED' : 'PAPER (keys nahi mili — .env me COINDCX_API_KEY+COINDCX_SECRET daalo ya Portfolio tab se connect karo)' }
+            {w.connected ? 'LIVE · API CONNECTED' : 'PAPER (keys nahi mili ya IP bind nahi — neeche 🔐 check karo)'}
           </span>
         )}
         {!w && <span className={`text-[10px] ${failed ? 'text-amber-500/80' : 'text-slate-500'}`}>{failed ? '⚠️ wallet API unreachable — retrying every 60s' : 'loading…'}</span>}
@@ -219,6 +242,47 @@ const WalletCard = memo(function WalletCard() {
       {err && (
         <div className={`text-[9px] mt-1.5 font-mono ${(w?.futures?.error && w?.futures?.scope === 'no_scope') ? 'text-red-400/90 font-bold' : 'text-amber-500/80'}`}>
           {(w?.futures?.error && w?.futures?.scope === 'no_scope') ? '⛔ ' : '⚠ '}{err}
+        </div>
+      )}
+      {/* v21.29.1 IP-BINDING RESET CARD — CoinDCX 28 Oct 2026 update made
+          IP binding mandatory. Existing keys return the generic
+          "401 Invalid credentials" until a NEW key is created with the
+          server's outbound IPv4 bound. The address is fetched from
+          /api/mcp/coindcx/ip (same family:4 egress as signed calls). */}
+      {needsIpHint && (
+        <div className="mt-2 rounded-xl border border-rose-500/25 bg-rose-500/[0.06] px-3 py-2 text-[10px] leading-relaxed" aria-label="CoinDCX IP binding help">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-black text-rose-300">🔐 COINDCX IP BINDING MANDATORY (28 Oct 2026)</span>
+            <button
+              onClick={() => { void loadIpBind(); }}
+              disabled={ipChecking}
+              className="ml-auto px-2 py-0.5 rounded-lg text-[9px] font-black border border-rose-400/40 bg-rose-500/15 text-rose-200 hover:bg-rose-500/30 transition-colors disabled:opacity-50 disabled:cursor-wait"
+              title="Server ka current outbound IPv4 dobara check karo"
+            >
+              {ipChecking ? '⏳ Checking…' : '🔁 Recheck IP'}
+            </button>
+          </div>
+          {ipBind?.ip ? (
+            <div className="mt-1 text-slate-300">
+              <div>
+                Server outbound IPv4:{' '}
+                <span className="font-mono font-black text-amber-200 select-all">{ipBind.ip}</span>
+                <span className="text-slate-500"> — CoinDCX API Dashboard me YAHI address bind karein.</span>
+              </div>
+              <div className="mt-0.5">
+                CoinDCX → Profile → API Dashboard → purani key <b>DELETE</b> → naya key banayein →{' '}
+                <b>“Bind IP Address to the API Key”</b> me {ipBind.ip} paste karein → phir{' '}
+                <code className="text-amber-200">.env</code> me COINDCX_API_KEY + COINDCX_SECRET update karke server restart.
+              </div>
+            </div>
+          ) : (
+            <div className="mt-1 text-slate-400">
+              {ipBind ? 'Outbound IPv4 detect nahi hua — server par `npm run coindcx:check` chalayein.' : 'Outbound IPv4 check ho raha hai…'}
+            </div>
+          )}
+          <div className="mt-1 text-slate-500">
+            Verify anytime: <code className="text-slate-300">npm run coindcx:check</code> (IPv4 only: <code className="text-slate-300">npm run coindcx:ip</code>)
+          </div>
         </div>
       )}
     </div>

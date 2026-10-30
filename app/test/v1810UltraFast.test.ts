@@ -9,8 +9,8 @@
 //      was effectively dead. Guard contract + semantic mirror here.
 //   2. COINDCX ENV BOOTSTRAP — keys in app\.env (COINDCX_API_KEY +
 //      COINDCX_SECRET) auto-connect at boot when nothing is saved:
-//      alias resolution, trim, saved-creds-win, never-throws,
-//      memoized, index.js wiring.
+//      alias resolution, trim, same-pair skip, env-pair-wins-when-different
+//      (v21.29.1), never-throws, memoized, index.js wiring.
 //   3. DIRECT SPOT-WS ULTRA-FAST PUSH — the official CoinDCX spot
 //      socket's price print lands in liveFeed the INSTANT it arrives
 //      (source 'coindcx-spot-ws'), no 2s-poller wait; unwatched coins
@@ -172,14 +172,45 @@ describe('v18.10 #2 — CoinDCX keys in .env auto-connect at boot', () => {
     expect(out.balanceCount).toBe(7);
   });
 
-  it('bootstrap — saved creds WIN over env (UI connect stays authoritative)', async () => {
-    (coindcx as any).__setCredsForTests('uiKey', 'uiSecret');
-    process.env.COINDCX_API_KEY = 'envKey';
-    process.env.COINDCX_SECRET = 'envSec';
+  it('bootstrap — saved creds that MATCH .env → already-connected (no duplicate probe)', async () => {
+    (coindcx as any).__setCredsForTests('sameKey', 'sameSecret');
+    process.env.COINDCX_API_KEY = 'sameKey';
+    process.env.COINDCX_SECRET = 'sameSecret';
     const connector = vi.fn();
     const out = await (coindcx as any).coindcxEnvBootstrap(() => {}, { connector });
     expect(connector).not.toHaveBeenCalled();
     expect(out).toEqual({ ok: true, source: 'already-connected' });
+  });
+
+  it('bootstrap — DIFFERENT .env pair (new IP-bound key) replaces the stale saved key', async () => {
+    (coindcx as any).__setCredsForTests('oldKey', 'oldSecret');
+    process.env.COINDCX_API_KEY = 'newKey';
+    process.env.COINDCX_SECRET = 'newSecret';
+    const calls: Array<{ k: string; s: string }> = [];
+    const out = await (coindcx as any).coindcxEnvBootstrap(() => {}, {
+      connector: async (k: string, s: string) => { calls.push({ k, s }); return { connected: true, balanceCount: 3, validated: true }; },
+    });
+    // v21.29.1: the old saved key used to win here — the user's fresh
+    // CoinDCX key in .env was never even tried after the IP-binding reset.
+    expect(calls).toEqual([{ k: 'newKey', s: 'newSecret' }]);
+    expect(out.ok).toBe(true);
+    expect(out.source).toBe('env-updated');
+    expect(out.balanceCount).toBe(3);
+  });
+
+  it('bootstrap — failed differing .env pair preserves the saved key (no destructive wipe)', async () => {
+    (coindcx as any).__setCredsForTests('oldKey', 'oldSecret');
+    process.env.COINDCX_API_KEY = 'badKey';
+    process.env.COINDCX_SECRET = 'badSecret';
+    const out = await (coindcx as any).coindcxEnvBootstrap(() => {}, {
+      connector: async () => { throw Object.assign(new Error('[401] Invalid credentials'), { status: 401 }); },
+    });
+    expect(out.ok).toBe(false);
+    expect(out.source).toBe('env-invalid');
+    expect(out.savedPreserved).toBe(true);
+    const saved = (coindcx as any).__getCredsForTests();
+    expect(saved.apiKey).toBe('oldKey');
+    expect(saved.secret).toBe('oldSecret');
   });
 
   it('bootstrap — invalid env keys: one result, NEVER throws (no brick)', async () => {

@@ -120,8 +120,18 @@ sanity check karo:
 ## I. API keys (CoinDCX)
 
 - [ ] Key permissions: **view + trade ON, withdrawal OFF**
-- [ ] IP whitelist ON (jahan server IP fixed hai — Render pe static outbound IP
-  ke liye paid plan chahiye; laptop pe home IP)
+- [ ] **v21.29.1 — IP binding MANDATORY (CoinDCX 28 Oct 2026 update).**
+  Purani key DELETE karke NAYI key banayein aur server ka outbound IPv4 bind karein.
+  1. `npm run coindcx:ip` (ya Portfolio tab → wallet card → 🔐 Recheck IP) →
+     exact IPv4 note karein. `152.57.132.146`-style IPv4 hi bind hota hai.
+  2. CoinDCX → Profile → API Dashboard → old key **DELETE** →
+     Create New Key → **"Bind IP Address to the API Key"** → wahi IPv4 paste.
+  3. `.env` me naya `COINDCX_API_KEY` + `COINDCX_SECRET` → server restart.
+  4. `npm run coindcx:check` → dono keys ka read-only verdict (secrets print nahi hote).
+- [ ] Unbound/purani key ka symptom: har call par `[401] Invalid credentials`
+  (yeh wrong-secret jaisa hi generic response hai — IP binding check karein)
+- [ ] Render/cloud: static outbound IP paid plan par hi milta hai; IPv6/NAT64
+  default egress alag ho sakta hai — isliye app `family: 4` par pinned hai
 - [ ] `mcp-coindcx.json` gitignored hai (verify: `git status` me kabhi na dikhe)
 
 ---
