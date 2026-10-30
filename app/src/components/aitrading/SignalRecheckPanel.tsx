@@ -34,6 +34,18 @@ interface AutoTradeMonitorRow {
   t2: number;
   tp1Hit: boolean;
   tp2Hit: boolean;
+  tp1Confirmed?: boolean;
+  tp1LadderActive?: boolean;
+  exitPolicyV3?: { mode: string; applied: boolean; shadow: boolean; note?: string } | null;
+  protection?: { state: string; label: string; tone: string; venue: string; reason: string; bookSl: number | null; exchangeSl: number | null; slSyncPending: boolean; diffPct: number | null; lastError: string | null } | null;
+  ladder?: { rung: string; progressPct: number; activeStep: string; awaitingTp1Confirm: boolean; note: string | null; steps: Array<{ key: string; label: string; price: number | null; stop?: number | null; state: string }> } | null;
+  nextAction?: { code: string; label: string; detail: string; urgency: string } | null;
+  decisionAt?: number | null;
+  slSyncPending?: boolean;
+  lastExchangeSl?: number | null;
+  originalQty?: number | null;
+  qtyAfterTp1?: number | null;
+  t1PartialBooked?: boolean;
   peakPrice: number;
   currentR: number;
   peakR: number;
@@ -83,6 +95,18 @@ interface RecheckView {
     trailingActiveCount: number;
     tp1LockedCount: number;
     reversalAlertCount: number;
+    protectionCounts?: Record<string, number>;
+    heartbeat?: {
+      lastDecisionAt: number | null;
+      ageMs: number | null;
+      staleAfterMs: number;
+      stale: boolean | null;
+      decisions: number;
+      lastSource: string | null;
+      lastCount: number;
+      sources: Array<{ source: string; count: number; lastAt: number | null; lastCount: number; ageMs: number | null }>;
+      checkedAt: number;
+    } | null;
     trades: AutoTradeMonitorRow[];
     checkedAt: number;
   };
@@ -108,6 +132,24 @@ const STATE_STYLE: Record<string, { chip: string; label: string }> = {
 const DESK_TAG: Record<string, string> = {
   CRYPTO: '₿', FUTURES: '🛡', INDIA: '🇮🇳', GLOBALFUTURES: '🌍',
 };
+
+// v21.28.0 F9: protection/ladder chips are driven by the server's honest
+// state — the UI never upgrades an unknown stop to "protected".
+const PROTECTION_STYLE: Record<string, string> = {
+  PROTECTED: 'bg-emerald-500/20 text-emerald-200 border-emerald-500/50',
+  PAPER: 'bg-cyan-500/15 text-cyan-200 border-cyan-500/35',
+  BROKER: 'bg-sky-500/15 text-sky-200 border-sky-500/35',
+  SYNC_PENDING: 'bg-amber-500/20 text-amber-200 border-amber-500/50',
+  UNVERIFIED: 'bg-rose-500/20 text-rose-200 border-rose-500/50',
+  DIVERGED: 'bg-rose-500/25 text-rose-100 border-rose-400/60',
+};
+const LADDER_STYLE: Record<string, string> = {
+  DONE: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+  ACTIVE: 'bg-amber-500/20 text-amber-200 border-amber-500/50 font-black',
+  WAITING: 'bg-amber-500/10 text-amber-300 border-amber-500/30 animate-pulse',
+  PENDING: 'bg-slate-800/60 text-slate-500 border-slate-700/50',
+};
+const LADDER_ICON: Record<string, string> = { DONE: '✓', ACTIVE: '▶', WAITING: '⏳', PENDING: '·' };
 
 const fmtPx = (v: number | null): string => (v == null ? '—' : v.toLocaleString('en-IN', { maximumFractionDigits: v < 1 ? 6 : 2 }));
 
@@ -142,6 +184,12 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
   const problems = rows.filter(r => r.state === 'INVALIDATED' || r.state === 'WEAKENING').length;
   const strongN = rows.filter(r => r.grade === 'STRONG').length;
   const nextIn = view?.nextTickIn != null ? Math.max(0, Math.round(view.nextTickIn / 1000)) : null;
+  // v21.28.0 F9 heartbeat: null = never stamped (unknown/starting), true = a
+  // genuine monitor lane has not decided for >10s, false = fresh.
+  const dmHb = view?.autoTradeDeepMonitor?.heartbeat || null;
+  const dmHbAgeS = dmHb?.ageMs != null ? Math.max(0, Math.round(dmHb.ageMs / 1000)) : null;
+  const dmHbStale = dmHb?.stale === true;
+  const dmHbNever = !dmHb || dmHb.lastDecisionAt == null;
 
   return (
     <div className="quantum-panel rounded-2xl p-3.5">
@@ -195,6 +243,24 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
               <span className="text-slate-400">
                 · TP1 Locked: <span className="text-amber-300 font-black">{view.autoTradeDeepMonitor.tp1LockedCount}</span>
               </span>
+              {activeAutoTrades.length > 0 && (
+                <span
+                  className={`px-1.5 py-0.5 rounded border font-black ${
+                    dmHbStale
+                      ? 'bg-rose-500/20 text-rose-200 border-rose-500/50'
+                      : dmHbNever
+                        ? 'bg-slate-700/30 text-slate-300 border-slate-600/40'
+                        : 'bg-emerald-500/15 text-emerald-200 border-emerald-500/40'
+                  }`}
+                  title={dmHb?.sources?.map(s => `${s.source}: ${s.count}× · last ${s.ageMs != null ? `${Math.round(s.ageMs / 1000)}s ago` : '—'}`).join('\n') || 'No genuine monitor lane has stamped a decision yet'}
+                >
+                  {dmHbStale
+                    ? `⚠ MONITOR STALE ${dmHbAgeS ?? '?'}s (>${Math.round((dmHb?.staleAfterMs ?? 10_000) / 1000)}s)`
+                    : dmHbNever
+                      ? '⏳ monitor heartbeat starting…'
+                      : `💓 monitor ${dmHbAgeS ?? 0}s · ${dmHb?.lastSource || 'lane'} · ${dmHb?.decisions ?? 0} decisions`}
+                </span>
+              )}
               {view.autoTradeDeepMonitor.reversalAlertCount > 0 && (
                 <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-black animate-pulse">
                   🛡️ {view.autoTradeDeepMonitor.reversalAlertCount} Reversal Profit-Book Guard Armed
@@ -221,6 +287,15 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
                         <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-emerald-500/15 text-emerald-200 border border-emerald-500/35">
                           🔒 FULL CONTROL
                         </span>
+                        {at.protection && (
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${PROTECTION_STYLE[at.protection.state] || 'bg-slate-700/30 text-slate-300 border-slate-600/40'}`}
+                            title={`${at.protection.reason}${at.protection.lastError ? ` · ${at.protection.lastError}` : ''}${at.protection.diffPct != null ? ` · diff ${at.protection.diffPct}%` : ''}`}
+                          >
+                            {at.protection.label}
+                            {at.protection.exchangeSl != null ? ` @ ${ccySym}${fmtPx(at.protection.exchangeSl)}` : ''}
+                          </span>
+                        )}
                         <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
                           {at.stageLabel}
                         </span>
@@ -240,6 +315,40 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
                       <span>{at.trendStatus}</span>
                       <span>Fee-BE: {ccySym}{fmtPx(at.feeBreakevenPrice)} {at.feeCovered ? '✅ Covered' : '⏳'}</span>
                     </div>
+                    {at.ladder && (
+                      <div className="mt-1 flex items-center gap-1 flex-wrap text-[8px] font-mono">
+                        {at.ladder.steps.map(step => (
+                          <span
+                            key={step.key}
+                            className={`px-1 py-0.5 rounded border ${LADDER_STYLE[step.state] || LADDER_STYLE.PENDING}`}
+                            title={step.stop != null ? `active stop ${ccySym}${fmtPx(step.stop)}` : step.price != null ? `level ${ccySym}${fmtPx(step.price)}` : ''}
+                          >
+                            {LADDER_ICON[step.state] || '·'} {step.label}
+                            {step.stop != null ? ` @ ${ccySym}${fmtPx(step.stop)}` : ''}
+                          </span>
+                        ))}
+                        <span className="ml-auto text-slate-500">ladder {at.ladder.progressPct}% → TP2</span>
+                      </div>
+                    )}
+                    {at.nextAction && (
+                      <div
+                        className={`mt-1 text-[9px] font-mono ${
+                          at.nextAction.urgency === 'critical'
+                            ? 'text-rose-300 font-black'
+                            : at.nextAction.urgency === 'warn'
+                              ? 'text-amber-300'
+                              : at.nextAction.urgency === 'ok'
+                                ? 'text-emerald-300'
+                                : 'text-slate-400'
+                        }`}
+                      >
+                        NEXT ▸ {at.nextAction.label}
+                        <span className="text-slate-500 font-normal"> · {at.nextAction.detail}</span>
+                        {at.decisionAt != null && at.decisionAt > 0 && (
+                          <span className="text-slate-600"> · ⟳ {Math.max(0, Math.round((Date.now() - at.decisionAt) / 1000))}s ago</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}

@@ -37,8 +37,14 @@ process.env.SMARTAI_DATA_DIR = join(here, '../.test-data-v2113x');
 // A RISING 15m series (~90 bars) — the tape climbing (fraction +0.16%/bar)
 function rising15m(n = 96) {
   const out = [];
-  // end at a fixed mid-session Wednesday so "today's bars" exist
-  const t0 = new Date('2026-09-09T03:30:00Z').getTime() - (n - 26) * 15 * 60_000;
+  // v21.28.0 [TEST-HERMETIC]: end at the CURRENT 15m wall instead of a fixed
+  // 2026-09-09 stamp. The v21.23.10 stale-data gate is live whenever NSE is
+  // open; a frozen fixture then honestly returns null and this suite would
+  // assert the daily fallback (RSI ~0) instead of the 15m→1h chain. A fresh
+  // anchor keeps the intended fixture semantics at any run time.
+  const step = 15 * 60_000;
+  const last = Math.floor(Date.now() / step) * step;
+  const t0 = last - (n - 1) * step;
   let px = 24800;
   for (let i = 0; i < n; i++) {
     px = px * (1 + 0.0016);

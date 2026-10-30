@@ -173,7 +173,15 @@ export function adx(candles, period = 14) {
     if (sum > 0) dxs.push((Math.abs(pdi - mdi) / sum) * 100);
   }
   if (dxs.length < period) return null;
-  const adxVal = dxs.slice(-period).reduce((a, b) => a + b, 0) / period;
+  // v21.28.0 [F6 WILDER ADX]: pehle final ADX last-14 DX ka simple SMA
+  // tha — Wilder smoothing nahi. Trending tape par wo ADX ko late/stale
+  // dikhata tha (ek fresh DX spike poore window ko turant hila deta tha).
+  // Textbook: seed ADX = first `period` DXs ka average, phir har naye DX
+  // par Wilder smoothing: ADX = (prevADX*(period-1) + DX)/period.
+  let adxVal = dxs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < dxs.length; i++) {
+    adxVal = ((adxVal * (period - 1)) + dxs[i]) / period;
+  }
   const last = trS.length - 1;
   const pdi = (pS[last] / trS[last]) * 100, mdi = (mS[last] / trS[last]) * 100;
   return { adx: adxVal, plusDI: pdi, minusDI: mdi };
@@ -209,11 +217,62 @@ export function mfi(candles, period = 14) {
   return 100 - 100 / (1 + pos / neg);
 }
 
-// ---------------- VWAP (session — all provided candles) ----------------
-export function vwap(candles) {
+// ---------------- VWAP (session-anchored) ----------------
+const _candleTsMs = (c) => {
+  const raw = Number(c?.ts ?? c?.time ?? c?.t ?? c?.timestamp);
+  if (!(raw > 0)) return null;
+  // Providers mix seconds (10-digit) and milliseconds (13-digit).
+  return raw < 1e11 ? raw * 1000 : raw;
+};
+/** Session anchor = UTC calendar day of the last candle. Crypto 24×7 ka
+ *  natural session yahi hai; NSE intraday candles bhi same UTC day ke andar
+ *  hote hain, isliye India desk bhi reset boundary share karta hai. Daily
+ *  (>=6h interval) series par VWAP ek hi bar ka na ban jaye — us case me
+ *  caller ka poora slice use hota hai. */
+export function vwapSessionStart(candles, { sessionStartTs = null } = {}) {
+  if (Number(sessionStartTs) > 0) {
+    const raw = Number(sessionStartTs);
+    return raw < 1e11 ? raw * 1000 : raw;
+  }
   if (!Array.isArray(candles) || candles.length === 0) return null;
+  const stamps = candles.map(_candleTsMs).filter((t) => t != null);
+  if (stamps.length === 0) return null;
+  if (stamps.length >= 2) {
+    const diffs = [];
+    for (let i = 1; i < stamps.length; i++) {
+      const d = stamps[i] - stamps[i - 1];
+      if (d > 0) diffs.push(d);
+    }
+    if (diffs.length > 0) {
+      diffs.sort((a, b) => a - b);
+      const median = diffs[Math.floor(diffs.length / 2)];
+      if (median > 6 * 3_600_000) return null; // daily/weekly series — no intraday session
+    }
+  }
+  const last = new Date(stamps[stamps.length - 1]);
+  return Date.UTC(last.getUTCFullYear(), last.getUTCMonth(), last.getUTCDate());
+}
+/**
+ * v21.28.0 [F7 SESSION-ANCHORED VWAP]: pehle supplied slice ke SAARE candles
+ * cumulative the. Planner 78-bar window bhejta hai (multi-day), isliye VWAP
+ * pichhle dinon ka price bhi mix karta tha — "price above/below VWAP" ka
+ * intraday matlab hi badal jata tha. Ab default session (UTC day) sirf aaj
+ * ke candles leta hai; explicit `sessionStartTs` se caller anchor de sakta
+ * hai. Timestamps missing/daily series par legacy full-slice fallback.
+ */
+export function vwap(candles, { sessionStartTs = null } = {}) {
+  if (!Array.isArray(candles) || candles.length === 0) return null;
+  const anchor = vwapSessionStart(candles, { sessionStartTs });
+  let session = candles;
+  if (anchor != null) {
+    const filtered = candles.filter((c) => {
+      const ts = _candleTsMs(c);
+      return ts != null && ts >= anchor;
+    });
+    if (filtered.length > 0) session = filtered;
+  }
   let pv = 0, v = 0;
-  for (const c of candles) {
+  for (const c of session) {
     const tp = (c.high + c.low + c.close) / 3;
     pv += tp * (c.volume || 0);
     v += c.volume || 0;

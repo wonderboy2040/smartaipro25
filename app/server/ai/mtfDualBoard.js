@@ -528,6 +528,164 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
 const ROW_CACHE = new Map(); // key → { at, row }
 const ROW_TTL_MS = 2_000;    // v21.23.13: 2s ultra-fast 24x7 direct price & candle refresh
 const ROW_CACHE_MAX = 200;
+const CLOSED_BAR_CACHE = new Map(); // last CLOSED bar → plan snapshot
+const CLOSED_BAR_CACHE_MAX = 300;
+// v21.28.0 [F4]: recent CLOSED trigger candles per symbol/market. The
+// deep-monitor lives on the 3s/15s price lanes (no candles), so TP1
+// close-confirmation would otherwise be impossible. Board rebuilds already
+// fetch these candles; we retain a bounded copy (forming bar dropped).
+const CLOSED_CANDLE_CACHE = new Map();
+const CLOSED_CANDLE_CACHE_MAX = 400;
+const CLOSED_CANDLE_TTL_MS = 30 * 60_000;
+
+/** Pure helper: store only CLOSED trigger bars for later TP1 confirmation. */
+export function rememberClosedCandles({ symbol, market, tf = null, candles, now = Date.now() } = {}) {
+  const sym = String(symbol || '').toUpperCase().trim();
+  const mkt = String(market || '').toUpperCase().trim();
+  if (!sym || !mkt || !Array.isArray(candles) || candles.length < 2) return null;
+  const asc = ensureAscending(candles);
+  // The newest bar is the forming/live-overlay bar in this chain.
+  const closed = asc.slice(0, -1).slice(-200);
+  if (closed.length === 0) return null;
+  const key = `${mkt}:${sym}`;
+  CLOSED_CANDLE_CACHE.set(key, { at: now, tf: tf || null, candles: closed });
+  while (CLOSED_CANDLE_CACHE.size > CLOSED_CANDLE_CACHE_MAX) {
+    const k = CLOSED_CANDLE_CACHE.keys().next().value;
+    if (k === undefined) break;
+    CLOSED_CANDLE_CACHE.delete(k);
+  }
+  return closed.length;
+}
+
+/** Cached CLOSED trigger candles for a symbol (null when absent/stale). */
+export function closedCandlesFor(symbol, market, { now = Date.now(), maxAgeMs = CLOSED_CANDLE_TTL_MS } = {}) {
+  const sym = String(symbol || '').toUpperCase().trim();
+  const mkt = String(market || '').toUpperCase().trim();
+  if (!sym || !mkt) return null;
+  const hit = CLOSED_CANDLE_CACHE.get(`${mkt}:${sym}`);
+  if (!hit || !Array.isArray(hit.candles) || hit.candles.length === 0) return null;
+  if (now - Number(hit.at || 0) > maxAgeMs) return null;
+  return hit.candles;
+}
+
+/** v21.28.0 [F1 CLOSED-BAR CONFIRM]: latest candle exchange par abhi
+ *  FORMING hai (ya live tick se patched). Usse signal confirm karna
+ *  repaint/flicker deta hai — bar band hone par signal palat sakta hai.
+ *  Ye helper aakhri candle hata kar (sirf CLOSED bars par) plan ka
+ *  side/trigger/verify snapshot nikalta hai. Cache bar-identity par hai,
+ *  isliye 2s board poll dobara plan build nahi karta. */
+function closedBarSignal({ symbol, market, mode, holdMin, ctxCandles, trigCandles }) {
+  const ctx = ensureAscending(ctxCandles);
+  const trig = ensureAscending(trigCandles);
+  if (!Array.isArray(ctx) || !Array.isArray(trig) || ctx.length < 3 || trig.length < 3) return null;
+  const ctxLast = ctx[ctx.length - 1];
+  const trigLast = trig[trig.length - 1];
+  if (!ctxLast || !trigLast) return null;
+  const timeOf = (c) => Number(c?.ts ?? c?.time ?? c?.t ?? 0) || 0;
+  const key = `${market}:${symbol}:${mode.id}:${holdMin}`
+    + `:${ctx.length}:${timeOf(ctxLast)}:${ctx[ctx.length - 2]?.close ?? ''}`
+    + `:${trig.length}:${timeOf(trigLast)}:${trigLast.close ?? ''}`;
+  if (CLOSED_BAR_CACHE.has(key)) return CLOSED_BAR_CACHE.get(key);
+  const snap = (() => {
+    try {
+      const p = buildPlanFromCandles({
+        symbol, market, mode: mode.id, holdMin,
+        ctxCandles: ctx.slice(0, -1),
+        trigCandles: trig.slice(0, -1),
+      });
+      if (!p?.ok) {
+        return {
+          ok: false,
+          side: null,
+          triggerFired: false,
+          directionVerified: false,
+          grade: null,
+          confidence: null,
+          lastClosedBarTime: timeOf(trig[trig.length - 2]) || null,
+          error: p?.error || 'closed-bar plan unavailable',
+        };
+      }
+      return {
+        ok: true,
+        side: p.side ?? null,
+        triggerFired: p.triggerFired === true,
+        directionVerified: p.directionVerified === true,
+        grade: p.grade ?? null,
+        confidence: Number.isFinite(Number(p.confidence)) ? Number(p.confidence) : null,
+        entry: Number(p.plan?.entry) > 0 ? Number(p.plan.entry) : null,
+        stopLoss: Number(p.plan?.stopLoss) > 0 ? Number(p.plan.stopLoss) : null,
+        t1: Number(p.plan?.t1) > 0 ? Number(p.plan.t1) : null,
+        t2: Number(p.plan?.t2) > 0 ? Number(p.plan.t2) : null,
+        lastClosedBarTime: timeOf(trig[trig.length - 2]) || null,
+      };
+    } catch (e) {
+      return { ok: false, side: null, triggerFired: false, directionVerified: false, error: String(e?.message || e).slice(0, 140) };
+    }
+  })();
+  CLOSED_BAR_CACHE.set(key, snap);
+  while (CLOSED_BAR_CACHE.size > CLOSED_BAR_CACHE_MAX) {
+    const k = CLOSED_BAR_CACHE.keys().next().value;
+    if (k === undefined) break;
+    CLOSED_BAR_CACHE.delete(k);
+  }
+  return snap;
+}
+
+export function buildBarConfirmation({ plan, closedSnap, liveTickOverlay }) {
+  const openBar = {
+    side: plan?.side ?? null,
+    triggerFired: plan?.triggerFired === true,
+    directionVerified: plan?.directionVerified === true,
+    grade: plan?.grade ?? null,
+    confidence: Number.isFinite(Number(plan?.confidence)) ? Number(plan.confidence) : null,
+    entry: Number(plan?.plan?.entry) > 0 ? Number(plan.plan.entry) : null,
+    stopLoss: Number(plan?.plan?.stopLoss) > 0 ? Number(plan.plan.stopLoss) : null,
+    t1: Number(plan?.plan?.t1) > 0 ? Number(plan.plan.t1) : null,
+    t2: Number(plan?.plan?.t2) > 0 ? Number(plan.plan.t2) : null,
+  };
+  const closeBar = closedSnap
+    ? {
+      side: closedSnap.side ?? null,
+      triggerFired: closedSnap.triggerFired === true,
+      directionVerified: closedSnap.directionVerified === true,
+      grade: closedSnap.grade ?? null,
+      confidence: closedSnap.confidence ?? null,
+      entry: closedSnap.entry ?? null,
+      stopLoss: closedSnap.stopLoss ?? null,
+      t1: closedSnap.t1 ?? null,
+      t2: closedSnap.t2 ?? null,
+      lastClosedBarTime: closedSnap.lastClosedBarTime ?? null,
+    }
+    : null;
+  const comparable = Boolean(openBar.side && closeBar?.side);
+  const sideStable = comparable ? openBar.side === closeBar.side : null;
+  const triggerStable = comparable ? openBar.triggerFired === closeBar.triggerFired : null;
+  const verifiedStable = comparable ? openBar.directionVerified === closeBar.directionVerified : null;
+  const stable = comparable ? (sideStable && triggerStable) : null;
+  const reasons = [];
+  if (!closeBar) reasons.push('closed-bar plan unavailable (thin/unavailable candles)');
+  else if (!comparable) reasons.push('open/closed side missing — stability unproven');
+  else {
+    if (!sideStable) reasons.push(`side flipped ${openBar.side} (forming) vs ${closeBar.side} (closed)`);
+    if (!triggerStable) reasons.push(`trigger ${openBar.triggerFired ? 'FIRED' : 'pending'} on forming bar vs ${closeBar.triggerFired ? 'FIRED' : 'pending'} on closed bar`);
+    if (!verifiedStable) reasons.push(`verification ${openBar.directionVerified ? 'PAKKA' : 'WAIT'} on forming bar vs ${closeBar.directionVerified ? 'PAKKA' : 'WAIT'} on closed bar`);
+  }
+  return {
+    mode: 'shadow', // decisions legacy rehte hain; auto gate cfg.closedBarConfirm se on hota hai
+    stable,
+    sideStable,
+    triggerStable,
+    verifiedStable,
+    liveTickOverlay: liveTickOverlay === true,
+    openBar,
+    closeBar,
+    reasons,
+    note: stable === true
+      ? 'forming + last-closed bar signal aligned'
+      : (stable === false ? 'forming bar signal last-closed bar se stable NAHI — confirm pending' : 'stability unproven'),
+  };
+}
+
 
 /** v21.20.0 ULTRA-FAST LIVE TICK STAMP: overlays sub-second live LTP onto the latest candle. */
 function overlayLiveTick(candles, liveLtp) {
@@ -619,6 +777,14 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
     }
   } catch { /* honest degrade below */ }
 
+  // v21.28.0 [F4]: keep a bounded copy of CLOSED trigger bars so the
+  // price-only deep-monitor lanes can confirm TP1 on a bar CLOSE (not wick).
+  if (Array.isArray(trigCandles) && trigCandles.length >= 3) {
+    rememberClosedCandles({
+      symbol: sym, market: mkt, tf: mode.triggerTf, candles: trigCandles, now: Date.now(),
+    });
+  }
+
   const effectiveLiveLtp = Number(liveLtp) > 0
     ? Number(liveLtp)
     : (!isUsdtPerp && Number(boardSig?.ltp) > 0 ? Number(boardSig.ltp) : null);
@@ -631,6 +797,12 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
     symbol: sym, market: mkt, mode: mode.id, holdMin: hold,
     ltp: effectiveLiveLtp > 0 ? effectiveLiveLtp : undefined,
     ctxCandles, trigCandles,
+  });
+  const closedSnap = closedBarSignal({
+    symbol: sym, market: mkt, mode, holdMin: hold, ctxCandles, trigCandles,
+  });
+  const barConfirmation = buildBarConfirmation({
+    plan, closedSnap, liveTickOverlay: effectiveLiveLtp > 0,
   });
   // P1-3 Honest Extended Bias: only use `snap` when real 6-TF / 4h+1d snapshot is supplied;
   // when absent, auto-build the lightweight 4h+1d HTF bias so the board can never fire a
@@ -746,6 +918,23 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
       htf2: snapAligned?.lightweight ? { engine: 'htf2', bias: snapAligned.htfBias, agreementPct: snapAligned.agreementPct, phase: snapAligned.phase, tfs: snapAligned.timeframes || [] } : null,
     },
     barCounts: { ctx: ctxCandles?.length ?? 0, trig: trigCandles?.length ?? 0 },
+    // v21.28.0 [F1 CLOSED-BAR CONFIRM — SHADOW FIRST]: forming/live-tick
+    // plan (jo abhi decide karta hai) vs last-CLOSED-bar plan. `stable:false`
+    // ka matlab signal sirf forming candle par zinda hai — bar close par
+    // palat sakta hai. Abhi koi gate NAHI (shadow telemetry); auto lane
+    // cfg.closedBarConfirm=true hone par hi stable rows accept karegi.
+    closedBarConfirm: barConfirmation.stable === true,
+    signalStability: {
+      mode: barConfirmation.mode,
+      stable: barConfirmation.stable,
+      sideStable: barConfirmation.sideStable,
+      triggerStable: barConfirmation.triggerStable,
+      verifiedStable: barConfirmation.verifiedStable,
+      liveTickOverlay: barConfirmation.liveTickOverlay,
+      reasons: barConfirmation.reasons,
+      note: barConfirmation.note,
+    },
+    barConfirmation,
     asOf: Date.now(),
   };
   // v21.26.4 [AUTO-ELIGIBILITY HONESTY]: row.autoEligible/counts used to be
@@ -1189,6 +1378,7 @@ export function mtfProEntryGate(row, {
   minScore = Number(SUPER_TIERS.ACTION) || 65,
   requireMainSignal = true,
   minMainSignalAgeMs = 5 * 60_000,
+  requireClosedBarConfirm = false,
 } = {}) {
   const blockers = [];
   const push = (msg) => { if (msg && !blockers.includes(msg)) blockers.push(msg); };
@@ -1226,6 +1416,13 @@ export function mtfProEntryGate(row, {
     } else {
       push('auto-ready quality gates not cleared');
     }
+  }
+  // v21.28.0 [F1 SHADOW→ENFORCE]: config flag on hone par hi closed-bar
+  // stability hard requirement hai. Default off = legacy behaviour, par
+  // row pe poora telemetry (signalStability) pehle se available hai.
+  if (requireClosedBarConfirm && row.closedBarConfirm !== true) {
+    const reasons = Array.isArray(row.signalStability?.reasons) ? row.signalStability.reasons : [];
+    push(`closed-bar confirm pending — ${reasons[0] || 'forming bar signal last closed bar par stable nahi'}`);
   }
   if (!(Number(row.plan?.entry) > 0) || !(Number(row.plan?.stopLoss) > 0) || !(Number(row.plan?.t1) > 0)) {
     push('incomplete entry/SL/T1 ticket');
@@ -1286,6 +1483,10 @@ export function dualAutoCandidates(rows, cfg = {}, ctx = {}) {
     if (!row?.ok) reasons.push('plan unavailable');
     if (!(row?.superScore >= minScore)) reasons.push(`score ${row?.superScore ?? '—'} < ${minScore}`);
     if (row?.ensembleSignalAvailable === false) reasons.push('main AI-BOARD ensemble signal unavailable');
+    if (cfg.closedBarConfirm === true && row?.closedBarConfirm !== true) {
+      const why = Array.isArray(row?.signalStability?.reasons) ? row.signalStability.reasons[0] : null;
+      reasons.push(`closed-bar confirm pending${why ? ` — ${why}` : ''}`);
+    }
     if (row?.autoBlockers?.length) reasons.push(...row.autoBlockers);
     if (openSymbols.has(String(row?.symbol || '').toUpperCase())) reasons.push('already open');
     const last = lastEntryAt[String(row?.symbol || '').toUpperCase()] || 0;
@@ -1299,7 +1500,7 @@ export function dualAutoCandidates(rows, cfg = {}, ctx = {}) {
 }
 
 /** Test hook — clear row + board caches. */
-export function __clearDualBoardCaches() { ROW_CACHE.clear(); _boardCache.clear(); }
+export function __clearDualBoardCaches() { ROW_CACHE.clear(); _boardCache.clear(); CLOSED_BAR_CACHE.clear(); CLOSED_CANDLE_CACHE.clear(); }
 
 /** Exported for tests/UI docs — the fuse weights in one place. */
 export const DUAL_FUSE_WEIGHTS = {

@@ -1,0 +1,476 @@
+{
+  "schema": "smartaipg-phase0-baseline-v1",
+  "generatedAt": 1793326218630,
+  "generatedAtISO": "2026-10-30T02:10:18.630Z",
+  "frozenFor": "2026-10-29 audit plan — pre-F1..F9 comparison",
+  "dataDir": "D:\\smartaiproglm23\\smartaipro25\\app\\server\\data",
+  "readOnly": true,
+  "dataFiles": {
+    "tracked-signals.json": {
+      "bytes": 531669,
+      "mtime": "2026-10-29T19:47:11.134Z"
+    },
+    "paper-trades.json": {
+      "bytes": 124899,
+      "mtime": "2026-10-29T19:47:11.117Z"
+    },
+    "ai-trading-journal.json": {
+      "bytes": 74186,
+      "mtime": "2026-10-29T16:17:23.864Z"
+    },
+    "mtf-row-ledger.json": {
+      "bytes": 722728,
+      "mtime": "2026-10-29T19:47:10.519Z"
+    },
+    "selfimprove-outcomes.json": {
+      "bytes": 12663,
+      "mtime": "2026-10-29T19:45:51.613Z"
+    },
+    "mtf-auto-state.json": {
+      "bytes": 183362,
+      "mtime": "2026-10-29T19:47:10.484Z"
+    },
+    "mtf-auto-config.json": {
+      "bytes": 929,
+      "mtime": "2026-10-29T19:26:31.064Z"
+    }
+  },
+  "phase0Audit": {
+    "version": 1,
+    "scope": {
+      "dataDir": "server/data (ya MTF_AUTO_DATA_DIR override)",
+      "sources": [
+        "tracked-signals.json",
+        "paper-trades.json",
+        "ai-trading-journal.json",
+        "mtf-row-ledger.json",
+        "selfimprove-outcomes.json",
+        "mtf-auto-state.json"
+      ],
+      "doublesCountingNote": "Har source apne namespace me report hota hai — board/paper/journal ko jodkar ek PnL nahi banaya jata."
+    },
+    "riskCaps": {
+      "walletINR": 1000000,
+      "riskPerTradePct": 1,
+      "maxRiskPerTradePct": 2,
+      "activeRiskPct": 1,
+      "riskCapINR": 10000,
+      "riskPerTradeINR": 2000,
+      "effectiveRiskINR": 2000,
+      "tierLeverage": 5,
+      "maxLeverage": 10,
+      "effectiveLeverage": 5,
+      "walletDeployPctConfigured": 100,
+      "maxWalletDeployPct": 100,
+      "effectiveWalletDeployPct": 100,
+      "dailyLossPct": 1.5,
+      "dailyLossCapINR": 15000
+    },
+    "sources": {
+      "boardSignals": {
+        "total": 566,
+        "closed": 547,
+        "open": 19,
+        "wins": 252,
+        "winRatePct": 46.07,
+        "netPnlPerLakh": -327215.53,
+        "withR": 547,
+        "avgR": -2.325,
+        "slHits": 170,
+        "worstR": -594.76,
+        "beyond2R": 31
+      },
+      "paperTrades": {
+        "total": 124,
+        "closed": 124,
+        "open": 0,
+        "netPnl": -20158.87,
+        "manualExits": 56,
+        "bySource": {
+          "mtf-auto": {
+            "total": 75,
+            "closed": 75,
+            "open": 0,
+            "pnl": -303.61,
+            "wins": 26,
+            "withR": 75,
+            "manual": 30,
+            "avgR": -0.0748
+          },
+          "mtf-board-ui": {
+            "total": 44,
+            "closed": 44,
+            "open": 0,
+            "pnl": -574.25,
+            "wins": 8,
+            "withR": 44,
+            "manual": 25,
+            "avgR": -0.3446
+          },
+          "ui": {
+            "total": 4,
+            "closed": 4,
+            "open": 0,
+            "pnl": -19283.53,
+            "wins": 0,
+            "withR": 4,
+            "manual": 0,
+            "avgR": -74.0952
+          },
+          "manual-check": {
+            "total": 1,
+            "closed": 1,
+            "open": 0,
+            "pnl": 2.52,
+            "wins": 1,
+            "withR": 1,
+            "manual": 1,
+            "avgR": 0.1445
+          }
+        }
+      },
+      "journal": {
+        "closes": 60,
+        "netPnlINR": 279.15,
+        "manualExits": 50,
+        "byMode": {
+          "live": {
+            "closes": 48,
+            "pnlINR": 320.67,
+            "wins": 33
+          },
+          "paper": {
+            "closes": 12,
+            "pnlINR": -41.52,
+            "wins": 8
+          }
+        }
+      },
+      "rowLedger": {
+        "total": 1347,
+        "resolved": 1316,
+        "unresolved": 31,
+        "resolvedPct": 97.7,
+        "lastResolveAt": 1793301926821
+      },
+      "learning": {
+        "total": 12,
+        "wins": 8,
+        "avgR": 0.2408,
+        "manual": 2,
+        "lastAt": 1793248945579
+      }
+    },
+    "unresolved": {
+      "boardSignals": 19,
+      "paperTrades": 0,
+      "rowLedger": 31,
+      "operationalOpen": 19
+    },
+    "stopIntegrity": {
+      "boardSlHits": 170,
+      "excessStopR": 1280.69,
+      "worstR": -594.76,
+      "beyond2R": 31,
+      "liveStopViolations": 0,
+      "overRiskPositions": 0
+    },
+    "duplicates": {
+      "groups": 69,
+      "extraSignals": 84,
+      "oppositeSideGroups": 19,
+      "examples": [
+        {
+          "symbol": "BZ",
+          "dayKey": "2026-10-29",
+          "count": 5,
+          "sides": [
+            "SHORT"
+          ],
+          "statuses": [
+            "SL_HIT",
+            "SL_HIT",
+            "BE_TRAIL_EXIT",
+            "SL_HIT",
+            "SL_HIT"
+          ]
+        },
+        {
+          "symbol": "TXN",
+          "dayKey": "2026-10-20",
+          "count": 3,
+          "sides": [
+            "SHORT",
+            "LONG"
+          ],
+          "statuses": [
+            "SL_HIT",
+            "FLIP",
+            "EOD_EXIT"
+          ]
+        },
+        {
+          "symbol": "POL",
+          "dayKey": "2026-10-21",
+          "count": 3,
+          "sides": [
+            "LONG",
+            "SHORT"
+          ],
+          "statuses": [
+            "FLIP",
+            "FLIP",
+            "EOD_EXIT"
+          ]
+        },
+        {
+          "symbol": "SPACEX",
+          "dayKey": "2026-10-21",
+          "count": 3,
+          "sides": [
+            "LONG"
+          ],
+          "statuses": [
+            "SL_HIT",
+            "SL_HIT",
+            "SL_HIT"
+          ]
+        },
+        {
+          "symbol": "PLTR",
+          "dayKey": "2026-10-22",
+          "count": 3,
+          "sides": [
+            "LONG"
+          ],
+          "statuses": [
+            "SL_HIT",
+            "SL_HIT",
+            "SL_HIT"
+          ]
+        }
+      ]
+    },
+    "manualExits": {
+      "paper": 56,
+      "journal": 50,
+      "total": 106
+    },
+    "reconciliation": {
+      "bookOpen": 1,
+      "liveOpen": 1,
+      "paperOpen": 0,
+      "mirrored": 0,
+      "qtyMismatches": 0,
+      "slMismatches": 0,
+      "missingMirrors": 1,
+      "stopViolations": 0,
+      "directionViolations": 0,
+      "overRiskPositions": 0,
+      "examples": {
+        "qtyMismatches": [],
+        "slMismatches": [],
+        "missingMirrors": [
+          {
+            "symbol": "XAG",
+            "paperId": null
+          }
+        ],
+        "stopViolations": [],
+        "directionViolations": [],
+        "overRiskPositions": []
+      }
+    },
+    "warnings": [
+      "SL exits ka excess 1280.69R (plan -1R se zyada loss)",
+      "84 duplicate symbol/day signals (69 groups)",
+      "1 LIVE position(s) without an open paper mirror",
+      "106 manual exit(s) strategy stats me mix hain",
+      "MTF row-ledger 31/1347 unresolved",
+      "learning loop sirf 12 settled outcome(s)"
+    ],
+    "verdict": "ATTENTION"
+  },
+  "directionScorecard": {
+    "windowDays": 30,
+    "totalScans": 1347,
+    "resolvedCount": 1316,
+    "pendingCount": 31,
+    "calibrated": true,
+    "n": 1316,
+    "directionHitRate": 44.3,
+    "t1HitPct": 20.52,
+    "slFirstPct": 29.94,
+    "wrongWayRate": 23.02,
+    "avgR": -0.08,
+    "wilsonLB": 18.42,
+    "alignedBucket": {
+      "n": 1285,
+      "directionHitRate": 43.74,
+      "t1HitPct": 20.39,
+      "slFirstPct": 30.04,
+      "wrongWayRate": 23.04,
+      "avgR": -0.09,
+      "wilsonLB": 18.28
+    },
+    "conflictBucket": {
+      "n": 31,
+      "directionHitRate": 67.74,
+      "t1HitPct": 25.81,
+      "slFirstPct": 25.81,
+      "wrongWayRate": 22.58,
+      "avgR": 0.1,
+      "wilsonLB": 13.7
+    },
+    "recentScansCount": 12
+  },
+  "mtfRowLedger": {
+    "total": 1347,
+    "lastLogAt": 1793303166523,
+    "lastResolveAt": 1793301926821,
+    "byTier": {
+      "ACTION": {
+        "allTime": {
+          "scans": 177,
+          "resolved": 175,
+          "tp1Hits": 46,
+          "tp2Hits": 2,
+          "stopOuts": 49,
+          "tp1HitPct": 26.29,
+          "tp2HitPct": 1.14,
+          "stopOutPct": 28,
+          "expectancyR": 0.0047,
+          "avgR": 0.0047,
+          "avgMfeR": 0.5174,
+          "avgMaeR": 0.5846,
+          "avgTimeToTp1MinApprox": 36.51,
+          "directionHitPct": 50.86
+        },
+        "window30d": {
+          "scans": 177,
+          "resolved": 175,
+          "tp1Hits": 46,
+          "tp2Hits": 2,
+          "stopOuts": 49,
+          "tp1HitPct": 26.29,
+          "tp2HitPct": 1.14,
+          "stopOutPct": 28,
+          "expectancyR": 0.0047,
+          "avgR": 0.0047,
+          "avgMfeR": 0.5174,
+          "avgMaeR": 0.5846,
+          "avgTimeToTp1MinApprox": 36.51,
+          "directionHitPct": 50.86
+        }
+      },
+      "ELITE": {
+        "allTime": {
+          "scans": 209,
+          "resolved": 209,
+          "tp1Hits": 65,
+          "tp2Hits": 4,
+          "stopOuts": 58,
+          "tp1HitPct": 31.1,
+          "tp2HitPct": 1.91,
+          "stopOutPct": 27.75,
+          "expectancyR": 0.0389,
+          "avgR": 0.0389,
+          "avgMfeR": 0.5725,
+          "avgMaeR": 0.6034,
+          "avgTimeToTp1MinApprox": 107.87,
+          "directionHitPct": 51.67
+        },
+        "window30d": {
+          "scans": 209,
+          "resolved": 209,
+          "tp1Hits": 65,
+          "tp2Hits": 4,
+          "stopOuts": 58,
+          "tp1HitPct": 31.1,
+          "tp2HitPct": 1.91,
+          "stopOutPct": 27.75,
+          "expectancyR": 0.0389,
+          "avgR": 0.0389,
+          "avgMfeR": 0.5725,
+          "avgMaeR": 0.6034,
+          "avgTimeToTp1MinApprox": 107.87,
+          "directionHitPct": 51.67
+        }
+      },
+      "STRONG": {
+        "allTime": {
+          "scans": 31,
+          "resolved": 31,
+          "tp1Hits": 11,
+          "tp2Hits": 0,
+          "stopOuts": 9,
+          "tp1HitPct": 35.48,
+          "tp2HitPct": 0,
+          "stopOutPct": 29.03,
+          "expectancyR": 0.0381,
+          "avgR": 0.0381,
+          "avgMfeR": 0.4852,
+          "avgMaeR": 0.6842,
+          "avgTimeToTp1MinApprox": 27.45,
+          "directionHitPct": 51.61
+        },
+        "window30d": {
+          "scans": 31,
+          "resolved": 31,
+          "tp1Hits": 11,
+          "tp2Hits": 0,
+          "stopOuts": 9,
+          "tp1HitPct": 35.48,
+          "tp2HitPct": 0,
+          "stopOutPct": 29.03,
+          "expectancyR": 0.0381,
+          "avgR": 0.0381,
+          "avgMfeR": 0.4852,
+          "avgMaeR": 0.6842,
+          "avgTimeToTp1MinApprox": 27.45,
+          "directionHitPct": 51.61
+        }
+      },
+      "WATCH": {
+        "allTime": {
+          "scans": 930,
+          "resolved": 901,
+          "tp1Hits": 148,
+          "tp2Hits": 20,
+          "stopOuts": 278,
+          "tp1HitPct": 16.43,
+          "tp2HitPct": 2.22,
+          "stopOutPct": 30.85,
+          "expectancyR": -0.1333,
+          "avgR": -0.1333,
+          "avgMfeR": 0.4436,
+          "avgMaeR": 0.6197,
+          "avgTimeToTp1MinApprox": 76.87,
+          "directionHitPct": 41.07
+        },
+        "window30d": {
+          "scans": 930,
+          "resolved": 901,
+          "tp1Hits": 148,
+          "tp2Hits": 20,
+          "stopOuts": 278,
+          "tp1HitPct": 16.43,
+          "tp2HitPct": 2.22,
+          "stopOutPct": 30.85,
+          "expectancyR": -0.1333,
+          "avgR": -0.1333,
+          "avgMfeR": 0.4436,
+          "avgMaeR": 0.6197,
+          "avgTimeToTp1MinApprox": 76.87,
+          "directionHitPct": 41.07
+        }
+      }
+    }
+  },
+  "baselineNotes": [
+    "Ye snapshot sirf comparison ke liye hai — koi PnL guarantee nahi.",
+    "Tracked-signals / paper / journal alag namespaces hain; inhe jodkar ek PnL nahi banaya gaya.",
+    "avgTimeToTp1MinApprox resolution-sweep lag hai, exact candle touch time nahi.",
+    "Per-tier stats future signalLedger.scorecard fields ka pre-change reference hain."
+  ]
+}

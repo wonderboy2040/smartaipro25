@@ -94,6 +94,11 @@ beforeEach(() => {
   __resetGlobalForTests();
   gfInstruments.rows = [];
   __setConfigForTests({ mode: 'paper', minConfidence: 75, minAgreement: 0.7, maxRiskPct: 5, dailyMaxTrades: 50, dailyMaxLossINR: 100_000, maxOrderINR: 1_000_000, maxOpenPositions: 50 });
+  // v21.28.0 GATE-STABILITY: every test starts hermetic. executeGlobalSignal
+  // sizes through fetchUsdInr() → live Yahoo; on a dark network that burns
+  // an 8s timeout PER CALL and the daily-cap test (two calls) blew its 15s
+  // budget. Tests needing specific quotes still call routeYahoo themselves.
+  routeYahoo({ priceBy: { USDINR: { price: 88, prev: 88 } } });
 });
 
 afterEach(() => {

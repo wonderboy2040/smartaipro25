@@ -43,7 +43,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isNseMarketOpen, freshEntriesAllowedFor, dayKeyFor, istDayKey } from '../intraday/time.js';
-import { dualAutoCandidates } from './mtfDualBoard.js';
+import { dualAutoCandidates, closedCandlesFor } from './mtfDualBoard.js';
 import { SUPER_TIERS } from './superIntel.js';
 import { walletLeverageForEquityINR, feeBreakevenFloor, evaluateFeeAwareReversalExit } from '../exec/sizing.js';
 // v21.23.15 [PHASE-3 PERSISTENCE]: config + state ab encrypted durable
@@ -149,6 +149,11 @@ export const MTF_AUTO_DEFAULTS = {
   // no-loss scratch." true = pro ladder; false = legacy v1/v2 stage trail
   // (kept only as an explicit diagnostic escape hatch).
   proExitPolicy: true,
+  // v21.28.0 F1: closed-bar stability auto/manual gate (default OFF = shadow).
+  closedBarConfirm: false,
+  // v21.28.0 F2: LIVE TP1 partial parity with the paper engine. Default OFF
+  // until CoinDCX reduce-only/partial behavior is verified on a small position.
+  liveTp1Partial: false,
   // 0 = UNLIMITED daily trades (user spec). Finite values keep the old hard
   // cap. The 1-session/1-open-trade lock still applies regardless.
   // (maxTradesPerDay default 5 below stays the conservative default.)
@@ -270,6 +275,7 @@ export function __reloadMtfAutoForBoot(meta = {}) {
   _cfg = null;
   _state = null;
   _bootedAt = Date.now();
+  _deepMonitorHb = _freshDeepMonitorHb(); // v21.28.0 F9: no pre-restore heartbeat survives
   _restoredFromDurable = meta?.restored === true
     || meta?.configRestored === true || meta?.stateRestored === true;
   _restoredConfigFromDurable = meta?.configRestored === true;
@@ -331,6 +337,15 @@ function _sanitizeCfg(cfg) {
   out.deepMonitorEnabled = cfg.deepMonitorEnabled !== false;
   // v21.26.1 PRO TRADER EXIT POLICY - default ON; explicit opt-out only.
   out.proExitPolicy = cfg.proExitPolicy !== false;
+  // v21.28.0 [F1/F2 NEW FLAGS — SAFE DEFAULTS]:
+  //   closedBarConfirm = false → shadow telemetry only (forming-bar signal
+  //     still trades). true → auto/manual entry requires last closed bar par
+  //     side+trigger stable.
+  //   liveTp1Partial = false → LIVE TP1 par full position manage hoti hai
+  //     (legacy). true → volatility-sized partial reduce (CoinDCX verify ke
+  //     baad hi enable karna — [VERIFY-LIVE]).
+  out.closedBarConfirm = cfg.closedBarConfirm === true;
+  out.liveTp1Partial = cfg.liveTp1Partial === true;
   // v21.23.8: UC FLIP-AND-REVERSE — default ON; config se OFF ho sakta hai
   // (ucFlipReverse:false → confirmed flip par sirf protective close, reverse
   // entry nahi — user ka explicit opt-out).
@@ -585,6 +600,163 @@ function _snapshotRowFor(symbol, now) {
   };
 }
 
+// ------------------------------------------------------------
+// v21.28.0 [F4 EXIT_POLICY_V3] — shadow-first upgrade of the PRO ladder.
+// ------------------------------------------------------------
+// Defect F4: TP1 was latched from the FAVOURABLE EXTREME (a wick/peak above
+// T1), then the SL jumped to raw fee-breakeven. A wick that never closes above
+// T1 therefore moved the stop into the noise band and the runner was scratched
+// before TP2. V3:
+//   • TP1 counts for the ladder only when a CLOSED bar closes beyond T1
+//     (or the caller stamps tp1CloseConfirmed).
+//   • post-TP1 stop = fee-breakeven + a volatility-classed buffer (not raw BE).
+//   • mode `shadow` (default) computes/report everything, decisions unchanged;
+//     `enforce` makes V3 the decider. Rollout = shadow → paper → live-small.
+//   • `off` restores pre-V3 behaviour exactly.
+export function exitPolicyV3Mode() {
+  const raw = String(process.env.EXIT_POLICY_V3 ?? 'shadow').trim().toLowerCase();
+  if (raw === 'enforce' || raw === 'on' || raw === '1' || raw === 'true') return 'enforce';
+  if (raw === 'off' || raw === '0' || raw === 'false' || raw === 'disabled') return 'off';
+  return 'shadow';
+}
+
+/** Pure TP1 close-confirmation check. `closedCandles` MUST contain only closed
+ *  bars (caller drops the forming bar). Returns null when there is no usable
+ *  series (honest "unknown" — never a fabricated confirm). When `sinceTs` is
+ *  supplied, a bar without a timestamp cannot prove post-entry confirmation
+ *  and is ignored. */
+export function confirmTp1OnClosedBars({ closedCandles = null, side, t1, sinceTs = 0 } = {}) {
+  const s = normalizeSide(side);
+  const target = Number(t1);
+  if (!Array.isArray(closedCandles) || closedCandles.length === 0 || !s || !(target > 0)) return null;
+  const isLong = s === 'LONG';
+  const since = Number(sinceTs) > 0 ? Number(sinceTs) : 0;
+  let confirmedAt = null;
+  let timestamped = 0;
+  for (const c of closedCandles) {
+    const close = Number(c?.close);
+    if (!(close > 0)) continue;
+    const rawTs = Number(c?.ts ?? c?.time ?? c?.t ?? c?.timestamp);
+    const tsMs = rawTs > 0 ? (rawTs < 1e11 ? rawTs * 1000 : rawTs) : null;
+    if (tsMs != null) timestamped++;
+    if (since > 0) {
+      if (tsMs == null || tsMs < since) continue;
+    }
+    const hit = isLong ? close >= target : close <= target;
+    if (hit && (confirmedAt == null || (tsMs != null && tsMs < confirmedAt))) {
+      confirmedAt = tsMs != null ? tsMs : 0;
+    }
+  }
+  return {
+    confirmed: confirmedAt != null,
+    confirmedAt,
+    bars: closedCandles.length,
+    timestamped,
+  };
+}
+
+// v21.28.0 [F2 LIVE TP1 PARTIAL — SAFE REDUCE, FLAG-GATED]
+// Paper engine TP1 = partial book + BE runner. LIVE previously had no partial
+// (exchange native TP closed the whole position at T2), so a TP1 touch could
+// not bank anything. This helper books the SAME volatility-sized fraction on
+// CoinDCX through the route-injected `livePartial` adapter (which must use
+// safeReduceFuturesPosition). Rules:
+//   • only LIVE futures rows, only when cfg.liveTp1Partial === true
+//   • only after TP1 touch; V3 enforce additionally requires close-confirm
+//   • one-shot latch on the book row (`t1PartialBooked`) — persisted
+//   • in-flight lock prevents the 3s + 15s lanes double-reducing
+//   • ambiguous exchange outcome → 5 min cooldown (never blind retry)
+//   • paper mirror books T1 ONLY after the exchange accepts the reduce
+//   • [VERIFY-LIVE] CoinDCX partial reduce + native TP/SL interaction must be
+//     validated on a small position before enabling on real money.
+const _livePartialInFlight = new Set();
+
+async function _tryLiveTp1Partial({ b, deepEval, cfg, p, livePaper = null, paper = null, now = Date.now() } = {}) {
+  const isLiveTpRow = b?.executionMode === 'LIVE' && !(b.market === 'INDIA' || b.execMarket === 'INDIA');
+  if (!isLiveTpRow) return { attempted: false, booked: false, reason: 'not-live-futures' };
+  if (cfg?.liveTp1Partial !== true) return { attempted: false, booked: false, reason: 'flag-off' };
+  if (b.t1PartialBooked === true) return { attempted: true, booked: false, reason: 'already-booked' };
+  const retryAt = Number(b.t1PartialNextRetryAt) || 0;
+  if (retryAt > now) return { attempted: true, booked: false, reason: 'retry-cooldown', retryAt };
+  if (deepEval?.tp1Hit !== true) return { attempted: true, booked: false, reason: 'tp1-not-touched' };
+  if (exitPolicyV3Mode() === 'enforce' && deepEval?.tp1Confirmed !== true) {
+    return { attempted: true, booked: false, reason: 'awaiting-close-confirm' };
+  }
+  if (typeof p?.livePartial !== 'function') {
+    b.t1PartialNextRetryAt = now + 60_000;
+    b.t1PartialLastError = 'livePartial adapter unavailable';
+    return { attempted: true, booked: false, error: b.t1PartialLastError };
+  }
+  const lockKey = `${String(b.execMarket || b.market)}:${String(b.symbol)}`;
+  if (_livePartialInFlight.has(lockKey)) return { attempted: true, booked: false, reason: 'in-flight' };
+  const originalQty = Number(b.originalQty) > 0 ? Number(b.originalQty) : Number(b.qty);
+  const pct = Number(deepEval?.t1ClosePct) > 0
+    ? Math.max(0.05, Math.min(0.90, Number(deepEval.t1ClosePct)))
+    : 0.5;
+  const requestedQty = originalQty * pct;
+  if (!(requestedQty > 0)) {
+    b.t1PartialNextRetryAt = now + 60_000;
+    b.t1PartialLastError = 'qty unavailable for TP1 partial';
+    return { attempted: true, booked: false, error: b.t1PartialLastError };
+  }
+  _livePartialInFlight.add(lockKey);
+  b.t1PartialLastAttemptAt = now;
+  let res = null;
+  try {
+    res = await p.livePartial({
+      ...b,
+      qty: requestedQty,
+      side: b.side,
+      pair: b.pair,
+      livePositionId: b.livePositionId,
+      leverage: b.leverage,
+      reason: `TP1 partial ${Math.round(pct * 100)}%`,
+    });
+  } catch (e) {
+    res = { ok: false, error: String(e?.message || e) };
+  } finally {
+    _livePartialInFlight.delete(lockKey);
+  }
+  if (!res?.ok) {
+    const ambiguous = res?.ambiguous === true;
+    b.t1PartialNextRetryAt = now + (ambiguous ? 5 * 60_000 : 60_000);
+    b.t1PartialLastError = String(res?.error || res?.reason || 'TP1 reduce failed').slice(0, 180);
+    if (ambiguous) b.t1PartialAmbiguous = true;
+    return { attempted: true, booked: false, ambiguous, error: b.t1PartialLastError };
+  }
+
+  // ---- exchange accepted: latch + stamp BEFORE any mirror write ----
+  b.t1PartialBooked = true;
+  b.t1PartialBookedAt = now;
+  b.t1PartialQty = Number(res?.requestedQty) > 0 ? Number(res.requestedQty) : +requestedQty.toFixed(8);
+  b.t1PartialOrderId = res?.orderId || null;
+  b.t1PartialVerified = res?.verified === true;
+  b.t1PartialVerifyPending = res?.verified !== true;
+  b.t1PartialNextRetryAt = 0;
+  b.qtyAfterTp1 = Number.isFinite(Number(res?.postQty)) ? Number(res.postQty) : null;
+  if (b.qtyAfterTp1 != null && b.qtyAfterTp1 >= 0) b.qty = b.qtyAfterTp1;
+  delete b.t1PartialLastError;
+  delete b.t1PartialAmbiguous;
+
+  // Paper mirror booking ONLY after the exchange accepted the reduce.
+  let mirror = { booked: false, skipped: 'no-mirror' };
+  if (livePaper && livePaper.t1Hit !== true && typeof paper?.bookPaperT1Partial === 'function') {
+    const t1 = Number(deepEval?.t1) > 0 ? Number(deepEval.t1) : Number(b.t1);
+    const ltp = Number(deepEval?.ltp) > 0 ? Number(deepEval.ltp) : Number(b.ltp);
+    const isLong = b.side === 'LONG';
+    const px = t1 > 0
+      ? (isLong ? Math.max(ltp || 0, t1) : Math.min(ltp || t1, t1))
+      : ltp;
+    try {
+      const r = paper.bookPaperT1Partial(livePaper.id, px);
+      mirror = { booked: r?.ok === true, error: r?.ok ? null : String(r?.error || 'mirror book failed') };
+    } catch (e) {
+      mirror = { booked: false, error: String(e?.message || e) };
+    }
+  }
+  return { attempted: true, booked: true, res, mirror };
+}
+
 function _blockedDirectionDeepEval({ trade, cert, entry, initialSl, currentSl, t1, t2, ltp, market, ccy }) {
   const reason = cert.reasons[0] || cert.verdict || 'invalid direction';
   const peak = Number(trade.peakPrice) > 0 ? Number(trade.peakPrice) : entry;
@@ -636,6 +808,17 @@ function _blockedDirectionDeepEval({ trade, cert, entry, initialSl, currentSl, t
     atrPct: Number(trade.atrPct) > 0 ? Number(trade.atrPct) : null,
     t1ClosePct: Number(trade.t1ClosePct) > 0 ? Number(trade.t1ClosePct) : 0.5,
     trailEngine: 'blocked',
+    // v21.28.0 F4: blocked rows never latch TP1 (and never move a stop).
+    tp1Confirmed: false,
+    tp1ConfirmSource: 'blocked',
+    tp1LadderActive: false,
+    exitPolicyV3: {
+      mode: exitPolicyV3Mode(),
+      applied: false,
+      shadow: false,
+      tp1CloseConfirmed: false,
+      note: 'direction certificate blocked — no TP1/ladder action',
+    },
     t2Extended: false,
     t2Extensions: Number(trade.t2Extensions) || 0,
     smartTrail: null,
@@ -729,6 +912,49 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const volClass = profile.volClass;
   const momentumState = profile.momentumState || MOMENTUM.UNKNOWN;
 
+  // v21.28.0 [F4 EXIT_POLICY_V3 — SHADOW FIRST] -------------------------
+  // Raw TP1 touch telemetry stays as-is (UI/paper parity). The V3 ladder
+  // checkpoint below uses `tp1Ladder`, which in enforce mode requires a
+  // CLOSED bar to close beyond T1. In shadow mode decisions remain legacy.
+  const exitV3Mode = exitPolicyV3Mode();
+  const exitV3Available = proExitPolicy && exitV3Mode !== 'off';
+  const exitV3Enforce = exitV3Available && exitV3Mode === 'enforce';
+  const _v3SinceTs = Number(trade.openedAt ?? trade.openedAtMs) > 0
+    ? Number(trade.openedAt ?? trade.openedAtMs)
+    : 0;
+  const _v3Candles = Array.isArray(liveCtx.closedCandles) ? liveCtx.closedCandles : null;
+  const _v3CandleCheck = confirmTp1OnClosedBars({
+    closedCandles: _v3Candles,
+    side,
+    t1,
+    sinceTs: _v3SinceTs,
+  });
+  const _v3Stamp = typeof trade.tp1CloseConfirmed === 'boolean'
+    ? trade.tp1CloseConfirmed
+    : (typeof trade.t1CloseConfirmed === 'boolean' ? trade.t1CloseConfirmed : null);
+  let tp1CloseConfirmed = null;
+  let tp1ConfirmSource = 'none';
+  if (_v3Stamp !== null) {
+    tp1CloseConfirmed = _v3Stamp;
+    tp1ConfirmSource = 'trade-stamp';
+  } else if (_v3CandleCheck) {
+    tp1CloseConfirmed = _v3CandleCheck.confirmed;
+    tp1ConfirmSource = 'closed-candles';
+  } else if (!tp1Touched) {
+    tp1CloseConfirmed = false; // no touch at all → definitely not confirmed
+    tp1ConfirmSource = 'no-touch';
+  }
+  const _v3ConfirmAt = _v3CandleCheck?.confirmedAt ?? (Number(trade.tp1CloseConfirmedAt) > 0 ? Number(trade.tp1CloseConfirmedAt) : null);
+  const tp1Ladder = exitV3Enforce ? (tp1CloseConfirmed === true) : tp1Touched;
+  // BE+buffer: volatility-classed (LOW 0.05R … EXTREME 0.15R), momentum-scaled.
+  const _v3BufBase = { LOW: 0.05, NORMAL: 0.08, HIGH: 0.12, EXTREME: 0.15 }[volClass] ?? 0.08;
+  const v3BeBufferR = +(_v3BufBase
+    * (momentumState === MOMENTUM.SURGING ? 1 : (momentumState === MOMENTUM.FADING ? 0.75 : 1))).toFixed(3);
+  const v3BeBufferPrice = +(v3BeBufferR * risk).toFixed(6);
+  const _v3BeBase = feeFloor > 0 ? feeFloor : entry;
+  const v3BePlusBufferSl = +(isLong ? _v3BeBase + v3BeBufferPrice : _v3BeBase - v3BeBufferPrice).toFixed(6);
+  const _v3LegacyBeSl = feeFloor > 0 ? feeFloor : entry;
+
   // v21.24.0 SMART TRAIL v2 (SMART_TRAIL_V2 = off | shadow(default) | enforce).
   // shadow: computed + exposed as telemetry, v1 decides. enforce: v2 decides.
   const _row0 = liveCtx.boardRow || null;
@@ -788,18 +1014,24 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     candidateSl = tightenSl(candidateSl, t1 > 0 ? t1 : priceAtR(1.2));
   } else if (proExitPolicy) {
     // PRO LADDER: exactly two profit checkpoints after TP1. No chandelier,
-    // no giveback ratchet, no smart-trail override.
-    if (tp1Touched && tp2Approach) {
+    // no giveback ratchet, no smart-trail override. V3 enforce gates the TP1
+    // checkpoint on a CLOSED-bar confirmation and adds a BE buffer.
+    if (tp1Ladder && tp2Approach) {
       stageCode = 'STAGE_5_RUNNER_TO_TP2';
       stageLabel = 'Stage 5 - TP2 Approach | SL Locked at TP1';
       candidateSl = tightenSl(candidateSl, t1 > 0 ? t1 : (feeFloor > 0 ? feeFloor : entry));
-    } else if (tp1Touched) {
+    } else if (tp1Ladder) {
       stageCode = 'STAGE_4_TP1_LOCKED';
-      stageLabel = 'Stage 4 - TP1 Secured | SL Locked at Fee-Breakeven';
-      candidateSl = tightenSl(candidateSl, feeFloor > 0 ? feeFloor : entry);
+      stageLabel = exitV3Enforce
+        ? 'Stage 4 - TP1 Close-Confirmed | SL Locked at Fee-Breakeven + Buffer'
+        : 'Stage 4 - TP1 Secured | SL Locked at Fee-Breakeven';
+      candidateSl = tightenSl(candidateSl, exitV3Enforce ? v3BePlusBufferSl : (feeFloor > 0 ? feeFloor : entry));
     } else {
       stageCode = 'STAGE_0_INITIAL_GUARD';
       stageLabel = 'Stage 0 - Initial SL Guard (PRO: no trail before TP1)';
+      if (exitV3Enforce && tp1Touched && tp1CloseConfirmed !== true) {
+        stageLabel += ' · TP1 touch awaiting closed-bar confirm';
+      }
       // candidateSl stays at the carried stop - initial SL is the backstop.
     }
   } else if (peakR >= 1.4 || (tp1Touched && peakR >= 1.25)) {
@@ -934,8 +1166,8 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   // can scratch the trade, and only AFTER round-trip fees are covered. A
   // normal pullback never qualifies. Post-TP1 a confirmed reversal exits at
   // the locked fee-BE/TP1 stop - never at a fee loss.
-  const proPreTp1Scratch = proExitPolicy && !tp1Touched && reversalConfirmed && feeCovered;
-  const proPostTp1Reversal = proExitPolicy && tp1Touched && !tp2Touched && reversalConfirmed && feeCovered;
+  const proPreTp1Scratch = proExitPolicy && !tp1Ladder && reversalConfirmed && feeCovered;
+  const proPostTp1Reversal = proExitPolicy && tp1Ladder && !tp2Touched && reversalConfirmed && feeCovered;
   const legacyReversalProfit = !proExitPolicy && reversalConfirmed && feeCovered && currentR >= 0.12;
   const shouldBookProfitNow = Boolean(
     tp2Touched
@@ -998,6 +1230,33 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     t2,
     tp1Hit: tp1Touched,
     tp2Hit: tp2Touched,
+    // v21.28.0 [F4]: raw touch vs close-confirmed; ladder uses `tp1LadderActive`.
+    tp1Confirmed: tp1CloseConfirmed === true,
+    tp1CloseConfirmedKnown: tp1CloseConfirmed !== null,
+    tp1ConfirmSource,
+    tp1ConfirmedAt: _v3ConfirmAt,
+    tp1LadderActive: Boolean(tp1Ladder),
+    exitPolicyV3: {
+      mode: exitV3Mode,
+      applied: exitV3Enforce,
+      shadow: exitV3Available && !exitV3Enforce,
+      tp1Touch: tp1Touched,
+      tp1CloseConfirmed,
+      tp1ConfirmSource,
+      tp1ConfirmedAt: _v3ConfirmAt,
+      barsSeen: _v3CandleCheck?.bars ?? 0,
+      beBufferR: v3BeBufferR,
+      beBufferPrice: v3BeBufferPrice,
+      bePlusBufferSl: v3BePlusBufferSl,
+      legacyBeSl: _v3LegacyBeSl,
+      note: !exitV3Available
+        ? 'V3 inactive (proExitPolicy off or EXIT_POLICY_V3=off) — legacy ladder'
+        : exitV3Enforce
+          ? (tp1CloseConfirmed === true
+            ? 'V3 ENFORCE: TP1 close-confirmed → BE+buffer locked'
+            : 'V3 ENFORCE: TP1 not close-confirmed → initial SL stands')
+          : 'V3 SHADOW: telemetry only — legacy ladder still decides',
+    },
     peakPrice: +peakPrice.toFixed(6),
     currentR,
     peakR,
@@ -1364,9 +1623,33 @@ export function markAutoTradeSlSynced({ symbol = null, paperId = null, stopLoss 
   }
   if (exchange) b.lastExchangeSl = wantSl > 0 ? wantSl : (bookSl > 0 ? bookSl : null);
   b.slSyncPending = false;
+  b.slNextRetryAt = 0;
   b.lastSlSyncAt = Date.now();
   _persistState();
   return { ok: true, trade: b };
+}
+
+/**
+ * v21.28.0 [F5 RETRY SPACING]: a create_tpsl push can be ACCEPTED while the
+ * read-back is still unverified. Retrying on the next 3s/60s pass would stack
+ * duplicate TP/SL orders on CoinDCX (replace-vs-stack behaviour is still
+ * [VERIFY-LIVE]). This keeps the retry pending but spaces it out.
+ */
+export function markAutoTradeSlRetry({ symbol = null, paperId = null, retryAfterMs = 60_000, reason = null, now = Date.now() } = {}) {
+  const st = _loadState();
+  const sym = String(symbol || '').toUpperCase();
+  const b = st.book.find((x) => {
+    if (x.status !== 'OPEN') return false;
+    if (paperId != null && x.paperId != null && String(x.paperId) === String(paperId)) return true;
+    return Boolean(sym) && String(x.symbol || '').toUpperCase() === sym;
+  });
+  if (!b) return { ok: false, error: 'open trade not found' };
+  const waitMs = Math.max(4_500, Number(retryAfterMs) || 60_000);
+  b.slSyncPending = true;
+  b.slNextRetryAt = Number(now) + waitMs;
+  b.slLastSyncError = reason ? String(reason).slice(0, 180) : null;
+  _persistState();
+  return { ok: true, trade: b, retryAt: b.slNextRetryAt };
 }
 
 function _openNotionalINR(liveOnly = false) {
@@ -1465,6 +1748,13 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
     // v21.25.0: exchange-supplied levels must obey the authoritative side;
     // a wrong-side SL/TP is ignored (synthesized protective level instead).
     const posSlValid = rawPosSl != null && (isLong ? rawPosSl < entry : rawPosSl > entry);
+    // v21.28.0 [F9 PROTECTION ARMING]: only an exchange-reported SL proves
+    // native protection. `pos.stopLoss` may be journal/synthesized upstream.
+    // Legacy callers/tests without the `exchangeSl` field keep the old contract.
+    const hasExchangeSlField = Object.prototype.hasOwnProperty.call(pos, 'exchangeSl');
+    const exchangeSlKnown = hasExchangeSlField
+      ? (Number(pos.exchangeSl) > 0 ? Number(pos.exchangeSl) : null)
+      : (posSlValid ? rawPosSl : null);
     const initialSl = posSlValid
       ? rawPosSl
       : +(isLong ? entry * (1 - defaultRiskPct) : entry * (1 + defaultRiskPct)).toFixed(6);
@@ -1492,13 +1782,18 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
       }
       if (pos.pair) existing.pair = String(pos.pair);
       existing.qty = qty;
+      // v21.28.0 [F2]: TP1 partial size is a fraction of the qty at adoption;
+      // never overwrite it on later re-syncs.
+      if (!(Number(existing.originalQty) > 0)) existing.originalQty = qty;
       existing.entry = entry;
       existing.leverage = leverage;
       if (ltp > 0) existing.ltp = ltp;
       // v21.25.0 [SIDE-SYNC CORRECTION]: agar book row ka stored side exchange
       // ke activePos sign se ulta hai to row ko correct karo — warna SHORT
       // position LONG ki tarah trail hoti hai (SL-hit logic inverted).
+      let sideResynced = false;
       if (existing.side !== side) {
+        sideResynced = true;
         _logEvent('direction-mismatch', `⚠️ BOOK SIDE CORRECTED ${sym}: ${existing.side || 'unknown'} → ${side} (activePos ${posSide.rawActivePos ?? '—'} authoritative)`);
         existing.side = side;
         existing.peakPrice = isLong ? Math.max(entry, ltp) : Math.min(entry, ltp);
@@ -1508,7 +1803,16 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
         existing.t1Hit = false;
         existing.trailedStopLoss = initialSl;
         existing.lastExchangeSl = null;
-        existing.slSyncPending = false;
+        // v21.28.0 [F9]: a corrected side invalidates any previously armed
+        // stop/target polarity — both must be re-armed before being trusted.
+        existing.slSyncPending = true;
+        existing.tpSyncPending = true;
+        existing.slNextRetryAt = 0;
+        existing.t1PartialBooked = false;
+        existing.t1PartialBookedAt = null;
+        existing.t1PartialNextRetryAt = 0;
+        existing.t1PartialLastError = null;
+        existing.t1PartialAmbiguous = false;
       }
       // Polarity repair: a level on the wrong side of entry can never be a
       // valid SL/target — replace with the exchange-derived protective levels.
@@ -1526,6 +1830,23 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
       if (t1Wrong) existing.t1 = t1;
       const t2Wrong = !(existing.t2 > 0) || (isLong ? existing.t2 <= existing.t1 : existing.t2 >= existing.t1);
       if (t2Wrong) existing.t2 = t2;
+      // v21.28.0 [F9 PROTECTION ARMING]: exchange read-back is authoritative.
+      // When CoinDCX reports a valid SL, adopt it as the protection anchor;
+      // when no exchange SL is known and we never verified one, mark the row
+      // sync-pending so the 3s/15s lane arms it through the F5 read-back path
+      // (never claim PROTECTED on a synthesized/journal level).
+      if (sideResynced) {
+        // Old anchor had the opposite polarity — never trust it after a flip.
+        existing.lastExchangeSl = null;
+        existing.slSyncPending = true;
+        existing.tpSyncPending = true;
+      } else if (exchangeSlKnown > 0) {
+        existing.lastExchangeSl = exchangeSlKnown;
+        existing.slSyncPending = false;
+      } else if (!(Number(existing.lastExchangeSl) > 0)) {
+        existing.lastExchangeSl = null;
+        existing.slSyncPending = true;
+      }
       existing.activePos = posSide.rawActivePos;
       existing.directionCertificate = buildDirectionCertificate({
         symbol: sym,
@@ -1614,7 +1935,11 @@ export function syncCoinDcxActivePositionsToDeepMonitor(activePositions = [], op
       t2,
       lastExchangeTp: null,   // adopted position: exchange TP not verified
       tpSyncPending: false,
+      // v21.28.0 [F9]: no exchange SL read-back = unverified → arm via retry.
+      lastExchangeSl: exchangeSlKnown,
+      slSyncPending: !(exchangeSlKnown > 0),
       qty,
+      originalQty: qty,
       leverage,
       walletINR: Math.round(wDeploy.walletTotalINR),
       walletDeployPct: wDeploy.walletDeployPct,
@@ -1983,7 +2308,7 @@ async function _tryOpenUcFlipReverse({ b, boardRow, ltp, p, cfg, out, now }) {
       tier: boardRow?.tier ?? b.tier ?? 'FLIP',
       mode: b.mode || cfg.mode || 'INTRADAY', holdMin: b.holdMin || cfg.holdMin || null,
       entry: finalEntry, stopLoss: finalSl, initialStopLoss: finalSl, trailedStopLoss: finalSl, peakPrice: finalEntry,
-      t1: finalT1, t2: finalT2, qty: finalQty,
+      t1: finalT1, t2: finalT2, qty: finalQty, originalQty: finalQty,
       lastExchangeTp: liveOrderResult?.ok ? finalT2 : null,
       // v21.24.0 STOP-INTEGRITY anchor: entry-arming ne yahi SL exchange par
       // arm kiya tha — 3s divergence check isi ke against compare karta hai.
@@ -2137,6 +2462,7 @@ export async function mtfAutoTick(p = {}) {
   // bachne aur hogye utna profit book kar lena chahiye aisa super intelligence banaoye sab Automated
   // hona chahiye accurately Trend follow karo bearish or bullish realtime."
   if ((cfg.feeAwareReversalExit !== false || cfg.deepMonitorEnabled !== false) && (typeof paper.closePaperTrade === 'function' || typeof p.liveClose === 'function')) {
+    let deepMonDecisionCount = 0;
     for (const b of _openLinked()) {
       // v21.26.0 AI SUPER AGENT single-owner guard: the tick agent may already
       // be closing/flipping this exact row. Never let the 15s sweep fire a
@@ -2218,9 +2544,11 @@ export async function mtfAutoTick(p = {}) {
       }, {
         ltp: rawQuote,
         boardRow: effRow,
+        closedCandles: closedCandlesFor(b.symbol, b.execMarket || b.market, { now }),
         reversalConfirmed: revByRow,
         proExitPolicy: cfg.proExitPolicy !== false,
       });
+      deepMonDecisionCount += 1;
 
       // Persist updated peakPrice, trailedStopLoss, stage, and live telemetry on the linked book record
       b.ltp = rawQuote;
@@ -2249,6 +2577,14 @@ export async function mtfAutoTick(p = {}) {
         } catch { /* non-fatal */ }
       }
       const isLiveTpRow = b.executionMode === 'LIVE' && !(b.market === 'INDIA' || b.execMarket === 'INDIA');
+      // v21.28.0 [F2]: book the LIVE TP1 fraction BEFORE the SL moves to BE.
+      // Flag-gated (default off); failure never unbooks or fabricates an exit.
+      const liveTp1Partial = await _tryLiveTp1Partial({ b, deepEval, cfg, p, livePaper, paper, now });
+      if (liveTp1Partial.booked) {
+        _logEvent('live-tp1', `💰 LIVE TP1 PARTIAL ${b.symbol} (${b.side}): ${liveTp1Partial.res?.requestedQty ?? b.t1PartialQty} qty reduced @ ${rawQuote} (${Math.round((deepEval.t1ClosePct || 0.5) * 100)}%) [${deepEval.stageLabel}]`);
+      } else if (liveTp1Partial.attempted && liveTp1Partial.error) {
+        _logEvent('live-tp1-error', `⚠️ LIVE TP1 PARTIAL ${b.symbol} (${b.side}) not booked — ${liveTp1Partial.error}`);
+      }
       if (deepEval.slTrailed && deepEval.trailedStopLoss > 0) {
         const prevSl = b.trailedStopLoss ?? b.stopLoss;
         b.trailedStopLoss = deepEval.trailedStopLoss;
@@ -2257,7 +2593,13 @@ export async function mtfAutoTick(p = {}) {
         if (isLiveTpRow && typeof p.liveUpdateSl === 'function') {
           const lastSyncSl = Number(b.lastExchangeSl) || 0;
           const slDeltaPct = lastSyncSl > 0 ? Math.abs(deepEval.trailedStopLoss - lastSyncSl) / lastSyncSl : 1;
-          if (slDeltaPct >= 0.0005) {
+          const slRetryAt = Number(b.slNextRetryAt) || 0;
+          if (slRetryAt > now) {
+            // v21.28.0 [F5 RETRY SPACING]: last push was accepted but the
+            // read-back stayed unverified. Do not stack another create_tpsl
+            // inside the cooldown — book SL already carries the new level.
+            b.slSyncPending = true;
+          } else if (slDeltaPct >= 0.0005) {
             try {
               const slRes = await p.liveUpdateSl({ ...b, stopLoss: deepEval.trailedStopLoss, takeProfit: b.t2 });
               if (slRes?.ok) {
@@ -2266,15 +2608,21 @@ export async function mtfAutoTick(p = {}) {
                 if (Number(b.t2) > 0) b.lastExchangeTp = b.t2;
                 b.tpSyncPending = false;
                 b.slSyncPending = false;
+                b.slNextRetryAt = 0;
+                b.slLastSyncError = null;
               } else {
                 // v21.24.0 STOP-INTEGRITY: exchange ne SL accept nahi kiya —
                 // retry flag ON rakho. Warna next trail transition na aane par
                 // book tighter SL CLAIM karta rahega jabki exchange purane
                 // (wider) SL par khada hoga — exactly XRP divergence.
                 b.slSyncPending = true;
+                b.slNextRetryAt = now + (Number(slRes?.retryAfterMs) > 0 ? Number(slRes.retryAfterMs) : 60_000);
+                b.slLastSyncError = String(slRes?.error || slRes?.readBackError || 'exchange SL unverified').slice(0, 180);
               }
-            } catch {
+            } catch (e) {
               b.slSyncPending = true;
+              b.slNextRetryAt = now + 60_000;
+              b.slLastSyncError = String(e?.message || e).slice(0, 180);
             }
           }
         }
@@ -2282,20 +2630,31 @@ export async function mtfAutoTick(p = {}) {
       } else if (b.slSyncPending && isLiveTpRow && typeof p.liveUpdateSl === 'function') {
         // v21.24.0 STOP-INTEGRITY RETRY: pichhla SL sync fail hua tha (ya
         // process restart se pehle land nahi hua) — exchange confirm hone tak
-        // har tick retry, silently stale stop kabhi nahi.
-        try {
-          const slRes = await p.liveUpdateSl({
-            ...b,
-            stopLoss: b.trailedStopLoss ?? b.stopLoss,
-            takeProfit: b.t2,
-          });
-          if (slRes?.ok) {
-            const syncedSl = b.trailedStopLoss ?? b.stopLoss;
-            if (Number(syncedSl) > 0) b.lastExchangeSl = syncedSl;
-            b.slSyncPending = false;
-            _logEvent('sl-sync', `🛡️ SL SYNC RECOVERED ${b.symbol} (${b.side}): exchange SL re-armed at ${syncedSl}`);
+        // retry, silently stale stop kabhi nahi. v21.28.0: read-back-unverified
+        // pushes get 60s spacing so create_tpsl never stacks.
+        if (!(Number(b.slNextRetryAt) > now)) {
+          try {
+            const slRes = await p.liveUpdateSl({
+              ...b,
+              stopLoss: b.trailedStopLoss ?? b.stopLoss,
+              takeProfit: b.t2,
+            });
+            if (slRes?.ok) {
+              const syncedSl = b.trailedStopLoss ?? b.stopLoss;
+              if (Number(syncedSl) > 0) b.lastExchangeSl = syncedSl;
+              b.slSyncPending = false;
+              b.slNextRetryAt = 0;
+              b.slLastSyncError = null;
+              _logEvent('sl-sync', `🛡️ SL SYNC RECOVERED ${b.symbol} (${b.side}): exchange SL re-armed at ${syncedSl}`);
+            } else {
+              b.slNextRetryAt = now + (Number(slRes?.retryAfterMs) > 0 ? Number(slRes.retryAfterMs) : 60_000);
+              b.slLastSyncError = String(slRes?.error || slRes?.readBackError || 'exchange SL unverified').slice(0, 180);
+            }
+          } catch (e) {
+            b.slNextRetryAt = now + 60_000;
+            b.slLastSyncError = String(e?.message || e).slice(0, 180);
           }
-        } catch { /* next tick retries */ }
+        }
       }
 
       // v21.24.0 SMART TRAIL v2 telemetry + ROLLING TP2 (enforce only moves the target).
@@ -2504,6 +2863,9 @@ export async function mtfAutoTick(p = {}) {
       } else if (revByRow && revEval && !revEval.feeCovered && !(cfg.ucFlipReverse !== false && ucFlipAgeOk)) {
         _logEvent('reversal-hold', `REVERSAL FEE-GUARD HOLD ${b.symbol}: ltp ${rawQuote} has not cleared fee-breakeven ${revEval.feeBePrice} — holding to prevent fee loss (SL tightened to ${b.trailedStopLoss ?? b.stopLoss})`);
       }
+    }
+    if (deepMonDecisionCount > 0) {
+      _stampDeepMonitorHeartbeat({ source: 'auto-tick-15s', now, count: deepMonDecisionCount });
     }
     _persistState();
   }
@@ -3034,7 +3396,7 @@ export async function mtfAutoTick(p = {}) {
         }),
         score: row.superScore, tier: row.tier, mode: row.mode, holdMin: row.holdMin,
         entry: finalEntry, stopLoss: finalSl, initialStopLoss: finalSl, trailedStopLoss: finalSl, peakPrice: finalEntry,
-        t1: finalT1, t2: finalT2, qty: finalQty,
+        t1: finalT1, t2: finalT2, qty: finalQty, originalQty: finalQty,
         // Entry-armed exchange TP (createFuturesTpsl gets target2). Kept as the
         // "last confirmed" marker so rolling-TP2 retries can compare against it.
         lastExchangeTp: liveOrderResult?.ok ? finalT2 : null,
@@ -3107,8 +3469,221 @@ export async function mtfAutoTick(p = {}) {
  * (used by mtfAutoStatus, SIGNAL RECHECK — 15s LIVE WATCH, MTFDualBoardPanel, and Telegram Bot).
  * Strictly filters out any untraded fallback entries ("entry without traded").
  */
+// ------------------------------------------------------------
+// v21.28.0 [F9] DEEP-MONITOR HEARTBEAT + PROTECTION / LADDER TELEMETRY
+// ------------------------------------------------------------
+// Audit finding F9: the UI could show a "monitoring" trade while the 3s/15s
+// decision lane was dead (no fresh decision), and a LIVE position's exchange
+// stop could be missing/diverged without any visible badge. These helpers are
+// pure/observational — they NEVER move a stop, open, close or size a trade.
+export const DEEP_MONITOR_STALE_MS = 10_000;
+const DEEP_MONITOR_HB_SOURCES_MAX = 8;
+const DEEP_MONITOR_PROTECTION_TOL_PCT = 0.0005;
+
+function _freshDeepMonitorHb() {
+  return { lastDecisionAt: 0, decisions: 0, lastSource: null, lastCount: 0, sources: {} };
+}
+let _deepMonitorHb = _freshDeepMonitorHb();
+
+/** Record that a REAL monitor lane (3s fast loop, 15s auto tick, or the
+ *  per-trade super agent) evaluated the active book. Status/UI polling must
+ *  never call this — otherwise a dead lane would keep looking fresh. */
+export function _stampDeepMonitorHeartbeat({ source = 'unknown', now = Date.now(), count = 0 } = {}) {
+  const at = Number(now) > 0 ? Number(now) : Date.now();
+  const src = String(source || 'unknown').slice(0, 40);
+  _deepMonitorHb.lastDecisionAt = at;
+  _deepMonitorHb.decisions = (Number(_deepMonitorHb.decisions) || 0) + 1;
+  _deepMonitorHb.lastSource = src;
+  _deepMonitorHb.lastCount = Math.max(0, Number(count) || 0);
+  const prev = _deepMonitorHb.sources[src];
+  _deepMonitorHb.sources[src] = {
+    count: (Number(prev?.count) || 0) + 1,
+    lastAt: at,
+    lastCount: _deepMonitorHb.lastCount,
+  };
+  const keys = Object.keys(_deepMonitorHb.sources);
+  if (keys.length > DEEP_MONITOR_HB_SOURCES_MAX) {
+    for (const k of keys) {
+      if (k !== src) { delete _deepMonitorHb.sources[k]; break; }
+    }
+  }
+  return _deepMonitorHeartbeat({ now: at });
+}
+
+/** Honest heartbeat snapshot. `stale:null` means "never stamped" (unknown),
+ *  not "healthy". A lane is stale after DEEP_MONITOR_STALE_MS without a pass. */
+export function _deepMonitorHeartbeat({ now = Date.now() } = {}) {
+  const at = Number(now) > 0 ? Number(now) : Date.now();
+  const last = Number(_deepMonitorHb.lastDecisionAt) || 0;
+  const ageMs = last > 0 ? Math.max(0, at - last) : null;
+  return {
+    lastDecisionAt: last > 0 ? last : null,
+    ageMs,
+    staleAfterMs: DEEP_MONITOR_STALE_MS,
+    stale: last > 0 ? ageMs > DEEP_MONITOR_STALE_MS : null,
+    decisions: Number(_deepMonitorHb.decisions) || 0,
+    lastSource: _deepMonitorHb.lastSource || null,
+    lastCount: Number(_deepMonitorHb.lastCount) || 0,
+    sources: Object.entries(_deepMonitorHb.sources).map(([source, v]) => ({
+      source,
+      count: Number(v?.count) || 0,
+      lastAt: Number(v?.lastAt) || null,
+      lastCount: Number(v?.lastCount) || 0,
+      ageMs: Number(v?.lastAt) > 0 ? Math.max(0, at - Number(v.lastAt)) : null,
+    })),
+    checkedAt: at,
+  };
+}
+
+/** Exchange-vs-book stop protection badge for one active trade.
+ *  PAPER         — paper mirror owns the SL (no exchange native stop)
+ *  BROKER        — India broker venue (not verifiable through CoinDCX)
+ *  PROTECTED     — LIVE CoinDCX SL verified at the exchange and matching book
+ *  SYNC_PENDING  — a push/retry is in flight (never claim protection yet)
+ *  UNVERIFIED    — LIVE but no exchange SL read-back on record
+ *  DIVERGED      — exchange SL differs from the book SL (drift detected) */
+export function _deepMonitorProtection(b = {}, mon = {}) {
+  const mode = String(b.executionMode || 'PAPER').toUpperCase();
+  const isIndia = String(b.market || '').toUpperCase() === 'INDIA'
+    || String(b.execMarket || '').toUpperCase() === 'INDIA';
+  const bookSl = Number(mon.trailedStopLoss ?? mon.stopLoss ?? b.trailedStopLoss ?? b.stopLoss) || 0;
+  const exchangeSl = Number(b.lastExchangeSl) || 0;
+  const pending = b.slSyncPending === true;
+  const base = {
+    executionMode: mode,
+    bookSl: bookSl || null,
+    exchangeSl: exchangeSl || null,
+    slSyncPending: pending,
+    lastError: b.slLastSyncError || null,
+    diffPct: bookSl > 0 && exchangeSl > 0
+      ? +((Math.abs(bookSl - exchangeSl) / exchangeSl) * 100).toFixed(3)
+      : null,
+  };
+  if (mode !== 'LIVE') {
+    return { ...base, state: 'PAPER', label: '🧪 PAPER SL', tone: 'info', venue: 'paper', reason: 'paper mirror manages SL/TP' };
+  }
+  if (isIndia) {
+    return { ...base, state: 'BROKER', label: '🏦 BROKER SL', tone: 'info', venue: 'broker', reason: 'India broker-side protection — not verifiable through CoinDCX' };
+  }
+  if (pending) {
+    return { ...base, state: 'SYNC_PENDING', label: '⏳ SL SYNC PENDING', tone: 'warn', venue: 'coindcx', reason: b.slLastSyncError || 'exchange SL push/retry in flight' };
+  }
+  if (!(exchangeSl > 0)) {
+    return { ...base, state: 'UNVERIFIED', label: '❓ SL UNVERIFIED', tone: 'danger', venue: 'coindcx', reason: 'no exchange SL read-back on record' };
+  }
+  if (bookSl > 0 && Math.abs(bookSl - exchangeSl) / exchangeSl >= DEEP_MONITOR_PROTECTION_TOL_PCT) {
+    return { ...base, state: 'DIVERGED', label: '⚠️ SL DIVERGED', tone: 'danger', venue: 'coindcx', reason: `book SL ${bookSl} ≠ exchange SL ${exchangeSl}` };
+  }
+  return { ...base, state: 'PROTECTED', label: '🛡️ PROTECTED', tone: 'ok', venue: 'coindcx', reason: 'exchange SL verified and matching book' };
+}
+
+/** Visual exit-ladder rung tracker. Pre-TP1 the initial SL is the only stop;
+ *  after TP1 the stop moves to fee-BE(+buffer); at >=80% to TP2 it moves to
+ *  TP1; TP2 touch is the full-close rung. V3 close-confirmation appears as a
+ *  WAITING rung instead of pretending TP1 is locked. */
+export function _ladderTracker(_b = {}, mon = {}) {
+  const tp1Touched = Boolean(mon.tp1Hit ?? _b.t1Hit);
+  const tp1Ladder = Boolean(mon.tp1LadderActive);
+  const tp2Approach = Boolean(mon.tp2Approach);
+  const tp2Hit = Boolean(mon.tp2Hit);
+  const v3Enforce = mon.exitPolicyV3?.applied === true;
+  const awaitingClose = v3Enforce && tp1Touched && !tp1Ladder;
+  const initialSl = Number(mon.initialStopLoss ?? mon.previousStopLoss ?? _b.initialStopLoss ?? _b.stopLoss) || null;
+  const t1 = Number(mon.t1 ?? _b.t1) || null;
+  const t2 = Number(mon.t2 ?? _b.t2) || null;
+  const liveSl = Number(mon.trailedStopLoss ?? _b.trailedStopLoss ?? _b.stopLoss) || null;
+
+  let rung = 'INITIAL_SL';
+  if (tp2Hit) rung = 'TP2_EXIT';
+  else if (tp2Approach && tp1Ladder) rung = 'TP1_LOCK';
+  else if (tp1Ladder) rung = 'FEE_BE';
+  else if (awaitingClose) rung = 'TP1_CONFIRM';
+
+  const steps = [
+    {
+      key: 'INITIAL_SL', label: 'Initial SL', price: initialSl,
+      state: rung === 'INITIAL_SL' ? 'ACTIVE' : 'DONE',
+    },
+    {
+      key: 'FEE_BE', label: v3Enforce ? 'TP1 → fee-BE+buffer' : 'TP1 → fee-BE',
+      price: t1, stop: tp1Ladder ? liveSl : null,
+      state: tp1Ladder ? (rung === 'FEE_BE' ? 'ACTIVE' : 'DONE') : (awaitingClose ? 'WAITING' : 'PENDING'),
+    },
+    {
+      key: 'TP1_LOCK', label: 'TP2 ≥80% → SL at TP1',
+      price: t2, stop: tp2Approach && tp1Ladder ? t1 : null,
+      state: tp2Approach && tp1Ladder ? (rung === 'TP1_LOCK' ? 'ACTIVE' : 'DONE') : 'PENDING',
+    },
+    {
+      key: 'TP2_EXIT', label: 'TP2 → full close',
+      price: t2,
+      state: tp2Hit ? 'ACTIVE' : 'PENDING',
+    },
+  ];
+  if (awaitingClose) {
+    steps.splice(1, 0, {
+      key: 'TP1_CONFIRM', label: 'TP1 close-confirm', price: t1,
+      state: 'WAITING',
+    });
+  }
+  const progressPct = tp2Hit
+    ? 100
+    : Math.max(0, Math.min(100, Number(mon.tp2ProgressPct) || 0));
+  return {
+    rung,
+    progressPct: +progressPct.toFixed(1),
+    activeStep: rung,
+    awaitingTp1Confirm: awaitingClose,
+    steps,
+    note: awaitingClose
+      ? 'V3 enforce: wick TP1 cannot move the stop until a closed bar confirms'
+      : null,
+  };
+}
+
+/** Read-only "what will the monitor do next" preview. Direction is never
+ *  changed here — this is pure UI/audit text derived from the same decision. */
+export function _nextActionPreview(_b = {}, mon = {}, protection = null) {
+  const px = (v) => (Number(v) > 0 ? Number(v) : null);
+  if (mon.directionBlocked) {
+    return {
+      code: 'DIRECTION_BLOCKED', label: '⛔ DIRECTION BLOCKED', urgency: 'critical',
+      detail: mon.directionCertificate?.reasons?.[0] || 'direction certificate blocked — no trail / no exit',
+    };
+  }
+  if (mon.tp2Hit) {
+    return { code: 'TP2_EXIT', label: '🏆 TP2 HIT → FULL CLOSE', urgency: 'critical', detail: `Close entire position at ${px(mon.t2) ?? 'TP2'}` };
+  }
+  if (mon.shouldClose) {
+    return { code: 'PROTECTIVE_EXIT', label: '🛡️ PROTECTIVE EXIT', urgency: 'critical', detail: mon.exitReason || 'deep-monitor protective exit armed' };
+  }
+  if (mon.tp1Hit && !mon.tp1LadderActive && mon.exitPolicyV3?.applied === true) {
+    return { code: 'AWAIT_TP1_CLOSE', label: '⏳ TP1 TOUCHED — AWAIT CLOSED BAR', urgency: 'warn', detail: `Wick TP1 at ${px(mon.t1) ?? '—'}: stop stays at initial SL until a closed bar confirms` };
+  }
+  if (mon.tp1LadderActive && mon.tp2Approach) {
+    return { code: 'SL_AT_TP1', label: `🔒 NEXT: SL → TP1 ${px(mon.t1) ?? '—'}`, urgency: 'ok', detail: 'TP2 approach ≥80% — runner stop locks at TP1' };
+  }
+  if (mon.tp1LadderActive) {
+    return {
+      code: 'SL_AT_FEE_BE', label: `🔒 NEXT: SL → ${protection?.state === 'PROTECTED' ? 'exchange ' : ''}${px(mon.trailedStopLoss) ?? 'fee-BE'}`,
+      urgency: protection && protection.state !== 'PROTECTED' && protection.venue === 'coindcx' ? 'warn' : 'ok',
+      detail: `TP1 secured — stop at fee-BE${mon.exitPolicyV3?.applied ? '+buffer' : ''} · runner → TP2 ${px(mon.t2) ?? '—'}`,
+    };
+  }
+  const dist = Number(mon.distToTp1Pct);
+  return {
+    code: 'HOLD_INITIAL_SL',
+    label: `🛡️ HOLD · INITIAL SL ${px(mon.initialStopLoss) ?? '—'}`,
+    urgency: protection && ['UNVERIFIED', 'DIVERGED', 'SYNC_PENDING'].includes(protection.state) ? 'warn' : 'neutral',
+    detail: Number.isFinite(dist)
+      ? `No stop move before TP1 · TP1 ${px(mon.t1) ?? '—'} (${Math.abs(dist)}% ${dist >= 0 ? 'away' : 'beyond'})`
+      : 'No stop move before TP1 (target unavailable)',
+  };
+}
+
 export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
   const cfg = loadMtfAutoConfig();
+  const hbNow = Number(opts.now) > 0 ? Number(opts.now) : Date.now();
   const open = _openLinked().filter(b => isGenuinelyTradedEntry(b, cfg));
   const allowTpExtension = opts.allowTpExtension !== false;
   let bookUpdated = false;
@@ -3127,7 +3702,8 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
     // overwrite kar deta hai (flip hua tha, UI par normal pullback dikhta tha).
     const mon = evaluateActiveTradeDeepMonitor(b, {
       ltp,
-      boardRow: _snapshotRowFor(b.symbol, Date.now()),
+      boardRow: _snapshotRowFor(b.symbol, hbNow),
+      closedCandles: closedCandlesFor(b.symbol, b.execMarket || b.market, { now: hbNow }),
       // A fallback/stale book LTP may keep SL telemetry alive, but it must
       // NEVER move TP2 - only a real, sanity-checked quote can extend.
       allowTpExtension: allowTpExtension && hasFreshQuote,
@@ -3145,7 +3721,7 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
       if (mon.slTrailed && mon.trailedStopLoss > 0) {
         b.trailedStopLoss = mon.trailedStopLoss;
         b.stopLoss = mon.trailedStopLoss;
-        b.lastSlTrailAt = Date.now();
+        b.lastSlTrailAt = hbNow;
         bookUpdated = true;
       }
       if (mon.tp1Hit && !b.t1Hit) {
@@ -3156,7 +3732,7 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
       if (mon.t2Extended && mon.t2 > 0) {
         b.t2 = mon.t2;
         b.t2Extensions = mon.t2Extensions;
-        b.lastTpExtendAt = Date.now();
+        b.lastTpExtendAt = hbNow;
         // LIVE exchange TP must be re-armed. Keep this pending until the 3s/15s
         // loop gets an explicit {ok:true} from the exchange — a failed call must
         // not leave the native TP stranded at the old target. INDIA rows have no
@@ -3172,8 +3748,19 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
       b.trendStatus = mon.trendStatus;
     }
     const deployPct = b.walletDeployPct || (cfg.walletDeployPct ?? 100);
+    const protection = _deepMonitorProtection(b, mon);
+    const ladder = _ladderTracker(b, mon);
+    const nextAction = _nextActionPreview(b, mon, protection);
     return {
       ...mon,
+      // v21.28.0 [F9]: per-row decision stamp + protection/ladder/next action.
+      decisionAt: hbNow,
+      protection,
+      ladder,
+      nextAction,
+      originalQty: Number(b.originalQty) > 0 ? Number(b.originalQty) : (Number(b.qty) > 0 ? Number(b.qty) : null),
+      qtyAfterTp1: b.qtyAfterTp1 != null && Number.isFinite(Number(b.qtyAfterTp1)) ? Number(b.qtyAfterTp1) : null,
+      t1PartialBooked: b.t1PartialBooked === true,
       paperId: b.paperId,
       liveOrderId: b.liveOrderId,
       livePositionId: b.livePositionId ?? null,
@@ -3203,6 +3790,18 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
     };
   });
   if (bookUpdated) _persistState();
+  if (opts.stampHeartbeat === true) {
+    _stampDeepMonitorHeartbeat({
+      source: opts.source || 'deep-monitor',
+      now: hbNow,
+      count: rows.length,
+    });
+  }
+  const protectionCounts = rows.reduce((acc, r) => {
+    const st = r?.protection?.state || 'UNKNOWN';
+    acc[st] = (Number(acc[st]) || 0) + 1;
+    return acc;
+  }, {});
   return {
     activeCount: rows.length,
     trailingActiveCount: rows.filter(r => r.slTrailed || r.stageCode !== 'STAGE_0_INITIAL_GUARD').length,
@@ -3210,8 +3809,10 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
     reversalAlertCount: rows.filter(r => r.reversalDetected).length,
     directionBlockedCount: rows.filter(r => r.directionBlocked === true || r.directionCertificate?.ok === false).length,
     directionIntegrity: summarizeBoardDirectionIntegrity(rows),
+    protectionCounts,
+    heartbeat: _deepMonitorHeartbeat({ now: hbNow }),
     trades: rows,
-    checkedAt: Date.now(),
+    checkedAt: hbNow,
   };
 }
 
@@ -3519,9 +4120,13 @@ export async function mtfAutoSuperAgentManage(input = {}) {
   }, {
     ltp,
     boardRow: effRow,
+    closedCandles: closedCandlesFor(b.symbol, b.execMarket || b.market, { now }),
     reversalConfirmed: revByRow,
     proExitPolicy: cfg.proExitPolicy !== false,
   });
+  // v21.28.0 [F9]: a real per-trade monitor decision just ran — heartbeat is
+  // stamped even when the direction certificate blocks any action.
+  _stampDeepMonitorHeartbeat({ source: 'super-agent', now, count: 1 });
 
   if (deepEval.directionBlocked) {
     b.superAgentState = 'PAUSED';
@@ -3564,7 +4169,33 @@ export async function mtfAutoSuperAgentManage(input = {}) {
 
   // ---- TP1 partial: book it on THIS tick (no 3s sweep wait) ----
   let tp1Booked = false;
-  if (deepEval.tp1Hit && livePaper && livePaper.t1Hit !== true) {
+  // v21.28.0 [F2 LIVE TP1 PARTIAL] — reduce the REAL CoinDCX position first;
+  // the paper mirror books only after the exchange accepts. Live India rows
+  // (and flag-off) keep the legacy paper-only mirror path below.
+  const liveTp1Attempt = await _tryLiveTp1Partial({ b, deepEval, cfg, p: pp, livePaper, paper, now });
+  const liveTp1FlagOn = cfg.liveTp1Partial === true && isLivePos;
+  if (liveTp1Attempt.booked) {
+    tp1Booked = true;
+    b.t1Hit = true;
+    b.t1BookedAt = now;
+    b.superAgentState = 'TP1_SECURED';
+    b.superAgentTp1At = now;
+    _superAgentPushAction(b, 'TP1_PARTIAL_BOOKED', `LIVE TP1 ${deepEval.t1} touched @ ${ltp} — ${liveTp1Attempt.res?.requestedQty ?? b.t1PartialQty} qty reduced`, now);
+    _logEvent('live-tp1', `💰 LIVE TP1 PARTIAL ${b.symbol} (${b.side}) @ ${ltp} — ${liveTp1Attempt.res?.requestedQty ?? b.t1PartialQty} qty reduced (SL ${deepEval.trailedStopLoss ?? b.stopLoss} locked)`);
+    _superAgentPersist(true);
+    if (typeof pp.notify === 'function') {
+      try {
+        Promise.resolve(pp.notify(`🎯 LIVE TP1 PARTIAL: ${b.symbol} ${b.side} @ ${ltp} — ${liveTp1Attempt.res?.requestedQty ?? b.t1PartialQty} qty reduced · runner → T2 ${b.t2}`))
+          .catch(() => { /* non-fatal */ });
+      } catch { /* non-fatal */ }
+    }
+    livePaper = _superAgentMirror(typeof paper.getPaperSummary === 'function' ? paper.getPaperSummary() : summary, b.paperId) || livePaper;
+  }
+  // Mirror booking is allowed unless a LIVE partial was actually attempted and
+  // failed (requirement: reduce fail ⇒ no paper-mirror book).
+  const allowLegacyTp1Mirror = !liveTp1FlagOn || !liveTp1Attempt.attempted
+    || liveTp1Attempt.reason === 'already-booked';
+  if (deepEval.tp1Hit && livePaper && livePaper.t1Hit !== true && allowLegacyTp1Mirror) {
     // Volatility can shift between entry and TP1. Refresh the paper mirror's
     // vol-aware partial % first so this tick books the SAME size the deep
     // monitor would (HIGH 40% / EXTREME 35% keep the runner bigger).
@@ -3850,8 +4481,11 @@ export async function mtfAutoSuperAgentManage(input = {}) {
   }
 
   // LIVE exchange SL/TP sync — throttled to ~2s (the 3s backstop uses 4.5s).
+  // v21.28.0 [F5]: an accepted push with an unverified read-back sets a 60s
+  // cooldown — retrying every tick would stack create_tpsl orders.
   if (isLivePos && typeof pp.liveUpdateSl === 'function'
     && (deepEval.slTrailed || b.slSyncPending || b.tpSyncPending || trailAction === 'TP2_EXTENDED')
+    && !(Number(b.slNextRetryAt) > now)
     && now - rt.lastExchangeAt >= SUPER_AGENT_EXCHANGE_SYNC_MIN_MS) {
     rt.lastExchangeAt = now;
     try {
@@ -3865,12 +4499,18 @@ export async function mtfAutoSuperAgentManage(input = {}) {
         if (Number(b.t2) > 0) b.lastExchangeTp = Number(b.t2);
         b.slSyncPending = false;
         b.tpSyncPending = false;
+        b.slNextRetryAt = 0;
+        b.slLastSyncError = null;
       } else {
         // Never claim a tighter stop than the exchange actually accepted.
         b.slSyncPending = true;
+        b.slNextRetryAt = now + (Number(slRes?.retryAfterMs) > 0 ? Number(slRes.retryAfterMs) : 60_000);
+        b.slLastSyncError = String(slRes?.error || slRes?.readBackError || 'exchange SL unverified').slice(0, 180);
       }
-    } catch {
+    } catch (e) {
       b.slSyncPending = true;
+      b.slNextRetryAt = now + 60_000;
+      b.slLastSyncError = String(e?.message || e).slice(0, 180);
     }
   }
 
@@ -4079,6 +4719,17 @@ export function recordLiveMtfBoardTrade(item = {}) {
     existing.fxUsed = isUsdBook ? fxRate : null;
     existing.peakPrice = Number(item.entry) > 0 ? Number(item.entry) : (Number(existing.entry) > 0 ? Number(existing.entry) : null);
     existing.t1Hit = false;
+    // v21.28.0 [F2]: new lifecycle = fresh TP1 partial latch/telemetry.
+    existing.t1PartialBooked = false;
+    existing.t1PartialBookedAt = null;
+    existing.t1PartialQty = null;
+    existing.t1PartialOrderId = null;
+    existing.t1PartialVerified = null;
+    existing.t1PartialVerifyPending = false;
+    existing.t1PartialNextRetryAt = 0;
+    existing.t1PartialLastError = null;
+    existing.t1PartialAmbiguous = false;
+    existing.qtyAfterTp1 = null;
     existing.openedAt = now;
     existing.deepMonitorStage = 'STAGE_0_INITIAL_GUARD';
     existing.deepMonitorLabel = isPaperExec ? 'Stage 0 · Paper Direction Test · SL Auto-Trail Ready' : 'Stage 0 · Initial SL Guard (Full Control)';
@@ -4121,7 +4772,10 @@ export function recordLiveMtfBoardTrade(item = {}) {
     }
     existing.activePos = item.activePos ?? item.positionAmt ?? null;
     if (Number(item.entry) > 0) existing.entry = Number(item.entry);
-    if (Number(item.qty) > 0) existing.qty = Number(item.qty);
+    if (Number(item.qty) > 0) {
+      existing.qty = Number(item.qty);
+      existing.originalQty = Number(item.qty);
+    }
     if (Number(item.stopLoss) > 0) {
       existing.stopLoss = Number(item.stopLoss);
       existing.initialStopLoss = Number(item.stopLoss);
@@ -4298,6 +4952,7 @@ export function __resetMtfAutoForTests(seed = null) {
   _state = null;
   _mtfAutoTickInFlight = false;
   _bootedAt = Date.now();
+  _deepMonitorHb = _freshDeepMonitorHb();
   _restoredFromDurable = false;
   _restoredConfigFromDurable = false;
   _restoredStateFromDurable = false;

@@ -136,11 +136,15 @@ describe('v6.9 board payload carries topFive', () => {
     // timeout→abstain path is exactly the honest degradation under test.
     const prevScanTimeout = process.env.OLLAMA_SCAN_TIMEOUT_MS;
     process.env.OLLAMA_SCAN_TIMEOUT_MS = '3000';
+    // v21.28.0 GATE-STABILITY — HERMETIC CONTRACT TEST: this asserts the
+    // payload shape, so it must not depend on live feeds. A dark network
+    // makes every data leg burn its own timeout and the scan blew 120s.
+    // Fail every upstream fast; that is exactly the honest-degradation path
+    // under test (ok:false + topFive:[]). No live order/data path involved.
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response('{}', { status: 503 })) as typeof fetch;
     try {
       const { getSignals } = await import('../server/ai/signals.js');
-      // Live network from this box is unreliable (CF-blocks) — the board
-      // either resolves (ok:true + topFive array of ≤5) or degrades
-      // honestly (ok:false + topFive:[]). Both are contract-compliant.
       for (const market of ['INDIA', 'CRYPTO', 'FUTURES'] as const) {
         const payload = await getSignals(market, {}, { noCache: true, limit: 10 });
         expect(Array.isArray(payload.topFive)).toBe(true);
@@ -153,6 +157,7 @@ describe('v6.9 board payload carries topFive', () => {
         }
       }
     } finally {
+      globalThis.fetch = origFetch;
       if (prevScanTimeout == null) delete process.env.OLLAMA_SCAN_TIMEOUT_MS;
       else process.env.OLLAMA_SCAN_TIMEOUT_MS = prevScanTimeout;
     }

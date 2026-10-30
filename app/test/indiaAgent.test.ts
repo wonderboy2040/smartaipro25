@@ -35,6 +35,14 @@ vi.mock('../server/ai/data.js', async (importOriginal) => {
   };
 });
 
+// v21.28.0 GATE-STABILITY: the circuit-limit sweep runs BEFORE the time-exit
+// sweep and calls the real Groww quote endpoint (5s timeout per symbol). On a
+// dark network that ate the whole 15s test budget, so TIME-EXIT never ran.
+// Circuit logic has its own suite; here the quote is optional (null = skip).
+vi.mock('../server/ai/growwQuote.js', () => ({
+  fetchGrowwNseQuote: vi.fn(async () => null),
+}));
+
 let _dhanConnected = false;
 vi.mock('../server/ai/dhan.js', () => ({
   dhanConnected: () => _dhanConnected,

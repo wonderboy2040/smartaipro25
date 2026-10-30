@@ -361,6 +361,7 @@ function _manageP() {
     notify: _deps?.notify,
     liveUpdateSl: live?.liveUpdateSl,
     liveClose: live?.liveClose,
+    livePartial: live?.livePartial,
     liveExecute: live?.liveExecute,
   };
 }

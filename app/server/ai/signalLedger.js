@@ -295,6 +295,13 @@ export function recordMtfBoardScanRow(row, { now = Date.now() } = {}) {
     outcome: 'PENDING', // 'T1_HIT' | 'T2_HIT' | 'SL_HIT' | 'TIMEOUT' | 'PENDING'
     outcomeR: null,
     directionHit: null,
+    // v21.28.0 [F1/F4 TELEMETRY]: forming vs last-closed bar snapshot +
+    // exact-ish TP1/TP2 touch times (resolve sweep time se alag).
+    signalAtOpenBar: row.barConfirmation?.openBar ?? null,
+    signalAtCloseBar: row.barConfirmation?.closeBar ?? null,
+    signalStable: typeof row.barConfirmation?.stable === 'boolean' ? row.barConfirmation.stable : null,
+    t1HitAt: null,
+    t2HitAt: null,
   };
   _mtfScanLedger.push(rec);
   _mtfScanDedup.set(dedupKey, rec.id);
@@ -321,8 +328,12 @@ export function resolveMtfBoardScanOutcomes({ quotes = {}, candlesBySymbol = {},
     const ltp = typeof qRaw === 'object' ? Number(qRaw?.price ?? qRaw?.ltp) : Number(qRaw);
     const candles = Array.isArray(candlesBySymbol[e.symbol]) ? candlesBySymbol[e.symbol] : [];
 
-    const checkPriceRange = (highPx, lowPx) => {
+    const checkPriceRange = (highPx, lowPx, barTime = null) => {
       if (!(highPx > 0) || !(lowPx > 0)) return;
+      const rawTime = Number(barTime);
+      const hitAt = rawTime > 0
+        ? Math.max(Number(e.ts) || 0, rawTime < 1e11 ? rawTime * 1000 : rawTime)
+        : now;
       if (isLong) {
         if (highPx > e.peakFavPrice) e.peakFavPrice = highPx;
         if (lowPx < e.peakAdvPrice) e.peakAdvPrice = lowPx;
@@ -352,6 +363,8 @@ export function resolveMtfBoardScanOutcomes({ quotes = {}, candlesBySymbol = {},
         e.outcome = 'T2_HIT';
         e.outcomeR = _r2(Math.abs(e.t2 - e.entry) / e.risk) ?? 2;
         e.directionHit = true;
+        if (!(Number(e.t1HitAt) > 0)) e.t1HitAt = hitAt;
+        e.t2HitAt = hitAt;
         resolvedNow++;
       } else if (hitT1) {
         e.resolved = true;
@@ -359,18 +372,21 @@ export function resolveMtfBoardScanOutcomes({ quotes = {}, candlesBySymbol = {},
         e.outcome = 'T1_HIT';
         e.outcomeR = _r2(Math.abs(e.t1 - e.entry) / e.risk) ?? 1;
         e.directionHit = true;
+        e.t1HitAt = hitAt;
         resolvedNow++;
       }
     };
 
     for (const c of candles) {
       if (e.resolved) break;
-      if (Number(c?.ts ?? c?.time ?? now) < e.ts) continue;
-      checkPriceRange(Number(c.high ?? c.close), Number(c.low ?? c.close));
+      const cTs = Number(c?.ts ?? c?.time ?? c?.t ?? c?.timestamp);
+      const cTsMs = cTs > 0 ? (cTs < 1e11 ? cTs * 1000 : cTs) : null;
+      if (cTsMs != null && cTsMs < e.ts) continue;
+      checkPriceRange(Number(c.high ?? c.close), Number(c.low ?? c.close), cTsMs);
       updated++;
     }
     if (!e.resolved && Number(ltp) > 0) {
-      checkPriceRange(ltp, ltp);
+      checkPriceRange(ltp, ltp, now);
       updated++;
     }
 
@@ -411,13 +427,38 @@ export function computeMtfDirectionScorecard({ windowDays = 30, now = Date.now()
         wrongWayRate: null,
         avgR: null,
         wilsonLB: null,
+        // v21.28.0 per-tier comparison fields (Phase 0 baseline parity)
+        tp1Hits: 0,
+        tp2Hits: 0,
+        stopOuts: 0,
+        tp1HitPct: null,
+        tp2HitPct: null,
+        stopOutPct: null,
+        expectancyR: null,
+        avgMfeR: null,
+        avgMaeR: null,
+        avgTimeToTp1Min: null,
+        directionHitPct: null,
       };
     }
     const dirHits = list.filter((r) => r.directionHit || r.outcome === 'T1_HIT' || r.outcome === 'T2_HIT' || (r.mfeR >= 0.5 && r.outcome !== 'SL_HIT')).length;
-    const t1Hits = list.filter((r) => r.outcome === 'T1_HIT' || r.outcome === 'T2_HIT').length;
-    const slHits = list.filter((r) => r.outcome === 'SL_HIT').length;
+    const tp1List = list.filter((r) => r.outcome === 'T1_HIT' || r.outcome === 'T2_HIT');
+    const tp2List = list.filter((r) => r.outcome === 'T2_HIT');
+    const slList = list.filter((r) => r.outcome === 'SL_HIT');
+    const t1Hits = tp1List.length;
+    const slHits = slList.length;
     const wrongWay = list.filter((r) => r.outcome === 'SL_HIT' && Number(r.mfeR) < 0.25).length;
     const rs = list.map((r) => Number(r.outcomeR)).filter((x) => Number.isFinite(x));
+    const mfes = list.map((r) => Number(r.mfeR)).filter((x) => Number.isFinite(x));
+    const maes = list.map((r) => Number(r.maeR)).filter((x) => Number.isFinite(x));
+    // t1HitAt exact-ish touch hai; purane rows ke liye resolvedAt fallback.
+    const tt1 = tp1List
+      .map((r) => {
+        const at = Number(r.t1HitAt) > 0 ? Number(r.t1HitAt) : Number(r.resolvedAt);
+        return at > 0 && Number(r.ts) > 0 ? Math.max(0, at - Number(r.ts)) / 60_000 : null;
+      })
+      .filter((v) => v != null);
+    const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null);
     return {
       n,
       directionHitRate: _r2((dirHits / n) * 100),
@@ -426,12 +467,32 @@ export function computeMtfDirectionScorecard({ windowDays = 30, now = Date.now()
       wrongWayRate: _r2((wrongWay / n) * 100),
       avgR: rs.length ? _r2(rs.reduce((a, b) => a + b, 0) / rs.length) : null,
       wilsonLB: _r2(wilsonLowerBound(t1Hits, n) * 100),
+      tp1Hits: t1Hits,
+      tp2Hits: tp2List.length,
+      stopOuts: slHits,
+      tp1HitPct: _r2((t1Hits / n) * 100),
+      tp2HitPct: _r2((tp2List.length / n) * 100),
+      stopOutPct: _r2((slHits / n) * 100),
+      // Expectancy aur avgR same universe par hain (1R = planned risk) —
+      // alag-alag label isliye ki UI me "expectancy" ka matlab clear rahe.
+      expectancyR: rs.length ? _r2(rs.reduce((a, b) => a + b, 0) / rs.length) : null,
+      avgMfeR: mfes.length ? _r2(avg(mfes)) : null,
+      avgMaeR: maes.length ? _r2(avg(maes)) : null,
+      avgTimeToTp1Min: tt1.length ? _r2(avg(tt1)) : null,
+      directionHitPct: _r2((list.filter((r) => r.directionHit === true).length / n) * 100),
     };
   };
 
   const overall = summarize(resolved);
   const alignedBucket = summarize(alignedResolved);
   const conflictBucket = summarize(conflictResolved);
+  // v21.28.0: per-tier split — WATCH vs ACTION/STRONG/ELITE ka expectancy
+  // alag dikhna chahiye. Ek blended number tier-mix se distort hota tha.
+  const byTier = {};
+  const tierNames = [...new Set(rows.map((r) => String(r.tier || 'UNKNOWN').toUpperCase()))].sort();
+  for (const t of tierNames) {
+    byTier[t] = summarize(rows.filter((r) => String(r.tier || 'UNKNOWN').toUpperCase() === t));
+  }
 
   return {
     windowDays,
@@ -442,6 +503,7 @@ export function computeMtfDirectionScorecard({ windowDays = 30, now = Date.now()
     ...overall,
     alignedBucket,
     conflictBucket,
+    byTier,
     recentScans: rows.slice(-12).reverse(),
   };
 }
@@ -497,6 +559,11 @@ export function hydrateMtfLedger(rows = [], { lastLogAt = null, lastResolveAt = 
       outcome: raw.outcome ?? 'PENDING',
       outcomeR: Number.isFinite(Number(raw.outcomeR)) ? Number(raw.outcomeR) : null,
       directionHit: typeof raw.directionHit === 'boolean' ? raw.directionHit : null,
+      signalAtOpenBar: raw.signalAtOpenBar && typeof raw.signalAtOpenBar === 'object' ? raw.signalAtOpenBar : null,
+      signalAtCloseBar: raw.signalAtCloseBar && typeof raw.signalAtCloseBar === 'object' ? raw.signalAtCloseBar : null,
+      signalStable: typeof raw.signalStable === 'boolean' ? raw.signalStable : null,
+      t1HitAt: Number(raw.t1HitAt) > 0 ? Number(raw.t1HitAt) : null,
+      t2HitAt: Number(raw.t2HitAt) > 0 ? Number(raw.t2HitAt) : null,
     };
     const key = _mtfDedupKey(rec.market, rec.symbol, rec.mode, rec.ts);
     const prev = byKey.get(key);

@@ -81,7 +81,16 @@ describe('A. wrapped-rejection verdicts (H1 money path)', () => {
     expect(src.spot).toMatch(/const merr = coindcxRespError\(mresp\);/); // margin paths
   });
   it('partial legs (both desks): exchange verdict checked BEFORE booking', () => {
-    expect(src.futures).toMatch(/if \(!xr\?\.orderId \|\| xr\?\.error\) \{\s*\n\s*return \{ ok: false, error: `exchange rejected \$\{stage\} partial/);
+    // v21.28.0 [F3 SAFE-REDUCE]: the futures partial path now routes through
+    // safeReduceFuturesPosition (pre-read side/flat/qty guard + post-read).
+    // The wrapped-rejection verdict must still reject a failed/order-id-less
+    // reduce BEFORE the leg is booked — pin both the contract and the order.
+    expect(src.futures).toContain('const xr = await safeReduceFuturesPosition({');
+    const verdictAt = src.futures.indexOf('if (!xr?.ok || !xr?.orderId) {');
+    const bookAt = src.futures.indexOf('// ---- book the leg (USDT domain + INR twin) ----');
+    expect(verdictAt).toBeGreaterThan(-1);
+    expect(bookAt).toBeGreaterThan(verdictAt);
+    expect(src.futures.slice(verdictAt, verdictAt + 260)).toMatch(/if \(!xr\?\.ok \|\| !xr\?\.orderId\) \{\s*\n\s*return \{ ok: false, error: `safe-reduce \$\{stage\} partial failed/);
     expect(src.spot).toMatch(/const serr = coindcxRespError\(sresp\);\s*\n\s*if \(serr\) throw new Error\(serr\);/);
   });
   it('LIVE + disconnected partial → NOT paper-booked (both desks)', () => {

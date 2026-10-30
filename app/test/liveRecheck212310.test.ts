@@ -374,7 +374,11 @@ describe('v21.23.10 S7 — executeMtfDualLiveOrder hardening (fresh price / meta
     expect(FUTURES_SRC).toContain('exchange position id not resolvable — journal updated only');
   });
   it('UUID rescue: failed id par pair-based re-resolve + retry (SL sync + close dono)', () => {
-    expect((FUTURES_SRC.match(/const exchList = await listFuturesPositions\(\)\.catch\(\(\) => \[\]\);\n      const row = exchList\.find\(p => p\.pair === normPair && p\.activePos !== 0\);\n      if \(row\?\.id && String\(row\.id\) !== String\(exchPosId\)\)/g) || []).length).toBe(2);
+    // v21.28.0 F5 refactor: the SL rescue is no longer nested inside the
+    // creds branch (it early-returns before), so pin the semantics instead of
+    // one exact indentation depth. Both SL-sync and close paths must remain.
+    const uuidRescue = /const exchList = await listFuturesPositions\(\)\.catch\(\(\) => \[\]\);\s*\n\s*const row = exchList\.find\(p => p\.pair === normPair && p\.activePos !== 0\);\s*\n\s*if \(row\?\.id && String\(row\.id\) !== String\(exchPosId\)\)/g;
+    expect((FUTURES_SRC.match(uuidRescue) || []).length).toBe(2);
   });
   it('global mode-live auto-sync ab sirf MANUAL board clicks ke liye (auto engine silent global flip GONE)', () => {
     expect(FUTURES_SRC).toContain("source !== 'mtf-auto-live'");

@@ -1286,6 +1286,19 @@ export interface MtfAutoStatus {
     /** v21.25.0 — deep-monitor direction integrity (manual LIVE rows included). */
     directionIntegrity?: DirectionIntegrity | null;
     directionBlockedCount?: number;
+    /** v21.28.0 F9 — aggregate protection badges + genuine-lane heartbeat. */
+    protectionCounts?: Record<string, number>;
+    heartbeat?: {
+      lastDecisionAt: number | null;
+      ageMs: number | null;
+      staleAfterMs: number;
+      stale: boolean | null;
+      decisions: number;
+      lastSource: string | null;
+      lastCount: number;
+      sources: Array<{ source: string; count: number; lastAt: number | null; lastCount: number; ageMs: number | null }>;
+      checkedAt: number;
+    } | null;
     trades: Array<{
       symbol: string | null;
       market: string;
@@ -1305,6 +1318,21 @@ export interface MtfAutoStatus {
       t2: number;
       tp1Hit: boolean;
       tp2Hit: boolean;
+      /** v21.28.0 F4/F9 — close-confirmed TP1 + exit-ladder telemetry. */
+      tp1Confirmed?: boolean;
+      tp1CloseConfirmedKnown?: boolean;
+      tp1ConfirmSource?: string | null;
+      tp1LadderActive?: boolean;
+      exitPolicyV3?: { mode: string; applied: boolean; shadow: boolean; tp1CloseConfirmed?: boolean | null; note?: string; bePlusBufferSl?: number | null } | null;
+      protection?: { state: string; label: string; tone: string; venue: string; reason: string; bookSl: number | null; exchangeSl: number | null; slSyncPending: boolean; diffPct: number | null; lastError: string | null } | null;
+      ladder?: { rung: string; progressPct: number; activeStep: string; awaitingTp1Confirm: boolean; note: string | null; steps: Array<{ key: string; label: string; price: number | null; stop?: number | null; state: string }> } | null;
+      nextAction?: { code: string; label: string; detail: string; urgency: string } | null;
+      decisionAt?: number | null;
+      slSyncPending?: boolean;
+      lastExchangeSl?: number | null;
+      originalQty?: number | null;
+      qtyAfterTp1?: number | null;
+      t1PartialBooked?: boolean;
       peakPrice: number;
       currentR: number;
       peakR: number;

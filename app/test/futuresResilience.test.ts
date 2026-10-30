@@ -57,16 +57,18 @@ describe('futures.js — v11.3 fetchFuturesPrices resilience chain', () => {
   });
 
   it('leg 1 — REST healthy: normal rows, seconds ts normalized to ms, no source marker', async () => {
-    const tsSec = Math.floor(Date.now() / 1000);
+    // Pin the EXACT payload the fetch will see — capturing `tsSec` separately
+    // raced the 1-second wall and produced a false mismatch at the boundary.
+    const payload = rtPayload({ 'B-BTC_USDT': { ls: 76_421.4, mp: 76_420.9, pc: 1.1, h: 77_000, l: 75_500, v: 2_100 } });
     routeFetch(url => (url === RT_URL
-      ? { ok: true, status: 200, json: async () => rtPayload({ 'B-BTC_USDT': { ls: 76_421.4, mp: 76_420.9, pc: 1.1, h: 77_000, l: 75_500, v: 2_100 } }) }
+      ? { ok: true, status: 200, json: async () => payload }
       : null));
     const rows = await fetchFuturesPrices();
     expect(rows.length).toBeGreaterThan(0);
     const btc = rows.find(r => r.pair === 'B-BTC_USDT')!;
     expect(btc.last).toBeCloseTo(76_421.4, 6);
     expect(btc.base).toBe('BTC');
-    expect(btc.ts).toBe(tsSec * 1000); // ms — the unit guard held
+    expect(btc.ts).toBe(payload.ts * 1000); // ms — the unit guard held
     expect(btc.source).toBeUndefined(); // real REST rows carry no marker
   });
 

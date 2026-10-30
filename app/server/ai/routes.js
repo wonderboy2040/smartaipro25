@@ -85,6 +85,7 @@ import {
   watchFuturesPositions, closeFuturesPosition,
   walletSnapshot, futuresMarketsView, fetchUsdInr, fetchFuturesPrices,
   syncCoinDcxActivePositionsForControl, updateCoinDcxPositionSl, closeCoinDcxActivePosition,
+  safeReduceFuturesPosition,
 } from './futures.js';
 // v12.8 SUPERINTELLIGENCE REVERSAL RECOVERY — ₹ loss-cap → flip →
 // booking cycles (config echo + live cycle board for the UI).
@@ -222,7 +223,7 @@ import { dhanConnect, dhanDisconnect, dhanConnected, dhanProfile, scripMasterSta
 import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 // v21.16.0 + v21.20.0 MTF SIGNALS BOARD (Dual-Timeframe) + AUTO-LINK engine
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, mtfProEntryGate, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
-import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason } from './mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, markAutoTradeSlRetry, getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason } from './mtfAutoLink.js';
 // v21.26.0 AI SUPER INTELLIGENCE — per-trade tick agent. Owns only routing /
 // registry / stream holds; every trade decision is mtfAutoLink's
 // mtfAutoSuperAgentManage (same gates as the 15s/60s sweeps).
@@ -1110,6 +1111,7 @@ export function registerAITradingRoutes(app, deps) {
       const gate = mtfProEntryGate(row, {
         mainSignal,
         minScore: Math.max(65, Number(cfg.minScore) || 75),
+        requireClosedBarConfirm: cfg.closedBarConfirm === true,
       });
       if (!gate.ok) {
         const gateMsg = `${symbol}: PAPER ${row.side} blocked - ${gate.blockers.join(' | ')}`;
@@ -1308,6 +1310,7 @@ export function registerAITradingRoutes(app, deps) {
       const proGate = mtfProEntryGate(row, {
         mainSignal,
         minScore: Math.max(65, Number(cfg.minScore) || 75),
+        requireClosedBarConfirm: cfg.closedBarConfirm === true,
       });
       if (!proGate.ok) {
         const gateMsg = `${symbol}: LIVE order blocked - ${proGate.blockers.join(' | ')}`;
@@ -1720,6 +1723,25 @@ export function registerAITradingRoutes(app, deps) {
         pair: trade?.pair,
       }).catch(() => null);
     };
+    // v21.28.0 [F2 LIVE TP1 PARTIAL] — the ONLY path that reduces a LIVE
+    // CoinDCX position for a tiered exit. safeReduceFuturesPosition pre-reads
+    // the exchange (flat/side/qty), caps the fraction and re-reads after the
+    // order, so a stale book side can never turn a reduce into an opposite
+    // position. Behind cfg.liveTp1Partial (default off) + [VERIFY-LIVE].
+    const livePartial = async (trade) => {
+      const mkt = String(trade?.execMarket || trade?.market || '').toUpperCase();
+      if (mkt === 'INDIA') {
+        return { ok: false, skipped: true, reason: 'India partial reduce is broker-managed — not available' };
+      }
+      return safeReduceFuturesPosition({
+        positionId: trade?.livePositionId,
+        symbol: trade?.symbol,
+        pair: trade?.pair,
+        qty: trade?.qty,
+        side: trade?.side,
+        leverage: trade?.leverage,
+      }).catch((e) => ({ ok: false, error: String(e?.message || e) }));
+    };
     return {
       siteLiveActive,
       siteLiveByDesk,
@@ -1730,6 +1752,7 @@ export function registerAITradingRoutes(app, deps) {
       liveExecute,
       liveUpdateSl,
       liveClose,
+      livePartial,
       coindcxConnected: hasEnvOrSavedCreds,
     };
   };
@@ -2032,7 +2055,7 @@ export function registerAITradingRoutes(app, deps) {
       const out = await mtfAutoTick({
         boards,
         buildDualRow,
-        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct, updatePaperTradeTarget2 },
+        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct, updatePaperTradeTarget2, bookPaperT1Partial: bookPaperT1PartialExec },
         quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
         killSwitch,
         fx: fxLive,
@@ -2044,6 +2067,7 @@ export function registerAITradingRoutes(app, deps) {
         liveExecute: liveCtx.liveExecute,
         liveUpdateSl: liveCtx.liveUpdateSl,
         liveClose: liveCtx.liveClose,
+        livePartial: liveCtx.livePartial,
         notify: sendTelegram,
       });
       // New AUTO entries arm their dedicated tick agent in this same turn.
@@ -3848,7 +3872,7 @@ export function registerAITradingRoutes(app, deps) {
       await mtfAutoTick({
         boards,
         buildDualRow,
-        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct, updatePaperTradeTarget2 },
+        paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct, updatePaperTradeTarget2, bookPaperT1Partial: bookPaperT1PartialExec },
         quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
         killSwitch: (() => { try { return !!loadConfig()?.killSwitch; } catch { return false; } })(),
         fx: fxLive,
@@ -3860,6 +3884,7 @@ export function registerAITradingRoutes(app, deps) {
         liveExecute: liveCtx.liveExecute,
         liveUpdateSl: liveCtx.liveUpdateSl,
         liveClose: liveCtx.liveClose,
+        livePartial: liveCtx.livePartial,
         notify: sendTelegram,
       });
       refreshAutoTradeSuperAgent();
@@ -3895,7 +3920,12 @@ export function registerAITradingRoutes(app, deps) {
           }
         }
       }
-      const deepMon = getActiveAutoTradesDeepMonitor(combinedQuotes);
+      const deepMon = getActiveAutoTradesDeepMonitor(combinedQuotes, {
+        // v21.28.0 [F9]: only genuine monitor lanes stamp the heartbeat. UI
+        // polling passes no flag, so a dead 3s loop can never look fresh.
+        stampHeartbeat: true,
+        source: 'fast-3s',
+      });
       for (const tr of (deepMon?.trades || [])) {
         if (tr.trailedStopLoss > 0 && (tr.executionMode === 'PAPER' || tr.paperId != null)) {
           // v21.23.13 [HINT-DOMAIN FIX]: deep-monitor rows `market:'CRYPTO'`
@@ -3926,7 +3956,8 @@ export function registerAITradingRoutes(app, deps) {
         if ((!tr.slTrailed && !tr.t2Extended && !tr.tpSyncPending && !slNeedsSync) || !(tr.trailedStopLoss > 0)) continue;
         if (tr.executionMode === 'LIVE' && loadCredsForOrder()) {
           const lastSync = _lastCoinDcxSlSyncAt.get(tr.symbol) || 0;
-          if (Date.now() - lastSync >= 4500) {
+          const retryAt = Number(tr.slNextRetryAt) || 0;
+          if (Date.now() >= retryAt && Date.now() - lastSync >= 4500) {
             _lastCoinDcxSlSyncAt.set(tr.symbol, Date.now());
             const syncRes = await updateCoinDcxPositionSl({
               symbol: tr.symbol,
@@ -3955,6 +3986,16 @@ export function registerAITradingRoutes(app, deps) {
               // The same exchange call re-armed the SL — stamp it so the
               // divergence check above stops firing on every pass.
               markAutoTradeSlSynced({ symbol: tr.symbol, paperId: tr.paperId, stopLoss: tr.trailedStopLoss, exchange: true });
+            } else if (syncRes && syncRes.skipped !== true) {
+              // v21.28.0 [F5 RETRY SPACING]: push may have been accepted with
+              // an unverified read-back → keep pending but wait 60s. India
+              // rows (`skipped:true`) never enter this path.
+              markAutoTradeSlRetry({
+                symbol: tr.symbol,
+                paperId: tr.paperId,
+                retryAfterMs: syncRes.retryAfterMs,
+                reason: syncRes.error || syncRes.readBackError || 'exchange SL unverified',
+              });
             }
           }
         }
@@ -4056,7 +4097,7 @@ export function registerAITradingRoutes(app, deps) {
           buildDualRow,
           // v21.23.7: updatePaperTradeT1ClosePct — deep monitor LIVE vol-class
           // shift pe paper trade ka TP1 partial % refresh karta hai (volTrail).
-          paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct, updatePaperTradeTarget2 },
+          paper: { openPaperTrade: openPaperTradeExec, closePaperTrade: closePaperTradeExec, voidPaperTrade: voidPaperTradeExec, getPaperSummary: getPaperSummaryExec, updatePaperTradeT1ClosePct, updatePaperTradeTarget2, bookPaperT1Partial: bookPaperT1PartialExec },
           quotes: { ...getLatestQuotes().data, ...(await mtfGlobalQuoteOverlay()) },
           killSwitch: (() => { try { return !!loadConfig()?.killSwitch; } catch { return false; } })(),
           fx: fxLive,
@@ -4068,6 +4109,7 @@ export function registerAITradingRoutes(app, deps) {
           liveExecute: liveCtx.liveExecute,
           liveUpdateSl: liveCtx.liveUpdateSl,
           liveClose: liveCtx.liveClose,
+          livePartial: liveCtx.livePartial,
           notify: sendTelegram,
         });
         // A fresh 15s board may have opened a trade (or a flip-reverse row).

@@ -130,6 +130,23 @@ const fmtAge = (ms?: number | null) => {
 };
 const dirArrow = (d?: number | null) => (d == null ? '·' : d > 0 ? '▲' : d < 0 ? '▼' : '·');
 
+// v21.28.0 F9: same honest protection/ladder chips as the recheck panel.
+const PROTECTION_STYLE: Record<string, string> = {
+  PROTECTED: 'bg-emerald-500/20 text-emerald-200 border-emerald-500/50',
+  PAPER: 'bg-cyan-500/15 text-cyan-200 border-cyan-500/35',
+  BROKER: 'bg-sky-500/15 text-sky-200 border-sky-500/35',
+  SYNC_PENDING: 'bg-amber-500/20 text-amber-200 border-amber-500/50',
+  UNVERIFIED: 'bg-rose-500/20 text-rose-200 border-rose-500/50',
+  DIVERGED: 'bg-rose-500/25 text-rose-100 border-rose-400/60',
+};
+const LADDER_STYLE: Record<string, string> = {
+  DONE: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+  ACTIVE: 'bg-amber-500/20 text-amber-200 border-amber-500/50 font-black',
+  WAITING: 'bg-amber-500/10 text-amber-300 border-amber-500/30 animate-pulse',
+  PENDING: 'bg-slate-800/60 text-slate-500 border-slate-700/50',
+};
+const LADDER_ICON: Record<string, string> = { DONE: '✓', ACTIVE: '▶', WAITING: '⏳', PENDING: '·' };
+
 export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDeep, onPaperOpened, canLive = false, walletINR = null, onExecuteLive }: Props) {
   const [mode, setMode] = useState<TradePlanModeId>(STORED_AUTO_VIEW.mode);
   const [holdMin, setHoldMin] = useState<number>(STORED_AUTO_VIEW.holdMin);
@@ -427,6 +444,11 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
     [activeTradedRows],
   );
   const liveDeskLabel = market === 'INDIA' ? 'DHAN' : 'COINDCX';
+  // v21.28.0 F9 heartbeat (null = never stamped/unknown, true = stale >10s).
+  const dmHb = auto?.deepMonitor?.heartbeat || null;
+  const dmHbAgeS = dmHb?.ageMs != null ? Math.max(0, Math.round(dmHb.ageMs / 1000)) : null;
+  const dmHbStale = dmHb?.stale === true;
+  const dmHbNever = !dmHb || dmHb.lastDecisionAt == null;
 
   // A7 [WHY NO TRADE]: aggregate the most frequent auto-pick blockers across
   // rows that cleared the score bar — the UI now shows WHY the engine is
@@ -1076,6 +1098,22 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                 <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[9px]">
                   {activeTradedRows.length} Active Traded · {auto?.deepMonitor?.trailingActiveCount ?? 0} SL Trailed · {auto?.deepMonitor?.tp1LockedCount ?? 0} TP1 Hit
                 </span>
+                <span
+                  className={`px-1.5 py-0.5 rounded border text-[9px] font-mono ${
+                    dmHbStale
+                      ? 'bg-rose-500/20 border-rose-500/50 text-rose-200'
+                      : dmHbNever
+                        ? 'bg-slate-700/30 border-slate-600/40 text-slate-300'
+                        : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                  }`}
+                  title={dmHb?.sources?.map(s => `${s.source}: ${s.count}× · last ${s.ageMs != null ? `${Math.round(s.ageMs / 1000)}s ago` : '—'}`).join('\n') || 'No genuine monitor lane has stamped a decision yet'}
+                >
+                  {dmHbStale
+                    ? `⚠ MONITOR STALE ${dmHbAgeS ?? '?'}s`
+                    : dmHbNever
+                      ? '⏳ monitor heartbeat starting…'
+                      : `💓 monitor ${dmHbAgeS ?? 0}s · ${dmHb?.lastSource || 'lane'} · ${dmHb?.decisions ?? 0} decisions`}
+                </span>
                 {auto?.deepMonitor?.directionIntegrity && (
                   <span
                     data-testid="mtf-deep-direction-integrity"
@@ -1129,6 +1167,15 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                         <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-emerald-500/15 text-emerald-200 border border-emerald-500/35">
                           🔒 FULL CONTROL
                         </span>
+                        {t.protection && (
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${PROTECTION_STYLE[t.protection.state] || 'bg-slate-700/30 text-slate-300 border-slate-600/40'}`}
+                            title={`${t.protection.reason}${t.protection.lastError ? ` · ${t.protection.lastError}` : ''}${t.protection.diffPct != null ? ` · diff ${t.protection.diffPct}%` : ''}`}
+                          >
+                            {t.protection.label}
+                            {t.protection.exchangeSl != null ? ` @ ${ccySym}${fmt(t.protection.exchangeSl)}` : ''}
+                          </span>
+                        )}
                         <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-cyan-500/15 text-cyan-300 border border-cyan-500/35">
                           {t.stageLabel}
                         </span>
@@ -1167,6 +1214,40 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                         Initial SL: {ccySym}{fmt(t.initialStopLoss)} → Auto-SL: <b className="text-amber-300">{ccySym}{fmt(t.trailedStopLoss)}</b> · Fee-BE: {ccySym}{fmt(t.feeBreakevenPrice)} {t.feeCovered ? '✅ Profit Safe' : '⏳ Guarded'}
                       </span>
                     </div>
+                    {t.ladder && (
+                      <div className="mt-1 flex items-center gap-1 flex-wrap text-[8px] font-mono">
+                        {t.ladder.steps.map(step => (
+                          <span
+                            key={step.key}
+                            className={`px-1 py-0.5 rounded border ${LADDER_STYLE[step.state] || LADDER_STYLE.PENDING}`}
+                            title={step.stop != null ? `active stop ${ccySym}${fmt(step.stop)}` : step.price != null ? `level ${ccySym}${fmt(step.price)}` : ''}
+                          >
+                            {LADDER_ICON[step.state] || '·'} {step.label}
+                            {step.stop != null ? ` @ ${ccySym}${fmt(step.stop)}` : ''}
+                          </span>
+                        ))}
+                        <span className="ml-auto text-slate-500">ladder {t.ladder.progressPct}% → TP2</span>
+                      </div>
+                    )}
+                    {t.nextAction && (
+                      <div
+                        className={`mt-1 text-[9px] font-mono ${
+                          t.nextAction.urgency === 'critical'
+                            ? 'text-rose-300 font-black'
+                            : t.nextAction.urgency === 'warn'
+                              ? 'text-amber-300'
+                              : t.nextAction.urgency === 'ok'
+                                ? 'text-emerald-300'
+                                : 'text-slate-400'
+                        }`}
+                      >
+                        NEXT ▸ {t.nextAction.label}
+                        <span className="text-slate-500 font-normal"> · {t.nextAction.detail}</span>
+                        {t.decisionAt != null && t.decisionAt > 0 && (
+                          <span className="text-slate-600"> · ⟳ {Math.max(0, Math.round((Date.now() - t.decisionAt) / 1000))}s ago</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}

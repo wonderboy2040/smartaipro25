@@ -1626,6 +1626,185 @@ export async function exitFuturesPosition(positionId) {
   return errOf ? { ok: false, error: errOf, raw: resp } : { ok: true, raw: resp };
 }
 
+/** v21.28.0 [F3 SAFE-REDUCE PLAN — PURE]: exchange reduce se PEHLE side/qty
+ *  truth decide karta hai. Pehle partial path p.side ko trust karke opposite
+ *  order bhejta tha — adopted/manual row ka side stale ho to reduce position
+ *  ko ULTA badha sakta tha. Rules:
+ *    • position flat → no order
+ *    • expected side ≠ exchange position side → refuse
+ *    • requested qty > position → cap (never flip/overshoot)
+ *    • precision floor → hamesha neeche round (over-reduce impossible)
+ *  Pure function — network/journal kuch nahi. */
+export function planFuturesReduce({
+  activePos, expectedSide, requestedQty, pair = null, qtyPrecision = null,
+} = {}) {
+  const side = normalizeSide(expectedSide);
+  if (!side) return { ok: false, reason: 'invalid_side', error: `invalid side "${String(expectedSide ?? '')}" — LONG/SHORT required` };
+  const rawPos = Number(activePos);
+  const posQty = Math.abs(rawPos);
+  const EPS = 1e-9;
+  if (!(posQty > EPS)) return { ok: false, reason: 'already_flat', side, posQty: 0, error: 'position already flat — reduce skipped' };
+  const actualSide = rawPos > 0 ? 'LONG' : 'SHORT';
+  if (actualSide !== side) {
+    return {
+      ok: false, reason: 'side_mismatch', side, actualSide, posQty,
+      error: `side mismatch: expected ${side} but exchange position is ${actualSide} (${rawPos})`,
+    };
+  }
+  const rawQty = Number(requestedQty);
+  if (!(rawQty > 0)) return { ok: false, reason: 'invalid_qty', side, actualSide, posQty, error: 'requested qty must be > 0' };
+  const rounded = pair
+    ? roundFuturesQty(pair, rawQty, qtyPrecision)
+    : Math.floor(rawQty * 1e8) / 1e8;
+  if (!(rounded > 0)) {
+    return { ok: false, reason: 'qty_rounds_to_zero', side, actualSide, posQty, requestedQty: rawQty, error: 'qty rounds to 0 at instrument precision' };
+  }
+  const qty = Math.min(rounded, posQty);
+  const remaining = +(posQty - qty).toFixed(8);
+  return {
+    ok: true,
+    side,
+    actualSide,
+    posQty: +posQty.toFixed(8),
+    requestedQty: +rawQty.toFixed(8),
+    qty: +qty.toFixed(8),
+    remaining: Math.max(0, remaining),
+    capped: rounded > posQty + EPS,
+    closeAll: remaining <= EPS,
+  };
+}
+
+const _sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * v21.28.0 [F3 SAFE REDUCE — EXCHANGE VERIFIED]:
+ * CoinDCX futures partial reduce ka single guarded entry point.
+ *   1. pre-read position (id > pair+side), flat/side/qty guard
+ *   2. opposite-side market order for the capped fraction
+ *   3. post-trade re-read (2 attempts) — qty genuinely kam hui ya flat?
+ * Agar order submit ho gaya par re-read confirm na kare to `verified:false`
+ * (caller book kar sakta hai; ambiguity alag flag se surface hoti hai) —
+ * position ko blind dobara reduce karna caller ke retry guard ki zimmedari.
+ * Read-only failure order se PEHLE → koi order nahi jaata (safe retry).
+ */
+export async function safeReduceFuturesPosition({
+  positionId = null, symbol = null, pair = null, qty, side, leverage,
+  settleMs = [250, 750],
+  // Test seam (pure injection): production callers kabhi pass nahi karte.
+  deps = null,
+} = {}) {
+  const readPositions = deps?.listFuturesPositions || listFuturesPositions;
+  const reduceExit = deps?.partialFuturesExit || partialFuturesExit;
+  const isConnected = deps?.coindcxConnected || coindcxConnected;
+  const expectedSide = normalizeSide(side);
+  if (!expectedSide) return { ok: false, error: `invalid side "${String(side ?? '')}" — LONG/SHORT required` };
+  const normPair = pair
+    ? String(pair).toUpperCase()
+    : (symbol ? futuresPairFor(symbol) : null);
+  if (!normPair) return { ok: false, error: 'pair/symbol required for safe reduce' };
+  if (!isConnected()) return { ok: false, error: 'CoinDCX not connected — safe reduce refused' };
+
+  let pre;
+  try {
+    pre = await readPositions();
+  } catch (e) {
+    return { ok: false, phase: 'pre', error: `position pre-read failed — blind reduce refused: ${String(e?.message || e).slice(0, 140)}` };
+  }
+  const live = pre.filter((p) => Math.abs(Number(p.activePos) || 0) > 1e-9);
+  let pos = positionId
+    ? live.find((p) => String(p.id) === String(positionId))
+    : null;
+  if (!pos) {
+    pos = live.find((p) => p.pair === normPair
+      && (Number(p.activePos) > 0 ? 'LONG' : 'SHORT') === expectedSide);
+  }
+  if (!pos) {
+    const samePair = live.find((p) => p.pair === normPair);
+    if (samePair) {
+      return {
+        ok: false, phase: 'pre', reason: 'side_mismatch', expectedSide,
+        actualSide: Number(samePair.activePos) > 0 ? 'LONG' : 'SHORT',
+        error: `side mismatch: expected ${expectedSide} but exchange position ${samePair.pair} is ${Number(samePair.activePos) > 0 ? 'LONG' : 'SHORT'}`,
+      };
+    }
+    return { ok: false, phase: 'pre', reason: 'already_flat', error: 'no open exchange position — reduce skipped' };
+  }
+  const plan = planFuturesReduce({
+    activePos: pos.activePos,
+    expectedSide,
+    requestedQty: qty,
+    pair: pos.pair || normPair,
+  });
+  if (!plan.ok) return { ...plan, phase: 'pre' };
+
+  const xr = await reduceExit({
+    pair: pos.pair || normPair,
+    qty: plan.qty,
+    side: expectedSide,
+    leverage: leverage || pos.leverage,
+  }).catch((e) => ({ orderId: null, error: String(e?.message || e), transport: true }));
+  if (!xr?.orderId || xr?.error) {
+    return {
+      ok: false,
+      phase: 'order',
+      ambiguous: xr?.transport === true,
+      orderId: xr?.orderId || null,
+      error: `exchange rejected reduce: ${String(xr?.error || 'no order id').slice(0, 160)}`,
+    };
+  }
+
+  // ---- P0-style post-trade truth: exchange qty re-read ----
+  let post = null;
+  let readError = null;
+  for (const wait of (Array.isArray(settleMs) ? settleMs : [250])) {
+    if (Number(wait) > 0) await _sleep(Number(wait));
+    try {
+      post = await readPositions();
+      readError = null;
+    } catch (e) {
+      post = null;
+      readError = String(e?.message || e).slice(0, 140);
+    }
+    const afterPos = (post || []).find((p) => String(p.id) === String(pos.id))
+      || (post || []).find((p) => p.pair === pos.pair
+        && (Number(p.activePos) > 0 ? 'LONG' : 'SHORT') === expectedSide);
+    const afterQty = afterPos ? Math.abs(Number(afterPos.activePos) || 0) : 0;
+    const tolerance = Math.max(1e-9, plan.posQty * 1e-4);
+    if (afterQty <= plan.remaining + tolerance) {
+      return {
+        ok: true,
+        verified: true,
+        orderId: xr.orderId,
+        positionId: pos.id,
+        pair: pos.pair,
+        side: expectedSide,
+        preQty: plan.posQty,
+        requestedQty: plan.qty,
+        capped: plan.capped,
+        postQty: +afterQty.toFixed(8),
+        closeAll: afterQty <= 1e-9,
+      };
+    }
+  }
+  return {
+    ok: true,
+    verified: false,
+    ambiguous: Boolean(readError),
+    orderId: xr.orderId,
+    positionId: pos.id,
+    pair: pos.pair,
+    side: expectedSide,
+    preQty: plan.posQty,
+    requestedQty: plan.qty,
+    capped: plan.capped,
+    postQty: null,
+    closeAll: false,
+    warning: readError
+      ? `reduce order accepted but post-read failed (${readError}) — exchange qty unverified`
+      : 'reduce order accepted but exchange qty re-read did not reflect the reduction yet — verify/reconcile before any retry',
+  };
+}
+
 /** v7.0 PRO TRADER: PARTIAL futures exit. CoinDCX futures
  *  /positions/exit is FULL-exit only — a partial close goes through an
  *  OPPOSITE-side market order for the fraction (the exchange nets it
@@ -2801,6 +2980,10 @@ export async function syncCoinDcxActivePositionsForControl({ force = false } = {
       const tp2 = Number(ex.tp) > 0
         ? Number(ex.tp)
         : (Number(jPos?.tp2) > 0 ? Number(jPos.tp2) : (directionBlocked ? 0 : pRound(isLong ? entry + 2.4 * risk : entry - 2.4 * risk)));
+      // v21.28.0 [F9]: exchange-provided SL is the ONLY protection truth.
+      // `sl` above may be journal/synthesized when CoinDCX did not report one —
+      // adoption must mark that row sync-pending, never "protected".
+      const exSl = Number(ex.sl) > 0 ? Number(ex.sl) : null;
 
       // Arm exchange-native TP/SL if missing on CoinDCX so the active position is 100% protected
       if (!directionBlocked && ex.id && !(Number(ex.sl) > 0) && sl > 0) {
@@ -2824,6 +3007,8 @@ export async function syncCoinDcxActivePositionsForControl({ force = false } = {
         ltp: Number(ex.markPrice) > 0 ? Number(ex.markPrice) : entry,
         leverage: Number(ex.leverage) || Number(jPos?.leverage) || 10,
         stopLoss: sl,
+        exchangeSl: exSl,
+        slSource: exSl != null ? 'exchange' : (Number(jPos?.sl) > 0 ? 'journal' : 'synthesized'),
         t1: tp1,
         t2: tp2,
         openedAt: jPos?.openedAt || ex.updatedAt || now,
@@ -2855,6 +3040,8 @@ export async function syncCoinDcxActivePositionsForControl({ force = false } = {
           ltp: Number(jPos.entryPrice) || 0,
           leverage: Number(jPos.leverage) || 10,
           stopLoss: Number(jPos.sl) || 0,
+          exchangeSl: Number(exchRow?.sl) > 0 ? Number(exchRow.sl) : null,
+          slSource: Number(exchRow?.sl) > 0 ? 'exchange' : (Number(jPos.sl) > 0 ? 'journal' : 'synthesized'),
           t1: Number(jPos.tp) || 0,
           t2: Number(jPos.tp2) || 0,
           openedAt: jPos.openedAt || now,
@@ -2882,6 +3069,8 @@ export async function syncCoinDcxActivePositionsForControl({ force = false } = {
         ltp: Number(jPos.entryPrice) || 0,
         leverage: Number(jPos.leverage) || 10,
         stopLoss: Number(jPos.sl) || 0,
+        exchangeSl: null,
+        slSource: Number(jPos.sl) > 0 ? 'journal' : 'synthesized',
         t1: Number(jPos.tp) || 0,
         t2: Number(jPos.tp2) || 0,
         openedAt: jPos.openedAt || now,
@@ -2898,9 +3087,67 @@ export async function syncCoinDcxActivePositionsForControl({ force = false } = {
   return value;
 }
 
+/** v21.28.0 [F5 SL READ-BACK MATCH — PURE]: exchange SL trigger ko
+ *  requested SL se compare karta hai. Tolerance 0.05% default (tick-size
+ *  rounding); invalid/0 actual = match nahi. */
+export function slReadBackMatches({ actualSl, expectedSl, tolerancePct = 0.0005 } = {}) {
+  const actual = Number(actualSl);
+  const expected = Number(expectedSl);
+  const tolPct = Number(tolerancePct);
+  if (!(actual > 0) || !(expected > 0)) return false;
+  const tol = Math.max(Math.abs(expected) * (Number.isFinite(tolPct) && tolPct >= 0 ? tolPct : 0.0005), 1e-12);
+  return Math.abs(actual - expected) <= tol;
+}
+
+/** Best-effort exchange read-back. Create accepted hone ke baad 2-3 reads
+ *  (exchange propagation lag). Koi order DOBARA nahi bhejta — sirf truth
+ *  padhta hai, isliye retry se TP/SL stack nahi hota. */
+async function _readBackCoinDcxSl({ positionId, pair, expectedSl, attempts = [0, 350, 900] } = {}) {
+  let lastActual = null;
+  let lastError = null;
+  for (const wait of attempts) {
+    if (Number(wait) > 0) await _sleep(Number(wait));
+    let list;
+    try {
+      list = await listFuturesPositions();
+    } catch (e) {
+      lastError = `read-back list failed: ${String(e?.message || e).slice(0, 120)}`;
+      continue;
+    }
+    const row = (positionId && list.find((p) => String(p.id) === String(positionId)))
+      || (pair && list.find((p) => p.pair === pair && Number(p.activePos) !== 0));
+    if (!row) {
+      lastError = 'exchange position not found during SL read-back';
+      continue;
+    }
+    const actual = Number(row.sl) || 0;
+    lastActual = actual > 0 ? actual : null;
+    if (!(actual > 0)) {
+      lastError = 'exchange reports no SL trigger on the position';
+      continue;
+    }
+    if (slReadBackMatches({ actualSl: actual, expectedSl })) {
+      return { verified: true, actualSl: actual, error: null };
+    }
+    lastError = `exchange SL ${actual} != requested ${expectedSl}`;
+  }
+  return { verified: false, actualSl: lastActual, error: lastError || 'SL read-back unavailable' };
+}
+
 /**
  * Updates/trails the Stop-Loss (and TP) of an active CoinDCX Futures position
  * on the exchange (`createFuturesTpsl`) and syncs `trade-journal.json`.
+ *
+ * v21.28.0 [F5 — JOURNAL-FIRST FIX + READ-BACK]:
+ *   Pehle journal naya SL likh deta tha aur exchange push ka sirf HTTP verdict
+ *   dekha jata tha. Ab:
+ *     1. exchange push (create_tpsl) pehle
+ *     2. accepted hone par position list se actual SL read-back (2-3 attempts)
+ *     3. journal SIRF accepted push ke baad update — SL ko "armed" claim
+ *        tabhi karta hai jab read-back match kare; warna verified:false +
+ *        protectionState UNVERIFIED/PROTECTION_MISSING.
+ *   `create_tpsl` replace-vs-stack behaviour CoinDCX par [VERIFY-LIVE] hai
+ *   (small size test). Isliye read-back retry kabhi naya order nahi bhejta.
  */
 export async function updateCoinDcxPositionSl({ positionId, symbol, pair, stopLoss, takeProfit } = {}) {
   const sl = pRound(Number(stopLoss));
@@ -2914,13 +3161,14 @@ export async function updateCoinDcxPositionSl({ positionId, symbol, pair, stopLo
       : null;
 
   const j = loadJournalFresh();
-  const jPos = Array.isArray(j?.positions)
-    ? j.positions.find(p =>
+  const findJournalPos = (jj) => (Array.isArray(jj?.positions)
+    ? jj.positions.find(p =>
       (p.status === 'OPEN' || p.status === 'UNKNOWN') && (
         (positionId && (p.id === positionId || p.exchangePositionId === positionId))
         || (normPair && p.pair === normPair)
       ))
-    : null;
+    : null);
+  const jPos = findJournalPos(j);
 
   let exchPosId = positionId || jPos?.exchangePositionId || null;
   if (!exchPosId && normPair && loadCredsForOrder()) {
@@ -2929,65 +3177,86 @@ export async function updateCoinDcxPositionSl({ positionId, symbol, pair, stopLo
     if (row?.id) exchPosId = row.id;
   }
 
-  if (jPos) {
-    // Journal mutations must share the same lock as every other writer (the
-    // old direct save here could interleave with an order/close and lose a
-    // freshly adopted position id or SL change).
+  const writeJournal = async ({ verified, actualSl, protectionState, error }) => {
+    if (!jPos) return;
     try {
       await withJournalLock(async () => {
         const jj = loadJournalFresh();
-        const jp = Array.isArray(jj?.positions)
-          ? jj.positions.find(p =>
-            (p.status === 'OPEN' || p.status === 'UNKNOWN') && (
-              (positionId && (p.id === positionId || p.exchangePositionId === positionId))
-              || (normPair && p.pair === normPair)
-            ))
-          : null;
+        const jp = findJournalPos(jj);
         if (!jp) return;
         jp.sl = sl;
-        if (exchPosId && !jp.exchangePositionId) jp.exchangePositionId = exchPosId;
+        if (exchPosId && !jp.exchangePositionId) jp.exchangePositionId = String(exchPosId);
+        jp.exchangeSlVerified = verified === true;
+        jp.exchangeSlReadBack = Number(actualSl) || null;
+        jp.exchangeSlReadBackAt = Date.now();
+        jp.slProtectionState = protectionState || (verified ? 'PROTECTED' : 'UNVERIFIED');
+        if (error) jp.slProtectionError = String(error).slice(0, 180);
+        else delete jp.slProtectionError;
         saveJournalFresh(jj);
       });
     } catch { /* best-effort journal update */ }
+  };
+
+  // No exchange id / creds → journal-only. Honest ok:false (pehle ok:true
+  // 15s tick ko lastExchangeSl stamp karne deta tha — silent dead SL).
+  if (!exchPosId || !loadCredsForOrder()) {
+    await writeJournal({ verified: false, protectionState: 'UNVERIFIED', error: 'exchange position id not resolvable' });
+    return { ok: false, synced: false, journalOnly: true, verified: false, protectionState: 'UNVERIFIED', positionId: exchPosId, stopLoss: sl, error: 'exchange position id not resolvable — journal updated only' };
   }
 
-  if (exchPosId && loadCredsForOrder()) {
-    const res = await createFuturesTpsl({ positionId: exchPosId, stopLoss: sl, takeProfit: tp }).catch(e => ({ ok: false, error: String(e?.message || e) }));
-    // v21.23.10 [UUID-RESCUE]: entry-time position-id poll (3×900ms) miss ho
-    // jaye to caller internal journal UUID pass karta hai — createFuturesTpsl
-    // 400 deta hai aur pair-based resolver kabhi chance hi nahi paata tha
-    // (`positionId ||` trust). Failed id + normPair → EK pair-based re-resolve
-    // + retry — warna LIVE SL sync us position ke liye hamesha ke liye dead.
-    if (!res?.ok && normPair && String(exchPosId) !== String(jPos?.exchangePositionId || '')) {
-      const exchList = await listFuturesPositions().catch(() => []);
-      const row = exchList.find(p => p.pair === normPair && p.activePos !== 0);
-      if (row?.id && String(row.id) !== String(exchPosId)) {
-        const retry = await createFuturesTpsl({ positionId: row.id, stopLoss: sl, takeProfit: tp }).catch(e => ({ ok: false, error: String(e?.message || e) }));
-        if (retry?.ok && jPos) {
-          try {
-            await withJournalLock(async () => {
-              const jj = loadJournalFresh();
-              const jp = Array.isArray(jj?.positions)
-                ? jj.positions.find(p =>
-                  (p.status === 'OPEN' || p.status === 'UNKNOWN') && (
-                    (positionId && (p.id === positionId || p.exchangePositionId === positionId))
-                    || (normPair && p.pair === normPair)
-                  ))
-                : null;
-              if (jp) { jp.exchangePositionId = String(row.id); saveJournalFresh(jj); }
-            });
-          } catch { /* best-effort id adoption */ }
-        }
-        return { ok: Boolean(retry?.ok), positionId: row.id, stopLoss: sl, error: retry?.error || null };
-      }
+  let usedId = exchPosId;
+  let res = await createFuturesTpsl({ positionId: usedId, stopLoss: sl, takeProfit: tp })
+    .catch(e => ({ ok: false, error: String(e?.message || e) }));
+
+  // v21.23.10 [UUID-RESCUE]: entry-time position-id poll miss ho jaye to
+  // caller internal journal UUID pass karta hai — pair-based re-resolve +
+  // retry (warna LIVE SL sync us position ke liye hamesha dead).
+  if (!res?.ok && normPair && String(exchPosId) !== String(jPos?.exchangePositionId || '')) {
+    const exchList = await listFuturesPositions().catch(() => []);
+    const row = exchList.find(p => p.pair === normPair && p.activePos !== 0);
+    if (row?.id && String(row.id) !== String(exchPosId)) {
+      usedId = String(row.id);
+      res = await createFuturesTpsl({ positionId: usedId, stopLoss: sl, takeProfit: tp })
+        .catch(e => ({ ok: false, error: String(e?.message || e) }));
+      exchPosId = usedId;
     }
-    return { ok: Boolean(res?.ok), positionId: exchPosId, stopLoss: sl, error: res?.error || null };
   }
-  // v21.23.10 [HONEST VERDICT]: journal-only update (exchange id unresolvable)
-  // ab ok:false deta hai — pehle ok:true tha → 15s tick b.lastExchangeSl
-  // stamp kar deta tha aur ≥0.05% delta-gate AAGE ke chhote trail syncs
-  // SKIP kar deta tha jabki exchange SL kabhi badla hi nahi (silent dead SL).
-  return { ok: false, synced: false, journalOnly: true, positionId: exchPosId, stopLoss: sl, error: 'exchange position id not resolvable — journal updated only' };
+
+  if (!res?.ok) {
+    // Exchange rejection = protection NOT re-armed. Journal ka purana SL
+    // hi sach hai — naya SL journal me mat likho.
+    return {
+      ok: false,
+      accepted: false,
+      verified: false,
+      protectionState: 'PROTECTION_PUSH_FAILED',
+      positionId: usedId,
+      stopLoss: sl,
+      error: res?.error || 'exchange TP/SL update rejected',
+    };
+  }
+
+  const readBack = await _readBackCoinDcxSl({ positionId: usedId, pair: normPair, expectedSl: sl });
+  const protectionState = readBack.verified ? 'PROTECTED' : 'UNVERIFIED';
+  await writeJournal({
+    verified: readBack.verified,
+    actualSl: readBack.actualSl,
+    protectionState,
+    error: readBack.verified ? null : readBack.error,
+  });
+
+  return {
+    ok: readBack.verified,
+    accepted: true,
+    verified: readBack.verified,
+    protectionState,
+    positionId: usedId,
+    stopLoss: sl,
+    exchangeSl: readBack.actualSl,
+    readBackError: readBack.error || null,
+    retryAfterMs: readBack.verified ? 0 : 60_000,
+    error: readBack.verified ? null : `SL push accepted but read-back unverified: ${readBack.error}`,
+  };
 }
 
 /**
@@ -3507,7 +3776,7 @@ async function partialCloseFuturesLeg(j, p, price, { stage, pct }) {
     // v20.9.1 [H3]: reconcile/manual-partial ne p.qty shrink ki ho to ORIGINAL
     // ka pct dobara bhejna over-close karta — opposite-side residual position
     // khul jati. Cap: pct% of original, par CURRENT qty se zyada kabhi nahi.
-    const partialQty = roundFuturesQty(p.pair, Math.min((originalQty * pct) / 100, Number(p.qty)));
+    let partialQty = roundFuturesQty(p.pair, Math.min((originalQty * pct) / 100, Number(p.qty)));
 
     // too small to slice at instrument precision → tiered exits off
     if (!(partialQty > 0)) {
@@ -3538,6 +3807,7 @@ async function partialCloseFuturesLeg(j, p, price, { stage, pct }) {
     }
 
     // LIVE: move the fraction on the exchange BEFORE booking anything
+    let execQty = partialQty;
     if (p.mode === 'live') {
       if (!coindcxConnected()) {
         // v20.9.1 [H2]: LIVE + disconnected pe paper-book KABHI NAHI — leg
@@ -3547,14 +3817,36 @@ async function partialCloseFuturesLeg(j, p, price, { stage, pct }) {
         pushEntry(j, { kind: 'WATCH_ERROR', day: todayIST(), pair: p.pair, market: 'FUTURES', reason: `LIVE ${stage} partial BLOCKED (CoinDCX disconnected) — NOT paper-booking the leg, will retry` });
         return { ok: false, error: 'LIVE partial blocked (no CoinDCX connection) — retrying next pass' };
       }
-      const xr = await partialFuturesExit({ pair: p.pair, qty: partialQty, side: p.side, leverage: p.leverage });
+      // v21.28.0 [F3 SAFE-REDUCE]: pre-read side/flat/qty guard + exchange
+      // post-read. Raw opposite-order path side mismatch par position ko
+      // ULTA badha sakta tha; ab capped qty hi book hoti hai.
+      const xr = await safeReduceFuturesPosition({
+        positionId: p.exchangePositionId,
+        pair: p.pair,
+        qty: partialQty,
+        side: p.side,
+        leverage: p.leverage,
+      });
+      if (xr?.ambiguous) {
+        p.partialRetryAfter = Date.now() + 5 * 60_000;
+        pushEntry(j, { kind: 'WATCH_ERROR', day: todayIST(), pair: p.pair, market: 'FUTURES', reason: `${stage} safe-reduce AMBIGUOUS (${String(xr?.error || xr?.warning || 'post-read failed').slice(0, 120)}) — 5 min retry hold (double-reduce guard)` });
+        return { ok: false, error: String(xr?.error || xr?.warning || 'ambiguous reduce') };
+      }
       // v20.9.1 [H1-class]: 200-wrapped rejection ({orderId:null,error})
       // resolve hota hai, throw nahi — verdict ignore karke leg book karna
       // = phantom T1 latch + BE-lock + bookedPnl jabki exchange unchanged.
-      if (!xr?.orderId || xr?.error) {
-        return { ok: false, error: `exchange rejected ${stage} partial: ${String(xr?.error || 'no order id').slice(0, 160)}` };
+      if (!xr?.ok || !xr?.orderId) {
+        return { ok: false, error: `safe-reduce ${stage} partial failed: ${String(xr?.error || 'no order id').slice(0, 160)}` };
+      }
+      execQty = Number(xr.requestedQty) > 0 ? Number(xr.requestedQty) : partialQty;
+      if (xr.verified === false) {
+        pushEntry(j, {
+          kind: 'WATCH_ERROR', day: todayIST(), pair: p.pair, market: 'FUTURES',
+          reason: `${stage} reduce order ${xr.orderId} accepted but exchange qty UNVERIFIED (${String(xr.warning || '').slice(0, 150)}) — leg booked on order id, reconcile required before retry`,
+        });
       }
     }
+    partialQty = execQty;
 
     // ---- book the leg (USDT domain + INR twin) ----
     const usdInr = await fetchUsdInr();

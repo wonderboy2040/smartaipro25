@@ -1,5 +1,66 @@
 # Changelog
 
+## v21.28.0 — MTF BOARD + ACTIVE AUTO-TRADE DEEP MONITOR AUDIT (F1–F9, SHADOW-FIRST SAFETY RELEASE) (2026-10-30)
+
+**User ask: audit plan ko accurately implement karo — indicator correctness, signal confirmation, deep-monitor exits, CoinDCX position protection, reconciler/UI upgrades, phased rollout; direction certificate + 1-active-trade lock + real-money safety preserve rahe.**
+
+Minor release. Koi profit guarantee nahi; leveraged futures liquidation risk real hai. Naye behaviour flags **default OFF / shadow** hain — pehle observe karo, phir paper, phir live-small. Direction integrity (LONG→BUY, SHORT→SELL) aur 1-session/1-open-trade lock untouched.
+
+### F1 — Closed-bar signal confirmation (default OFF = shadow)
+- `mtfDualBoard.js`: har row par `closedBarConfirm`, `signalStability`, `barConfirmation`; last CLOSED bar ka signal cache hota hai (`closedBarSignal`). Forming-bar signal decisions ko chup-chaap replace nahi karta.
+- `dualAutoCandidates` + `mtfProEntryGate({requireClosedBarConfirm})` gate wiring; `cfg.closedBarConfirm === true` par hi entry block hota hai. Default `false` = sirf telemetry (baseline se compare karne ke liye).
+- New `test/mtfClosedBarV21280.test.ts` (15 locks).
+
+### F2 — LIVE TP1 partial parity (default OFF, `[VERIFY-LIVE]`)
+- `routes.js` live adapter + `mtfAutoLink._tryLiveTp1Partial`: LIVE futures TP1 par paper engine jaisa partial booking, `safeReduceFuturesPosition` ke through.
+- One-shot latch (`t1PartialBooked`), in-flight lock, 60s retry / 5-min ambiguous cooldown, exchange-first mirror booking, telemetry (`live-tp1` / `live-tp1-error`). Re-anchor par latch reset; `originalQty` entry/adoption rows par stamped.
+- `cfg.liveTp1Partial === true` tak inert. Real-money enable se pehle small-size CoinDCX reduce-only verification zaroori.
+- New `test/liveTp1PartialV21280.test.ts` (10 locks).
+
+### F3 — Safe futures reduce (LIVE partial money path)
+- `futures.js`: `planFuturesReduce` + `safeReduceFuturesPosition` — pre-read side/flat/qty guards, requested qty cap, post-trade re-read (`ambiguous` par 5-min hold), `deps` test seam.
+- `partialCloseFuturesLeg` ab raw opposite-order nahi bhejta; side mismatch par position badhne ka risk band. Exchange verdict (`ok` + `orderId`) booking se pehle check hota hai.
+- `test/safeReduceV21280.test.ts` + updated `v2091DeepAudit` source-pin (verdict-before-booking ordering preserved).
+
+### F4 — EXIT_POLICY_V3 (shadow default: `off|shadow|enforce`)
+- `mtfAutoLink.js`: TP1 ladder ab CLOSED bar close-confirmation par (wick/peak latch nahi), post-TP1 stop = fee-breakeven + volatility buffer, TP2 ≥80% par SL→TP1, confirmed reversal gating, telemetry.
+- `EXIT_POLICY_V3` env: `shadow` (default) decisions unchanged + full telemetry; `enforce` V3 ko decider banata hai; `off` legacy behaviour exact. Rollout: shadow → paper → live-small.
+- `test/exitPolicyV3V21280.test.ts` (20 locks).
+
+### F5 — CoinDCX SL read-back is the only protection truth (always ON)
+- `updateCoinDcxPositionSl`: exchange push pehle, journal baad me; `_readBackCoinDcxSl` se actual SL verify; `slReadBackMatches` (0.05% tolerance).
+- Verified → `PROTECTED`; accepted-but-unverified → `ok:false`, `retryAfterMs:60000`, `UNVERIFIED`; push fail → `PROTECTION_PUSH_FAILED`. Journal/synthesized SL kabhi `PROTECTED` label nahi paata.
+- Caller retry spacing `markAutoTradeSlRetry()` / `slNextRetryAt` (min 4.5s, default 60s) — main tick, super-agent tick aur 3s loop respect karte hain. Live read-back / replace-vs-stack behaviour small size par `[VERIFY-LIVE]`.
+- `test/slReadBackV21280.test.ts`.
+
+### F6/F7 — Indicator correctness (deterministic fixes, golden tests)
+- **F6 Wilder ADX**: final ADX ab last-14 DX ka SMA nahi — seed + Wilder smoothing (`(prevADX*(n-1)+DX)/n`). Trending tape par late/stale reads band.
+- **F7 Session-anchored VWAP**: default UTC-day session anchor; multi-day planner slice ka purana price mix nahi hota. Missing timestamps / daily series par honest full-slice fallback; `sessionStartTs` explicit anchor supported.
+- `test/indicatorsV21280.test.ts` golden locks.
+
+### F8 — Ledger scorecard analytics
+- `signalLedger.js`: per-tier TP1/TP2/stop %, expectancy, avg R, MFE/MAE, direction-hit %, `avgTimeToTp1Min`, exact `t1HitAt`/`t2HitAt`, persisted bar snapshots. `scripts/phase0-baseline.mjs` exact touch time prefer karta hai (fallback labelled Approx).
+- `test/mtfScorecardV21280.test.ts`; frozen baseline `docs/BASELINE-2026-10-29.json` (verdict ATTENTION; 6 warnings — pre-existing data quality, not hidden).
+
+### F9 — Deep-monitor honesty (heartbeat / protection / ladder / next action)
+- `mtfAutoLink.js`: `DEEP_MONITOR_STALE_MS=10_000`; heartbeat sirf genuine lanes stamp karte hain (`fast-3s`, `auto-tick-15s`, `super-agent`). UI/status polling stamp nahi karta — dead lane fresh nahi dikh sakta. `stale:null` = never stamped (unknown), not healthy.
+- Per-row `decisionAt`, `protection` (`PAPER|BROKER|PROTECTED|SYNC_PENDING|UNVERIFIED|DIVERGED`), `ladder` rungs + `nextAction` preview; aggregate `protectionCounts` + `heartbeat`.
+- Adoption/reconciler: `futures.js` ab `exchangeSl`/`slSource` deta hai; adoption exchange SL ko anchor karta hai, unknown par `slSyncPending`; side re-sync SL+TP re-arm pending + TP1 partial latch reset. Synthesized SL par `PROTECTED` claim nahi.
+- UI: `SignalRecheckPanel.tsx` + `MTFDualBoardPanel.tsx` heartbeat/stale badge, protection badge, ladder chips, next-action + decision age; `useAITrading.ts` types.
+- New `test/monitorTelemetryV21280.test.ts` (27 locks).
+
+### Gate evidence
+- Focused regression batch: 14 files / **261 tests ✓** (F1–F9 suites + MTF/auto-trade/super-agent/live-recheck); six previously flaky suites re-run 6 files / **109 tests ✓**.
+- Full release gate on the final 21.28.0 tree: **254 files / 4656 tests ✓** (724.6s) · `npm run typecheck` ✓ · `npm run lint` ✓ · `npm run check:version` ✓ (21.28.0, telegram-bot 21.25.3) · `npm run build` ✓ (stamp `dist/.build-version = 21.28.0`) · `npm run check:routes` ✓ — `RESULT: PASS`.
+- Test-infra: `vitest.config.ts` `testTimeout/hookTimeout = 15s` (full sequential run I/O stalls), India 15m fixture now time-relative (stale-data gate is live during NSE hours), `futuresResilience` pins the payload timestamp (1-second wall race), and three contract suites are hermetic (no live feeds): `globalFutures` stubs USDINR, `v69-core` fast-fails upstream for the payload-contract path, `indiaAgent` stubs Groww circuit quotes so the time-exit sweep is not starved by a 5s network timeout.
+- Full-gate logs: `gate-21280-final3.log` (final green); earlier `gate-21280-final2.log` captured the dark-network cascade (2 genuine network hangs + 4 shared-state cascades) that the hermetic fixes removed.
+
+### `[VERIFY-LIVE]` before enabling real money
+1. **F2** `liveTp1Partial=true`: small CoinDCX futures position par TP1 reduce — order qty, remaining qty, SL re-arm, mirror booking.
+2. **F5** SL update/read-back: small position par SL replace — verify replace-vs-stack, read-back value, retry spacing, `PROTECTED` badge.
+3. **F4** `EXIT_POLICY_V3=enforce`: shadow telemetry pehle 1–2 sessions compare karo; phir paper; phir live-small.
+4. **F1** `closedBarConfirm=true`: shadow data me signal stability distribution check karo; entry block live-small me.
+
 ## v21.27.2 — MTF DUAL BOARD LIVE BUTTON FIX: CLICK CAN ARM CRYPTO LIVE (2026-10-30)
 
 **User ask: "sirf isko theek kardo localhost me run karke dekho button"** — MTF Dual Board ka ⚡ LIVE button har baar `LIVE execution is not enabled for this desk/tab — arm it in the desk console first` par ruk raha tha.
