@@ -190,7 +190,7 @@ describe('v21.18.0 — Dual-TF Superintelligence Board + Local Ollama + Wallet 1
 
   it('6) auto-places LIVE order for ELITE/STRONG trades with 10x (<₹10k) / 5x (≥₹10k) leverage when Live Mode is active', async () => {
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ executionMode: 'live', minScore: 75, walletAmountINR: 8000 });
+    updateMtfAutoConfig({ executionMode: 'live', minScore: 75, walletAmountINR: 8000, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
 
     const liveOrders: Array<Record<string, unknown>> = [];
     const openPaperCalls: Array<Record<string, unknown>> = [];

@@ -361,7 +361,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
     expect(tgBoardTxt).not.toContain('OLLAMA AI LOCK');
 
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ executionMode: 'live', walletDeployPct: 95, walletAmountINR: 1163.93 });
+    updateMtfAutoConfig({ executionMode: 'live', walletDeployPct: 95, walletAmountINR: 1163.93, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
     const st = mtfAutoStatus();
     const tgDmTxt = formatAutoStatus(st);
     expect(tgDmTxt).toContain('95% deploy');
@@ -761,6 +761,7 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
       walletDeployPct: 100,
       maxOpenPositions: 1,
       minScore: 75,
+      riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS',
     });
     setMtfAutoEnabled(true);
 

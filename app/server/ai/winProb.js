@@ -35,6 +35,10 @@
 // ============================================================
 import { trustReport } from './trust.js';
 import { normalizeSide } from './directionCertificate.js';
+// v21.29.0 [R7 SCORE CALIBRATION] — per-bucket settled win-rate gate. The
+// curve builder lives in tradeGuards.js (pure); re-exported here so the
+// win-probability consumers have one calibration entry point.
+import { buildScoreCalibration, applyScoreCalibration } from './tradeGuards.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 // null/undefined → null (NEVER 0 — a missing input must not silently
@@ -176,6 +180,21 @@ export function computeWinProb({
       ? `Ledger-calibrated (settled outcomes: ${nEff}). Breakeven ${pNeed}% @ 1:${rr}. EV realistic ${evRealisticR}R/trade.`
       : `Uncalibrated prior (ledger me abhi ≥${MIN_CALIBRATION_N} settled outcomes nahi is bucket me) — trade settle hone par yeh number khud sudhrega. Breakeven ${pNeed}% @ 1:${rr}.`,
   };
+}
+
+// ---------------- v21.29.0 R7 score-calibration hooks ----------------
+/**
+ * Build the per-score-bucket curve from settled rows. PURE.
+ * A bucket is authoritative only when `n >= minN`; below that the raw
+ * score prior decision stands (no fabricated confidence).
+ */
+export function scoreCalibrationCurve(rows = [], opts = {}) {
+  return buildScoreCalibration(rows, opts);
+}
+
+/** Apply the curve to one candidate score (same sufficiency contract). */
+export function scoreCalibrationFor({ score, calibration, minN = 30, minWinRate = 55 } = {}) {
+  return applyScoreCalibration({ score, calibration, minN, minWinRate });
 }
 
 // ---------------- calibration snapshot (IO, cached 5 min) ----------------

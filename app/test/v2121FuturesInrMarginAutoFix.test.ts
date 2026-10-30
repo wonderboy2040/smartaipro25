@@ -256,6 +256,7 @@ describe('v21.21.0 — CoinDCX Futures INR Wallet & Auto-Trade Insufficient Fund
         walletAmountINR: 1164,
         maxNotionalPerTradeINR: 15000, // paper default that previously caused $15.80 USDT margin!
         markets: ['CRYPTO'],
+        riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS',
       });
 
       const liveAttempts: Array<{ symbol: string; marginUSDT: number }> = [];

@@ -141,16 +141,77 @@ export class ApiFuturesPort {
   }
   async reduce({ positionId, qty }) {
     try {
-      // v20.7.10 CRITICAL FIX: partialFuturesExit({ pair, qty, side,
-      // leverage }) chahiye — pehle { positionId, qty } pass hota tha:
-      // pair 'undefined' + side undefined → opposite HAMESHA 'SHORT'
-      // (SHORT position ke reduce pe bhi sell-side = WRONG DIRECTION,
-      // position double ho jati). Ab position resolve karke sahi
-      // pair/side/leverage ke saath opposite-side reduce order.
+      // v21.29.0 [R0a SAFE REDUCE]: production path ab futures.js ka
+      // guarded reducer use karta hai — pre-read → side/qty guard →
+      // opposite-side order → post-read verify. Missing position ko
+      // `already_flat` (idempotent no-op) mana jata hai, aur order accept
+      // hone ke baad qty re-read fail ho to `ambiguous` + retryAfterMs
+      // (caller 5 min blind retry nahi karega). Legacy raw path sirf tab
+      // chalta hai jab injected futures module me safe helper na ho
+      // (purana execPort test seam / older adapter).
       const positions = await this._fut.listFuturesPositions().catch(() => []);
-      const pos = (Array.isArray(positions) ? positions : []).find((p) => String(p?.id || '') === String(positionId));
-      if (!pos) return { ok: false, error: `reduce: position ${positionId} exchange pe nahi mili (already closed?)` };
+      const list = Array.isArray(positions) ? positions : [];
+      const pos = list.find((p) => String(p?.id || '') === String(positionId));
+      if (!pos) {
+        // raw-path tests expect ok:false here; safe path is explicitly
+        // idempotent (position pahle se flat = reduce ka kaam ho chuka).
+        if (typeof this._fut.safeReduceFuturesPosition !== 'function') {
+          return { ok: false, error: `reduce: position ${positionId} exchange pe nahi mili (already closed?)` };
+        }
+        return {
+          ok: true, alreadyFlat: true, reason: 'already_flat',
+          note: `reduce: position ${positionId} already flat — idempotent skip`,
+        };
+      }
       const side = Number(pos.activePos || 0) < 0 ? 'SHORT' : 'LONG';
+      if (typeof this._fut.safeReduceFuturesPosition === 'function') {
+        const r = await this._fut.safeReduceFuturesPosition({
+          positionId: String(pos.id || positionId),
+          pair: pos.pair,
+          qty: Number(qty),
+          side,
+          leverage: Number(pos.leverage) || 1,
+        });
+        const reason = String(r?.reason || '');
+        if (reason === 'already_flat') {
+          return { ok: true, alreadyFlat: true, reason, raw: r };
+        }
+        if (reason === 'side_mismatch' || reason === 'invalid_side') {
+          // Direction integrity violation — NEVER auto-retry: a retry with
+          // a guessed side is exactly how a reduce doubles a position.
+          return {
+            ok: false, reason, ambiguous: false, retryAfterMs: 0,
+            raw: r, error: String(r?.error || `reduce blocked: ${reason}`),
+          };
+        }
+        if (reason === 'invalid_qty' || reason === 'qty_rounds_to_zero') {
+          return { ok: false, reason, ambiguous: false, retryAfterMs: 0, raw: r, error: String(r?.error || 'invalid reduce qty') };
+        }
+        if (!r?.ok) {
+          return {
+            ok: false, reason: reason || 'reduce_failed', phase: r?.phase || null,
+            ambiguous: r?.ambiguous === true, retryAfterMs: r?.ambiguous === true ? 300_000 : 0,
+            raw: r, error: String(r?.error || 'safe reduce failed'),
+          };
+        }
+        if (r.verified === true) {
+          return {
+            ok: true, verified: true, raw: r, orderId: r.orderId,
+            preQty: r.preQty, postQty: r.postQty, requestedQty: r.requestedQty,
+            capped: r.capped === true, closeAll: r.closeAll === true,
+          };
+        }
+        // Order accepted but exchange qty re-read did not confirm the
+        // reduction — do NOT report success (phantom stage advance) and do
+        // NOT retry blindly (double-reduce risk). Hold the caller off.
+        return {
+          ok: false, verified: false, ambiguous: true, retryAfterMs: 300_000,
+          raw: r, orderId: r.orderId || null,
+          warning: String(r?.warning || 'reduce unverified — hold before retry'),
+          error: String(r?.warning || 'reduce order accepted but exchange qty unverified'),
+        };
+      }
+      // ---- legacy fallback (injected mocks without the safe helper) ----
       const r = await this._fut.partialFuturesExit({
         pair: pos.pair, qty: Number(qty), side,
         leverage: Number(pos.leverage) || 1,
@@ -159,7 +220,7 @@ export class ApiFuturesPort {
       // honest shape — {orderId, error}. ok sirf id pe (pehle `r.raw` truthy
       // bhi ok bol deta tha — wrapped-rejection reduce "ho gaya" journal).
       return { ok: !!(r && r.orderId != null && !r.error), raw: r, error: r?.error || undefined };
-    } catch (e) { return { ok: false, error: String(e?.message || e) }; }
+    } catch (e) { return { ok: false, ambiguous: true, retryAfterMs: 300_000, error: String(e?.message || e) }; }
   }
   async close({ positionId }) {
     try {
@@ -173,12 +234,35 @@ export class ApiFuturesPort {
       return { ok: r?.ok === true, raw: r, error: r?.ok === true ? undefined : String(r?.error || 'exit rejected') };
     } catch (e) { return { ok: false, error: String(e?.message || e) }; }
   }
-  async cancelOpenOrders({ _pair }) {
-    // v20.7.12 [H2-5]: pehle ok:true stub tha — positionManager iska note
-    // error message me embed karta hai, par ok jhootha tha (cancel HUA HI
-    // NAHI tha jabki flow aage badh gaya). Ab honest verdict — caller
-    // (fill-confirm fail path) already "manually verify karo" kehta hai.
-    return { ok: false, note: 'cancelOpenOrders not yet wired (futures.js pending) — broker app me resting order manually verify/cancel karo' };
+  async cancelOpenOrders({ pair }) {
+    // v21.29.0 [R1]: R0a/R1 wiring — futures.js list+cancel helpers.
+    // Honest verdict only: the caller's fill-confirm failure path needs to
+    // know whether resting orders are REALLY gone. If the exchange list
+    // shape is unknown ([VERIFY-DOCS]) we return unsupported + the manual
+    // verification note instead of a fake ok.
+    if (typeof this._fut.cancelFuturesOpenOrdersForPair !== 'function') {
+      return {
+        ok: false, unsupported: true,
+        note: 'cancelOpenOrders helper missing in futures module — broker app me resting order manually verify/cancel karo',
+      };
+    }
+    try {
+      const r = await this._fut.cancelFuturesOpenOrdersForPair({ pair });
+      return {
+        ok: r?.ok === true,
+        unsupported: r?.unsupported === true,
+        cancelled: Array.isArray(r?.cancelled) ? r.cancelled : [],
+        failed: Array.isArray(r?.failed) ? r.failed : [],
+        raw: r,
+        ...(r?.ok === true ? {} : {
+          note: r?.unsupported
+            ? 'open-order list shape unverified [VERIFY-DOCS] — broker app me manually verify/cancel karo'
+            : String(r?.error || 'cancel rejected/partial — broker app me manually verify karo'),
+        }),
+      };
+    } catch (e) {
+      return { ok: false, note: `cancelOpenOrders failed: ${String(e?.message || e).slice(0, 140)}` };
+    }
   }
 }
 

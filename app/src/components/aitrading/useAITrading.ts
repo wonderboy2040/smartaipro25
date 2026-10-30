@@ -1286,6 +1286,19 @@ export interface MtfAutoStatus {
     /** v21.25.0 — deep-monitor direction integrity (manual LIVE rows included). */
     directionIntegrity?: DirectionIntegrity | null;
     directionBlockedCount?: number;
+    /** v21.29.0 [R10/R11] — guard modes + shadow evidence + calibration. */
+    guards?: {
+      modes: Record<string, string>;
+      thresholds?: Record<string, number>;
+      shadowHarness?: {
+        totals: { filters: number; decisions: number; wouldBlock: number; wouldBlockPct: number };
+        gates: Array<{ filter: string; readyForReview: boolean; reasons: string[] }>;
+        readyForReview: string[];
+        note?: string;
+      } | null;
+      calibration?: { settled: number; sufficient: boolean; overall?: { n: number; winRate: number | null; sufficient: boolean } } | null;
+      note?: string;
+    } | null;
     /** v21.28.0 F9 — aggregate protection badges + genuine-lane heartbeat. */
     protectionCounts?: Record<string, number>;
     heartbeat?: {

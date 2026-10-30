@@ -78,6 +78,22 @@ import {
   normalizeSide, oppositeSideOf, resolveActivePosSide,
   buildDirectionCertificate, summarizeBoardDirectionIntegrity,
 } from './directionCertificate.js';
+// v21.29.0 [R2 RISK ARM] — live-arm blockers, typed override, consecutive-loss
+// pause, and risk-sizing labels. Pure helpers; this module owns persistence and
+// the tick-time gate.
+import {
+  RISK_ACK_PHRASE, evaluateLiveArmRisk, evaluateConsecutiveLossPause,
+  computeRiskBasedSizing,
+} from './riskArm.js';
+// v21.29.0 [R3–R9 TRADE GUARDS] — pure filters/exit helpers. Modes default
+// shadow/off; nothing here can block or close until an operator flips a flag.
+import {
+  normalizeGuardMode, evaluateEntryGuards, evaluateReversalGuardV2,
+  evaluateRunnerAfterTp2, evaluateStallExit, buildScoreCalibration,
+} from './tradeGuards.js';
+// v21.29.0 [R11 VALIDATION HARNESS] — shadow evidence + acceptance gates.
+import { recordShadowDecision, shadowHarnessView } from './shadowHarness.js';
+import { eventGuardCheck } from './eventGuard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
@@ -180,6 +196,48 @@ export const MTF_AUTO_DEFAULTS = {
   // confirmation ke bina ye kabhi fire nahi hota (whipsaw guard).
   superAgentMinimalLossExit: true,
   superAgentMinLossR: -0.35,
+  // v21.29.0 [R2 RISK ARM] — default ON:
+  //   • consecutiveLossPauseAfter: 3 losing LIVE trades in a row → new LIVE
+  //     entries pause for `consecutiveLossPauseMin` (0 disables).
+  //   • riskCapsAcknowledged/AckPhrase: persisted typed override for a config
+  //     that intentionally runs without the required caps. Never auto-set.
+  consecutiveLossPauseAfter: 3,
+  consecutiveLossPauseMin: 120,
+  riskCapsAcknowledged: false,
+  riskCapsAckPhrase: null,
+  riskCapsAckAt: null,
+  // v21.29.0 [R3–R9] — ALL new behaviour defaults to observe-only. Enforce is
+  // an explicit operator decision after the R11 shadow gates are reviewed.
+  //   REVERSAL_GUARD_V2=shadow   tiered closed-bar reversal exit
+  //   EVENT_SESSION_FILTER=shadow macro-event blackout + session micro-windows
+  //   REGIME_FILTER=shadow       no counter-regime / chop entries
+  //   PERP_VETO=shadow           funding / long-short / basis extremes
+  //   CLUSTER_GUARD=shadow       correlated-cluster concentration cap
+  //   SCORE_CALIBRATION=off      per-bucket settled win-rate gate
+  //   RUNNER_AFTER_TP2=off       keep a runner after TP2 (paper first)
+  //   STALL_EXIT=off             no-progress time stop
+  reversalGuardV2: 'shadow',
+  eventSessionFilter: 'shadow',
+  eventSessionFilterSessions: true,
+  regimeFilter: 'shadow',
+  regimeBlockChop: true,
+  regimeBlockHighVol: false,
+  perpVeto: 'shadow',
+  perpFundingVetoBps: 30,
+  perpRatioVeto: 3,
+  perpBasisVetoPct: 1,
+  clusterGuard: 'shadow',
+  clusterGuardMax: 2,
+  clusterGuardSameMarketOnly: true,
+  scoreCalibration: 'off',
+  calibrationMinN: 30,
+  calibrationMinWinProb: 55,
+  runnerAfterTp2: 'off',
+  runnerTrailR: 0.75,
+  runnerQtyPct: 25,
+  stallExit: 'off',
+  stallExitMin: 45,
+  stallExitMinPeakR: 0.25,
 };
 // v21.23.8 flip churn guards — ek symbol ke liye din me sirf itni flip-reverse
 // entries (whipsaw market me zyada flip = fees + churn; protective minimal-loss
@@ -207,6 +265,19 @@ const CLAMPS = {
   aboveTenKLeverage: [1, 20],
   postSuccessCooldownMin: [0, 120],   // v21.23.6: 0 = cooldown OFF; max 2h
   superAgentMinLossR: [-0.90, -0.10], // v21.26.0: confirmed adverse par minimal-loss line
+  consecutiveLossPauseAfter: [0, 20],   // v21.29.0 R2: 0 = pause OFF
+  consecutiveLossPauseMin: [0, 1440],   // max 24h
+  // v21.29.0 R3–R9 numeric thresholds
+  perpFundingVetoBps: [5, 200],
+  perpRatioVeto: [1.2, 10],
+  perpBasisVetoPct: [0.1, 10],
+  clusterGuardMax: [1, 10],
+  calibrationMinN: [10, 500],
+  calibrationMinWinProb: [10, 95],
+  runnerTrailR: [0.25, 3],
+  runnerQtyPct: [5, 50],
+  stallExitMin: [5, 1440],
+  stallExitMinPeakR: [0, 2],
 };
 const MODES = new Set(['INTRADAY', 'SWING', 'SCALP']);
 
@@ -346,6 +417,20 @@ function _sanitizeCfg(cfg) {
   //     baad hi enable karna — [VERIFY-LIVE]).
   out.closedBarConfirm = cfg.closedBarConfirm === true;
   out.liveTp1Partial = cfg.liveTp1Partial === true;
+  // v21.29.0 [R3–R9] mode allowlist. Unknown/legacy values never silently
+  // become enforce — each falls back to its documented default.
+  out.reversalGuardV2 = normalizeGuardMode(cfg.reversalGuardV2, 'shadow');
+  out.eventSessionFilter = normalizeGuardMode(cfg.eventSessionFilter, 'shadow');
+  out.regimeFilter = normalizeGuardMode(cfg.regimeFilter, 'shadow');
+  out.perpVeto = normalizeGuardMode(cfg.perpVeto, 'shadow');
+  out.clusterGuard = normalizeGuardMode(cfg.clusterGuard, 'shadow');
+  out.scoreCalibration = normalizeGuardMode(cfg.scoreCalibration, 'off');
+  out.runnerAfterTp2 = normalizeGuardMode(cfg.runnerAfterTp2, 'off');
+  out.stallExit = normalizeGuardMode(cfg.stallExit, 'off');
+  out.eventSessionFilterSessions = cfg.eventSessionFilterSessions !== false;
+  out.regimeBlockChop = cfg.regimeBlockChop !== false;
+  out.regimeBlockHighVol = cfg.regimeBlockHighVol === true;
+  out.clusterGuardSameMarketOnly = cfg.clusterGuardSameMarketOnly !== false;
   // v21.23.8: UC FLIP-AND-REVERSE — default ON; config se OFF ho sakta hai
   // (ucFlipReverse:false → confirmed flip par sirf protective close, reverse
   // entry nahi — user ka explicit opt-out).
@@ -353,6 +438,16 @@ function _sanitizeCfg(cfg) {
   // v21.26.0 per-trade AI SUPER AGENT — default ON, explicit opt-out possible.
   out.superAgentEnabled = cfg.superAgentEnabled !== false;
   out.superAgentMinimalLossExit = cfg.superAgentMinimalLossExit !== false;
+  // v21.29.0 [R2 RISK ARM] — typed acknowledgement is a one-way persisted
+  // fact. It is accepted ONLY as the exact phrase; a half-typed/wrong phrase
+  // is stored as NOT acknowledged (never silently normalised to true).
+  const ackPhrase = String(cfg.riskCapsAckPhrase || '').trim();
+  out.riskCapsAcknowledged = cfg.riskCapsAcknowledged === true
+    && ackPhrase.toUpperCase() === RISK_ACK_PHRASE;
+  out.riskCapsAckPhrase = out.riskCapsAcknowledged ? RISK_ACK_PHRASE : null;
+  out.riskCapsAckAt = out.riskCapsAcknowledged && Number(cfg.riskCapsAckAt) > 0
+    ? Number(cfg.riskCapsAckAt)
+    : null;
   return out;
 }
 
@@ -425,6 +520,73 @@ export function computeEffectiveRiskCaps(cfg = MTF_AUTO_DEFAULTS, walletINR = nu
     effectiveWalletDeployPct,
     dailyLossPct,
     dailyLossCapINR,
+  };
+}
+
+/**
+ * v21.29.0 [R2] — single read-only risk-arm telemetry bundle shared by the
+ * status route and GET /api/ai/mtf-auto/risk-arm. The SAFE preset is returned
+ * as a suggestion only; nothing here writes config.
+ */
+export function mtfAutoRiskArmState(cfg = loadMtfAutoConfig()) {
+  const st = _loadState();
+  const liveArm = evaluateLiveArmRisk(cfg);
+  const consecutiveLoss = evaluateConsecutiveLossPause({
+    closedRows: st.book,
+    liveOnly: true,
+    pauseAfter: cfg?.consecutiveLossPauseAfter,
+    pauseMin: cfg?.consecutiveLossPauseMin,
+  });
+  return {
+    liveArm,
+    liveArmBlocked: !liveArm.ok,
+    liveArmBlockers: liveArm.blockers,
+    consecutiveLoss,
+    consecutiveLossPauseAfter: Number(cfg?.consecutiveLossPauseAfter) || 0,
+    consecutiveLossPauseMin: Number(cfg?.consecutiveLossPauseMin) || 0,
+    ackPhrase: RISK_ACK_PHRASE,
+    presetOnly: true,
+  };
+}
+
+/**
+ * v21.29.0 [R10/R11] — read-only guard telemetry shared by status + the
+ * deep-monitor payload. This is the UI's single source for:
+ *   • which guards are off/shadow/enforce
+ *   • shadow would-block evidence + acceptance gates
+ *   • per-bucket score calibration from settled book rows
+ * Nothing here writes config or blocks anything.
+ */
+export function mtfAutoGuardTelemetry(cfg = loadMtfAutoConfig()) {
+  const st = _loadState();
+  const calibration = buildScoreCalibration(st.book, { minN: cfg?.calibrationMinN });
+  const harness = shadowHarnessView(st.shadowStats || {});
+  return {
+    ok: true,
+    modes: {
+      reversalGuardV2: reversalGuardV2Mode(),
+      eventSessionFilter: eventSessionFilterMode(),
+      regimeFilter: regimeFilterMode(),
+      perpVeto: perpVetoMode(),
+      clusterGuard: clusterGuardMode(),
+      scoreCalibration: scoreCalibrationMode(),
+      runnerAfterTp2: runnerAfterTp2Mode(),
+      stallExit: stallExitMode(),
+      exitPolicyV3: exitPolicyV3Mode(),
+      tp1ConfirmFallback: tp1ConfirmFallbackMode(),
+    },
+    thresholds: {
+      clusterGuardMax: Number(cfg?.clusterGuardMax) || 2,
+      calibrationMinN: Number(cfg?.calibrationMinN) || 30,
+      calibrationMinWinProb: Number(cfg?.calibrationMinWinProb) || 55,
+      runnerTrailR: Number(cfg?.runnerTrailR) || 0.75,
+      runnerQtyPct: Number(cfg?.runnerQtyPct) || 25,
+      stallExitMin: Number(cfg?.stallExitMin) || 45,
+      stallExitMinPeakR: Number(cfg?.stallExitMinPeakR) || 0.25,
+    },
+    calibration,
+    shadowHarness: harness,
+    note: 'Shadow modes never block/close. Enforce requires the R11 gates + manual review (paper first).',
   };
 }
 
@@ -619,6 +781,38 @@ export function exitPolicyV3Mode() {
   if (raw === 'off' || raw === '0' || raw === 'false' || raw === 'disabled') return 'off';
   return 'shadow';
 }
+
+// v21.29.0 [R0b TP1 MISSING-CANDLE FALLBACK]
+// When the closed-candle feed is unavailable (cache expired, new listing, feed
+// outage), enforce-mode TP1 confirmation previously stayed unknown forever and
+// the runner never locked. Fallback = a price-hold proxy ONLY while candles are
+// missing: the favourable extreme must stay beyond T1 for >= 2 evaluations and
+// >= 5 seconds. If ANY closed candle series exists, this fallback is disabled —
+// a wick must never confirm TP1. `off` restores strict candle-only behaviour.
+export function tp1ConfirmFallbackMode() {
+  const raw = String(process.env.TP1_CONFIRM_FALLBACK ?? 'tick-hold').trim().toLowerCase();
+  if (raw === 'off' || raw === '0' || raw === 'false' || raw === 'disabled') return 'off';
+  return 'tick-hold';
+}
+
+export const TP1_FALLBACK_MIN_MS = 5_000;
+export const TP1_FALLBACK_MIN_TICKS = 2;
+
+// v21.29.0 [R3–R9 MODE RESOLUTION] — env wins over the persisted config so a
+// rollout can be rehearsed without rewriting the operator's config file.
+function _guardMode(key, envName, fallback) {
+  const env = process.env[envName];
+  if (env != null && String(env).trim() !== '') return normalizeGuardMode(env, fallback);
+  return normalizeGuardMode(loadMtfAutoConfig()?.[key], fallback);
+}
+export function reversalGuardV2Mode() { return _guardMode('reversalGuardV2', 'REVERSAL_GUARD_V2', 'shadow'); }
+export function eventSessionFilterMode() { return _guardMode('eventSessionFilter', 'EVENT_SESSION_FILTER', 'shadow'); }
+export function regimeFilterMode() { return _guardMode('regimeFilter', 'REGIME_FILTER', 'shadow'); }
+export function perpVetoMode() { return _guardMode('perpVeto', 'PERP_VETO', 'shadow'); }
+export function clusterGuardMode() { return _guardMode('clusterGuard', 'CLUSTER_GUARD', 'shadow'); }
+export function scoreCalibrationMode() { return _guardMode('scoreCalibration', 'SCORE_CALIBRATION', 'off'); }
+export function runnerAfterTp2Mode() { return _guardMode('runnerAfterTp2', 'RUNNER_AFTER_TP2', 'off'); }
+export function stallExitMode() { return _guardMode('stallExit', 'STALL_EXIT', 'off'); }
 
 /** Pure TP1 close-confirmation check. `closedCandles` MUST contain only closed
  *  bars (caller drops the forming bar). Returns null when there is no usable
@@ -923,6 +1117,7 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     ? Number(trade.openedAt ?? trade.openedAtMs)
     : 0;
   const _v3Candles = Array.isArray(liveCtx.closedCandles) ? liveCtx.closedCandles : null;
+  const closedCandlesMissing = !Array.isArray(_v3Candles) || _v3Candles.length === 0;
   const _v3CandleCheck = confirmTp1OnClosedBars({
     closedCandles: _v3Candles,
     side,
@@ -932,19 +1127,51 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const _v3Stamp = typeof trade.tp1CloseConfirmed === 'boolean'
     ? trade.tp1CloseConfirmed
     : (typeof trade.t1CloseConfirmed === 'boolean' ? trade.t1CloseConfirmed : null);
+  // v21.29.0 [R0b] one-way latch: once a caller persisted the confirmation
+  // timestamp, a later missing/rotated candle series must not un-confirm it.
+  const _v3LatchAt = Number(trade.tp1CloseConfirmedAt ?? trade.t1CloseConfirmedAt) > 0
+    ? Number(trade.tp1CloseConfirmedAt ?? trade.t1CloseConfirmedAt)
+    : null;
+  const tp1FallbackMode = tp1ConfirmFallbackMode();
+  const _v3Now = Number(liveCtx.now) > 0 ? Number(liveCtx.now) : Date.now();
+  const _v3HoldSince = Number(liveCtx.t1BeyondSince ?? trade.t1BeyondSince) > 0
+    ? Number(liveCtx.t1BeyondSince ?? trade.t1BeyondSince)
+    : 0;
+  const _v3HoldTicks = Number(liveCtx.t1BeyondTicks ?? trade.t1BeyondTicks) || 0;
+  const _v3HoldEligible = Boolean(
+    exitV3Enforce
+    && tp1FallbackMode === 'tick-hold'
+    && closedCandlesMissing
+    && tp1Touched
+    && _v3HoldSince > 0
+    && (_v3Now - _v3HoldSince) >= TP1_FALLBACK_MIN_MS
+    && _v3HoldTicks >= TP1_FALLBACK_MIN_TICKS,
+  );
   let tp1CloseConfirmed = null;
   let tp1ConfirmSource = 'none';
   if (_v3Stamp !== null) {
     tp1CloseConfirmed = _v3Stamp;
     tp1ConfirmSource = 'trade-stamp';
+  } else if (_v3LatchAt != null) {
+    // One-way confirmation latch (survives candle-cache rotation).
+    tp1CloseConfirmed = true;
+    tp1ConfirmSource = 'persisted-latch';
   } else if (_v3CandleCheck) {
+    // Candle evidence ALWAYS wins over the fallback. A wick-only series is a
+    // definitive "not confirmed" — the tick-hold proxy must not override it.
     tp1CloseConfirmed = _v3CandleCheck.confirmed;
     tp1ConfirmSource = 'closed-candles';
+  } else if (_v3HoldEligible) {
+    tp1CloseConfirmed = true;
+    tp1ConfirmSource = 'tick-hold-fallback';
   } else if (!tp1Touched) {
     tp1CloseConfirmed = false; // no touch at all → definitely not confirmed
     tp1ConfirmSource = 'no-touch';
   }
-  const _v3ConfirmAt = _v3CandleCheck?.confirmedAt ?? (Number(trade.tp1CloseConfirmedAt) > 0 ? Number(trade.tp1CloseConfirmedAt) : null);
+  const _v3ConfirmAt = _v3CandleCheck?.confirmedAt
+    ?? (_v3LatchAt != null ? _v3LatchAt : null)
+    ?? (tp1ConfirmSource === 'tick-hold-fallback' ? _v3HoldSince : null)
+    ?? (Number(trade.tp1CloseConfirmedAt) > 0 ? Number(trade.tp1CloseConfirmedAt) : null);
   const tp1Ladder = exitV3Enforce ? (tp1CloseConfirmed === true) : tp1Touched;
   // BE+buffer: volatility-classed (LOW 0.05R … EXTREME 0.15R), momentum-scaled.
   const _v3BufBase = { LOW: 0.05, NORMAL: 0.08, HIGH: 0.12, EXTREME: 0.15 }[volClass] ?? 0.08;
@@ -985,7 +1212,7 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   // silently postpone the full-profit exit). Shadow telemetry is still exposed.
   const t2 = (!proExitPolicy && smartEnforce && allowTpExtension && smartExtBeforeTarget) ? smartExt.newT2 : t2Base;
   const t2Extended = Boolean(!proExitPolicy && smartEnforce && allowTpExtension && smartExtBeforeTarget);
-  const tp2Touched = Boolean(t2 > 0 && (isLong ? ltp >= t2 : ltp <= t2));
+  const tp2Touched = Boolean(trade.t2Hit || trade.tp2Hit || (t2 > 0 && (isLong ? ltp >= t2 : ltp <= t2)));
   const smartPlan = smartCfg
     ? smartTrailPlan({
       isLong, entry, risk, peakPrice, ltp, atrPct: profile.atrPct, momentum: momentumState,
@@ -1162,6 +1389,73 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   }
 
   const reversalConfirmed = Boolean(boardFlipped || peakPullbackReversal || liveCtx.reversalConfirmed);
+
+  // ---------- v21.29.0 [R3 REVERSAL GUARD V2] ----------
+  // Tiered, closed-bar-aware. Shadow (default) = telemetry only; enforce on
+  // PAPER tightens/exits; LIVE enforce additionally requires liveEnabled.
+  const _guardCfg = loadMtfAutoConfig();
+  const reversalGuardV2 = evaluateReversalGuardV2({
+    side, entry, stopLoss: initialSl, ltp, peakPrice, risk,
+    tp1Hit: tp1Touched, tp2Hit: tp2Touched,
+    boardFlipped, reversalRiskHint,
+    closedCandles: liveCtx.closedCandles || null,
+    mode: reversalGuardV2Mode(),
+    executionMode: trade.executionMode || 'PAPER',
+    liveEnabled: liveCtx.liveReversalEnforce === true,
+    feeCovered,
+    lockR: 0.75,
+  });
+  if (reversalGuardV2.shouldTighten && reversalGuardV2.tightenSl > 0) {
+    candidateSl = tightenSl(candidateSl, reversalGuardV2.tightenSl);
+    stageLabel = `${stageLabel} · RV2 ${reversalGuardV2.tierLabel}`;
+  }
+
+  // ---------- v21.29.0 [R8 RUNNER AFTER TP2] ----------
+  // Default OFF (TP2 closes 100%). PAPER-only enforce; LIVE stays gated
+  // behind liveRunner + liveTp1Partial + R0/R1 safety and is reported as
+  // shadow, never acted on silently.
+  const runnerAfterTp2 = evaluateRunnerAfterTp2({
+    mode: runnerAfterTp2Mode(),
+    executionMode: trade.executionMode || 'PAPER',
+    liveRunner: trade.liveRunner === true,
+    liveTp1Partial: _guardCfg?.liveTp1Partial === true,
+    liveSafeReduce: liveCtx.liveSafeReduce === true || liveCtx.liveRunnerSafety?.safeReduce === true,
+    liveOrderIdempotency: liveCtx.liveOrderIdempotency === true || liveCtx.liveRunnerSafety?.orderIdempotency === true,
+    tp2Hit: tp2Touched,
+    side, entry, tp1: t1, risk, peakPrice, ltp,
+    trailR: clampN(_guardCfg?.runnerTrailR, 0.25, 3, 0.75),
+    runnerQtyPct: clampN(_guardCfg?.runnerQtyPct, 5, 50, 25),
+    remainingQtyPct: Number(trade.qty) > 0 && trade.remainingQty != null
+      ? (Number(trade.remainingQty) / Number(trade.qty)) * 100
+      : null,
+  });
+  const runnerHold = Boolean(runnerAfterTp2.active && !runnerAfterTp2.shouldClose);
+  if (runnerHold && runnerAfterTp2.trailSl > 0) {
+    candidateSl = tightenSl(candidateSl, runnerAfterTp2.trailSl);
+    stageCode = 'STAGE_5_RUNNER_ACTIVE';
+    const rider = runnerAfterTp2.remainingQtyPct != null
+      ? `Runner ${runnerAfterTp2.remainingQtyPct}% riding`
+      : 'Runner riding';
+    stageLabel = `Stage 5 · TP2 Hit · ${rider} (trail ${runnerAfterTp2.trailSl})`;
+  }
+
+  // ---------- v21.29.0 [R8 STALL EXIT] ----------
+  const stallExit = evaluateStallExit({
+    mode: stallExitMode(),
+    executionMode: trade.executionMode || 'PAPER',
+    allowLive: liveCtx.allowLiveStallExit === true,
+    openedAt: Number(trade.openedAt ?? trade.openedAtMs) || 0,
+    now: Number(liveCtx.now) > 0 ? Number(liveCtx.now) : Date.now(),
+    stallMin: clampN(_guardCfg?.stallExitMin, 5, 1440, 45),
+    peakR, currentR, t1Hit: tp1Touched, tp2Hit: tp2Touched,
+    minPeakR: clampN(_guardCfg?.stallExitMinPeakR, 0, 2, 0.25),
+  });
+
+  const effectiveTp2Close = Boolean(tp2Touched && !runnerHold);
+  const shouldRunnerExit = Boolean(runnerAfterTp2.shouldClose);
+  const shouldReversalGuardClose = Boolean(reversalGuardV2.shouldExit);
+  const shouldStallExit = Boolean(stallExit.shouldExit);
+
   // PRO: pre-TP1 only a CONFIRMED reversal (board flip / explicit confirmation)
   // can scratch the trade, and only AFTER round-trip fees are covered. A
   // normal pullback never qualifies. Post-TP1 a confirmed reversal exits at
@@ -1170,7 +1464,10 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const proPostTp1Reversal = proExitPolicy && tp1Ladder && !tp2Touched && reversalConfirmed && feeCovered;
   const legacyReversalProfit = !proExitPolicy && reversalConfirmed && feeCovered && currentR >= 0.12;
   const shouldBookProfitNow = Boolean(
-    tp2Touched
+    effectiveTp2Close
+    || shouldRunnerExit
+    || shouldReversalGuardClose
+    || shouldStallExit
     || proPreTp1Scratch
     || proPostTp1Reversal
     || legacyReversalProfit
@@ -1178,19 +1475,25 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   );
   const shouldExitDefensiveSl = Boolean(trailedSlHit && !shouldBookProfitNow);
 
-  const exitReason = tp2Touched
-    ? 'TP2_TARGET_HIT_FULL_PROFIT'
-    : proPreTp1Scratch
-      ? 'PRE_T1_REVERSAL_FEE_SAFE_SCRATCH'
-      : proPostTp1Reversal
-        ? 'T1_SECURED_REVERSAL_PROFIT_EXIT'
-        : legacyReversalProfit
-          ? (tp1Touched ? 'T1_BOOKED_REVERSAL_PROFIT_LOCK' : 'PRE_T1_REVERSAL_PROFIT_BOOKED')
-          : (trailedSlHit && feeCovered)
-            ? 'TRAILED_SL_PROFIT_BOOKED'
-            : shouldExitDefensiveSl
-              ? (proExitPolicy ? 'INITIAL_SL_PROTECTIVE_EXIT' : 'TRAILED_SL_PROTECTIVE_EXIT')
-              : null;
+  const exitReason = shouldRunnerExit
+    ? 'TP2_RUNNER_TRAIL_EXIT'
+    : shouldReversalGuardClose
+      ? 'REVERSAL_GUARD_V2_EXIT'
+      : shouldStallExit
+        ? 'STALL_EXIT_NO_PROGRESS'
+        : effectiveTp2Close
+          ? 'TP2_TARGET_HIT_FULL_PROFIT'
+          : proPreTp1Scratch
+            ? 'PRE_T1_REVERSAL_FEE_SAFE_SCRATCH'
+            : proPostTp1Reversal
+              ? 'T1_SECURED_REVERSAL_PROFIT_EXIT'
+              : legacyReversalProfit
+                ? (tp1Touched ? 'T1_BOOKED_REVERSAL_PROFIT_LOCK' : 'PRE_T1_REVERSAL_PROFIT_BOOKED')
+                : (trailedSlHit && feeCovered)
+                  ? 'TRAILED_SL_PROFIT_BOOKED'
+                  : shouldExitDefensiveSl
+                    ? (proExitPolicy ? 'INITIAL_SL_PROTECTIVE_EXIT' : 'TRAILED_SL_PROTECTIVE_EXIT')
+                    : null;
 
   const grossPnl = +(favorableMove * qty).toFixed(4);
   const movePctFromEntry = entry > 0 ? +(((favorableMove / entry) * 100)).toFixed(3) : 0;
@@ -1236,6 +1539,16 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     tp1ConfirmSource,
     tp1ConfirmedAt: _v3ConfirmAt,
     tp1LadderActive: Boolean(tp1Ladder),
+    // v21.29.0 [R0b] missing-candle fallback telemetry (UI + shadow-diff).
+    closedCandlesMissing,
+    tp1FallbackMode,
+    tp1Hold: {
+      since: _v3HoldSince || null,
+      ticks: _v3HoldTicks,
+      eligible: _v3HoldEligible,
+      minMs: TP1_FALLBACK_MIN_MS,
+      minTicks: TP1_FALLBACK_MIN_TICKS,
+    },
     exitPolicyV3: {
       mode: exitV3Mode,
       applied: exitV3Enforce,
@@ -1245,6 +1558,9 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
       tp1ConfirmSource,
       tp1ConfirmedAt: _v3ConfirmAt,
       barsSeen: _v3CandleCheck?.bars ?? 0,
+      closedCandlesMissing,
+      fallbackMode: tp1FallbackMode,
+      fallbackEligible: _v3HoldEligible,
       beBufferR: v3BeBufferR,
       beBufferPrice: v3BeBufferPrice,
       bePlusBufferSl: v3BePlusBufferSl,
@@ -1285,6 +1601,14 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     shouldExitDefensiveSl,
     shouldClose: shouldBookProfitNow || shouldExitDefensiveSl,
     exitReason,
+    // v21.29.0 [R3/R8] — explicit action flags (callers include these in the
+    // close decision without changing legacy `shouldBookProfitNow` semantics).
+    shouldReversalGuardClose,
+    shouldRunnerExit,
+    shouldStallExit,
+    reversalGuardV2,
+    runnerAfterTp2,
+    stallExit,
     // v21.23.7 VOL-ADAPTIVE TELEMETRY — UI + 3s fast loop (b.* stamp) +
     // paper-engine TP1-partial live-sync isii se chalti hain.
     volClass,
@@ -1313,12 +1637,62 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   };
 }
 
+/**
+ * v21.29.0 [R0b] caller-side hold bookkeeping. Called by every deep-monitor
+ * caller right after evaluateActiveTradeDeepMonitor():
+ *   • while the favourable extreme is beyond T1, increment the hold window
+ *     (`t1BeyondSince` / `t1BeyondTicks`) — but ONLY when closed candles are
+ *     missing and the fallback is enabled;
+ *   • once confirmed (candles, stamp, or fallback), persist a one-way
+ *     `tp1CloseConfirmedAt` latch so a later candle-cache eviction cannot
+ *     silently un-confirm a secured runner.
+ * Pure-ish: mutates only the book row (the same object callers persist).
+ */
+export function stampTp1ConfirmHold(row = {}, deepEval = null, { now = Date.now(), closedCandles = null } = {}) {
+  const b = row || {};
+  const ev = deepEval || {};
+  const mode = tp1ConfirmFallbackMode();
+  const missing = !Array.isArray(closedCandles) || closedCandles.length === 0;
+  const t1 = Number(ev.t1 ?? b.t1 ?? b.target1 ?? b.tp) || 0;
+  const side = normalizeSide(ev.side ?? b.side ?? b.direction);
+  const peak = Number(ev.peakPrice) > 0 ? Number(ev.peakPrice) : (Number(b.peakPrice) || 0);
+  const touched = Boolean(t1 > 0 && side && peak > 0 && (side === 'LONG' ? peak >= t1 : peak <= t1));
+  const confirmed = ev.tp1Confirmed === true;
+  const latchAt = Number(b.tp1CloseConfirmedAt) > 0 ? Number(b.tp1CloseConfirmedAt) : null;
+
+  if (touched && !confirmed && latchAt == null && mode === 'tick-hold' && missing) {
+    if (!(Number(b.t1BeyondSince) > 0)) {
+      b.t1BeyondSince = now;
+      b.t1BeyondTicks = 1;
+    } else {
+      b.t1BeyondTicks = Math.max(0, Number(b.t1BeyondTicks) || 0) + 1;
+    }
+  } else if (!touched && latchAt == null) {
+    // Pulled back before confirmation: the hold window restarts from scratch.
+    b.t1BeyondSince = 0;
+    b.t1BeyondTicks = 0;
+  }
+
+  if (confirmed && latchAt == null) {
+    const at = Number(ev.tp1ConfirmedAt) > 0 ? Number(ev.tp1ConfirmedAt) : now;
+    b.tp1CloseConfirmedAt = at;
+  }
+  b.closedCandlesMissing = missing;
+  return {
+    closedCandlesMissing: missing,
+    confirmed: confirmed || Number(b.tp1CloseConfirmedAt) > 0,
+    confirmSource: ev.tp1ConfirmSource || (Number(b.tp1CloseConfirmedAt) > 0 ? 'persisted-latch' : 'none'),
+    holdSince: Number(b.t1BeyondSince) > 0 ? Number(b.t1BeyondSince) : null,
+    holdTicks: Number(b.t1BeyondTicks) || 0,
+  };
+}
+
 export function updateMtfAutoConfig(patch = {}) {
   const next = _sanitizeCfg({ ...loadMtfAutoConfig(), ...patch, desks: { ...loadMtfAutoConfig().desks, ...(patch.desks || {}) } });
   _cfg = next;
   _cfgSavedAt = Date.now();
   _save(CFG_FILE(), { ...next, updatedAt: _cfgSavedAt });
-  _logEvent('config', `config updated — ${JSON.stringify({ enabled: next.enabled, liveEntryPaused: next.liveEntryPaused, mode: next.mode, minScore: next.minScore, riskPerTradeINR: next.riskPerTradeINR, riskPerTradePct: next.riskPerTradePct, maxLeverage: next.maxLeverage, maxWalletDeployPct: next.maxWalletDeployPct, dailyLossPct: next.dailyLossPct, maxPositionsINR: next.maxPositionsINR, maxTradesPerDay: next.maxTradesPerDay })}`);
+  _logEvent('config', `config updated — ${JSON.stringify({ enabled: next.enabled, liveEntryPaused: next.liveEntryPaused, mode: next.mode, minScore: next.minScore, riskPerTradeINR: next.riskPerTradeINR, riskPerTradePct: next.riskPerTradePct, maxLeverage: next.maxLeverage, maxWalletDeployPct: next.maxWalletDeployPct, dailyLossPct: next.dailyLossPct, maxPositionsINR: next.maxPositionsINR, maxTradesPerDay: next.maxTradesPerDay, consecutiveLossPauseAfter: next.consecutiveLossPauseAfter, consecutiveLossPauseMin: next.consecutiveLossPauseMin, riskCapsAcknowledged: next.riskCapsAcknowledged })}`);
   return next;
 }
 
@@ -1357,6 +1731,9 @@ function _loadState() {
     // retry karte the (live-probe: 44 reject events + 46 phantom paper
     // trades minutes me). Ab escalating backoff: 5m → 10m → 20m → cap 240m.
     failedLiveAttempts: raw.failedLiveAttempts && typeof raw.failedLiveAttempts === 'object' ? raw.failedLiveAttempts : {},
+    // v21.29.0 [R11] — per-filter shadow observations (bounded samples inside).
+    // Persisted so a restart does not erase the evidence trail.
+    shadowStats: raw.shadowStats && typeof raw.shadowStats === 'object' ? raw.shadowStats : {},
     book: Array.isArray(raw.book) ? raw.book.slice(-100) : [],
     events: Array.isArray(raw.events) ? raw.events.slice(-MAX_EVENTS) : [],
     lastTick: raw.lastTick || null,
@@ -2389,7 +2766,7 @@ export async function mtfAutoTick(p = {}) {
   const cfg = loadMtfAutoConfig();
   const now = Number(p.now) || Date.now();
   const isRuntimeLock = p.now == null;
-  const out = { at: now, opened: [], closed: [], skipped: [], candidates: 0, considered: 0 };
+  const out = { at: now, opened: [], closed: [], skipped: [], shadow: [], candidates: 0, considered: 0 };
 
   if (isRuntimeLock && _mtfAutoTickInFlight) {
     out.skipped.push('mtf-auto tick already in-flight (single-trade session mutex)');
@@ -2536,6 +2913,7 @@ export async function mtfAutoTick(p = {}) {
       })();
 
       // Run Deep Monitor (5-stage dynamic SL trail + TP1/TP2 tracker + peak-giveback & trend-flip reversal guard)
+      const deepCandles = closedCandlesFor(b.symbol, b.execMarket || b.market, { now });
       const deepEval = evaluateActiveTradeDeepMonitor({
         ...b,
         stopLoss: effectiveCurSl,
@@ -2544,10 +2922,12 @@ export async function mtfAutoTick(p = {}) {
       }, {
         ltp: rawQuote,
         boardRow: effRow,
-        closedCandles: closedCandlesFor(b.symbol, b.execMarket || b.market, { now }),
+        closedCandles: deepCandles,
         reversalConfirmed: revByRow,
         proExitPolicy: cfg.proExitPolicy !== false,
+        now,
       });
+      stampTp1ConfirmHold(b, deepEval, { now, closedCandles: deepCandles });
       deepMonDecisionCount += 1;
 
       // Persist updated peakPrice, trailedStopLoss, stage, and live telemetry on the linked book record
@@ -2556,6 +2936,10 @@ export async function mtfAutoTick(p = {}) {
       b.currentR = deepEval.currentR;
       b.peakR = deepEval.peakR;
       b.t1Hit = deepEval.tp1Hit;
+      // v21.29.0 [R8 STICKY TP2]: persist the touch. Deriving it from the
+      // current LTP alone loses the fact after a pullback, which would make a
+      // runner trail exit impossible on later ticks.
+      b.t2Hit = Boolean(deepEval.tp2Hit || b.t2Hit);
       b.deepMonitorStage = deepEval.stageCode;
       b.deepMonitorLabel = deepEval.stageLabel;
       b.trendStatus = deepEval.trendStatus;
@@ -2916,6 +3300,24 @@ export async function mtfAutoTick(p = {}) {
     return out;
   }
 
+  // ---------- 2a) v21.29.0 [R2 LIVE ARM RISK GATE] ----------
+  // New LIVE entries require the four money caps (per-trade %, leverage,
+  // wallet deploy %, daily loss %). A config that intentionally runs without
+  // them must carry the persisted typed acknowledgement. This gate is applied
+  // PER ROW at the actual live-order decision below — paper/SIM rows in a
+  // mixed session (e.g. India live + crypto paper, or EQUITY SIM) keep
+  // working. Existing LIVE positions above were already managed.
+  const liveArm = isLiveSession ? evaluateLiveArmRisk(cfg) : null;
+  const lossPause = isLiveSession
+    ? evaluateConsecutiveLossPause({
+      closedRows: _loadState().book,
+      liveOnly: true,
+      pauseAfter: cfg.consecutiveLossPauseAfter,
+      pauseMin: cfg.consecutiveLossPauseMin,
+      now,
+    })
+    : null;
+
   // v21.22.0 USER SPEC:
   // "ab sirf auto trade button activate hone par Strong trade ko verfied signal lagna chahiye
   //  long or short accurately aur 1 session me ek hi trade aur full amount of wallet ka
@@ -3155,6 +3557,42 @@ export async function mtfAutoTick(p = {}) {
       const riskPerUnit = Math.abs(entry - sl);
       if (!(entry > 0) || !(riskPerUnit > 0) || !(t1 > 0) || !(t2 > 0)) { out.skipped.push(`${sym}: incomplete ticket`); continue; }
 
+      // ---------- v21.29.0 [R4/R5/R6/R7/R9 ENTRY GUARDS] ----------
+      // Shadow modes only observe; enforce modes block. The decision is
+      // recorded in state.shadowStats so R11 can gate a later flip.
+      const guardDesk = market === 'INDIA'
+        ? 'INDIA'
+        : (String(row.market || '').toUpperCase() === 'GLOBALFUTURES' ? 'GLOBALFUTURES' : 'FUTURES');
+      const guardState = _loadState();
+      const guardEval = evaluateEntryGuards({
+        cfg,
+        row: { ...row, execMarket: guardDesk },
+        openRows: _openLinked(),
+        closedRows: guardState.book,
+        now,
+        desk: guardDesk,
+        eventCheck: eventGuardCheck({ symbol: sym, desk: guardDesk, now }),
+      });
+      for (const f of Object.values(guardEval.filters)) {
+        recordShadowDecision(guardState.shadowStats, {
+          filter: f.filter, mode: f.mode, wouldBlock: f.wouldBlock,
+          reason: f.reason, symbol: sym, market: guardDesk, at: now,
+        });
+      }
+      if (guardEval.shadowWarnings.length > 0) {
+        out.shadow.push({
+          symbol: sym, market: guardDesk,
+          warnings: guardEval.shadowWarnings,
+        });
+        _logEvent('guard-shadow', `${sym}: shadow would-block — ${guardEval.shadowWarnings.map(w => `${w.filter}: ${w.reason}`).join(' | ')}`);
+      }
+      if (guardEval.blocked) {
+        const why = guardEval.blockers.map(b => `${b.filter}: ${b.reason}`).join(' | ');
+        out.skipped.push(`${sym}: entry guard blocked — ${why}`);
+        _logEvent('guard-block', `${sym}: entry blocked — ${why}`);
+        continue;
+      }
+
       // ---- v21.17.0 USDT DOMAIN (crypto rows) ----
       // Board ka crypto ticket USDT me hai (Binance chain). Paper engine ka
       // execution domain bhi USDT hona chahiye — isliye crypto auto-linked
@@ -3233,6 +3671,18 @@ export async function mtfAutoTick(p = {}) {
       if (!(qty >= minQty)) { out.skipped.push(`${sym}: qty too small after caps (SL ${riskPerUnit.toFixed(4)})`); continue; }
 
       const leverage = riskCaps.effectiveLeverage;
+      // v21.29.0 [R2 RISK-SIZING LABELS] — explain WHY this size. Does not
+      // change the legacy qty math above; the labels are the audit surface.
+      const riskSizing = computeRiskBasedSizing({
+        walletINR: effectiveWalletINR,
+        riskPerTradeINR: riskCaps.effectiveRiskINR,
+        riskPerTradePct: riskCaps.activeRiskPct,
+        entry,
+        stopLoss: sl,
+        maxNotionalINR: notionalCapINR,
+        leverage,
+        fxRate: isUsd ? fxRate : 1,
+      });
       const w95 = computeWallet95Deployment({
         walletINR: effectiveWalletINR,
         leverage,
@@ -3264,6 +3714,19 @@ export async function mtfAutoTick(p = {}) {
       // EQUITY SIM exempt hai — wo design se paper/SIM-only desk hai.
       if (cfg.executionMode === 'live' && !isSimRow && !wantLiveOrder) {
         out.skipped.push(`${sym}: LIVE mode ON but ${row.market} desk site-live not armed — paper fallback skipped (desk LIVE arm karo ya PAPER mode chuno)`);
+        continue;
+      }
+
+      // v21.29.0 [R2] — the actual live-order decision is gated here. These
+      // checks never block a paper/SIM row (`wantLiveOrder` false).
+      if (wantLiveOrder && liveArm && !liveArm.ok) {
+        out.skipped.push(`${sym}: LIVE arm blocked — ${liveArm.blockers[0] || 'missing risk caps'}`);
+        _logEvent('risk-arm-block', `${sym}: LIVE order blocked — missing caps: ${liveArm.missing.map(m => m.key).join(', ') || 'unknown'}`);
+        continue;
+      }
+      if (wantLiveOrder && lossPause?.blocked) {
+        out.skipped.push(`${sym}: ${lossPause.reason}`);
+        _logEvent('loss-streak-pause', `${sym}: ${lossPause.reason}`);
         continue;
       }
 
@@ -3435,6 +3898,17 @@ export async function mtfAutoTick(p = {}) {
         openedAt: now, dayKey: dayKeyFor(execMarket),
         status: 'OPEN', closeReason: null, closedAt: null, pnl: null,
         drivers: row.drivers?.slice(0, 3) || [],
+        // v21.29.0 [R2] audit labels — planned vs final live qty + the cap
+        // that actually bound the size (risk-budget or notional-cap).
+        riskSizing: {
+          ...riskSizing,
+          plannedQty: riskSizing.qty,
+          finalQty: finalQty,
+          labels: [
+            ...(Array.isArray(riskSizing.labels) ? riskSizing.labels : []),
+            `final qty ${finalQty}${isUsd ? ' USDT' : ''}`,
+          ],
+        },
       };
       const stx = _loadState();
       stx.book.push(rec);
@@ -3700,15 +4174,18 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
     // [FAST-LOOP FLIP VISIBILITY] 3s status loop ko latest known board row do —
     // warna woh reversal-aware trendStatus ko price-only "LIVE WATCH" se
     // overwrite kar deta hai (flip hua tha, UI par normal pullback dikhta tha).
+    const hbCandles = closedCandlesFor(b.symbol, b.execMarket || b.market, { now: hbNow });
     const mon = evaluateActiveTradeDeepMonitor(b, {
       ltp,
       boardRow: _snapshotRowFor(b.symbol, hbNow),
-      closedCandles: closedCandlesFor(b.symbol, b.execMarket || b.market, { now: hbNow }),
+      closedCandles: hbCandles,
       // A fallback/stale book LTP may keep SL telemetry alive, but it must
       // NEVER move TP2 - only a real, sanity-checked quote can extend.
       allowTpExtension: allowTpExtension && hasFreshQuote,
       proExitPolicy: cfg.proExitPolicy !== false,
+      now: hbNow,
     });
+    stampTp1ConfirmHold(b, mon, { now: hbNow, closedCandles: hbCandles });
     // v21.22.0 ULTRA-FAST REALTIME SL RATCHET PERSISTENCE:
     // Persist peakPrice and ratcheted trailedStopLoss directly onto `_state.book`
     // so SL never regresses backward on pullbacks between background ticks.
@@ -3810,6 +4287,7 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
     directionBlockedCount: rows.filter(r => r.directionBlocked === true || r.directionCertificate?.ok === false).length,
     directionIntegrity: summarizeBoardDirectionIntegrity(rows),
     protectionCounts,
+    guards: mtfAutoGuardTelemetry(cfg),
     heartbeat: _deepMonitorHeartbeat({ now: hbNow }),
     trades: rows,
     checkedAt: hbNow,
@@ -3852,6 +4330,9 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
     .filter(b => isSessionQuotaEntry(b, _quotaLiveSession))
     .filter(b => b.dayKey === dayKeyFor(b.market, _quotaDayKeyNow))
     .length;
+  // v21.29.0 [R2] — live-arm blockers + loss-streak pause are part of the
+  // status contract so the UI never has to guess why LIVE is not entering.
+  const riskArmState = mtfAutoRiskArmState(cfg);
   return {
     ok: true,
     // Persistence provenance — 'false' means config/state came from defaults
@@ -3903,6 +4384,16 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
     superAgentEnabled: cfg.superAgentEnabled !== false,
     superAgentMinimalLossExit: cfg.superAgentMinimalLossExit !== false,
     superAgentMinLossR: clampN(cfg.superAgentMinLossR, -0.90, -0.10, -0.35),
+    // v21.29.0 [R2 RISK ARM]
+    liveArm: riskArmState.liveArm,
+    liveArmBlocked: riskArmState.liveArmBlocked,
+    liveArmBlockers: riskArmState.liveArmBlockers,
+    consecutiveLoss: riskArmState.consecutiveLoss,
+    riskArmPreset: { ...riskArmState.liveArm.preset },
+    riskArmPresetOnly: true,
+    ackPhrase: riskArmState.ackPhrase,
+    // v21.29.0 [R3–R11] — modes + shadow evidence + calibration buckets.
+    guards: mtfAutoGuardTelemetry(cfg),
     deepMonitor,
     directionIntegrity: deepMonitor.directionIntegrity,
     ccyMode: 'crypto rows USDT (paper = FUTURES desk domain) · india rows ₹',
@@ -4111,6 +4602,7 @@ export async function mtfAutoSuperAgentManage(input = {}) {
     )
   );
 
+  const saCandles = closedCandlesFor(b.symbol, b.execMarket || b.market, { now });
   const deepEval = evaluateActiveTradeDeepMonitor({
     ...b,
     side,
@@ -4120,10 +4612,12 @@ export async function mtfAutoSuperAgentManage(input = {}) {
   }, {
     ltp,
     boardRow: effRow,
-    closedCandles: closedCandlesFor(b.symbol, b.execMarket || b.market, { now }),
+    closedCandles: saCandles,
     reversalConfirmed: revByRow,
     proExitPolicy: cfg.proExitPolicy !== false,
+    now,
   });
+  stampTp1ConfirmHold(b, deepEval, { now, closedCandles: saCandles });
   // v21.28.0 [F9]: a real per-trade monitor decision just ran — heartbeat is
   // stamped even when the direction certificate blocks any action.
   _stampDeepMonitorHeartbeat({ source: 'super-agent', now, count: 1 });
@@ -4151,6 +4645,9 @@ export async function mtfAutoSuperAgentManage(input = {}) {
   b.currentR = deepEval.currentR;
   b.peakR = deepEval.peakR;
   b.t1Hit = Boolean(deepEval.tp1Hit || b.t1Hit);
+  // v21.29.0 [R8 STICKY TP2]: same one-way latch as TP1 — a later pullback
+  // must not erase "TP2 was touched" or the runner trail can never exit.
+  b.t2Hit = Boolean(deepEval.tp2Hit || b.t2Hit);
   b.deepMonitorStage = deepEval.stageCode;
   b.deepMonitorLabel = deepEval.stageLabel;
   b.trendStatus = deepEval.trendStatus;
@@ -4966,6 +5463,24 @@ export function __resetMtfAutoForTests(seed = null) {
   __resetDirectionLocksForTests();
   try { fs.unlinkSync(CFG_FILE()); } catch { /* absent */ }
   try { fs.unlinkSync(STATE_FILE()); } catch { /* absent */ }
-  if (seed?.config) { _cfg = _sanitizeCfg({ ...MTF_AUTO_DEFAULTS, ...seed.config, desks: { ...MTF_AUTO_DEFAULTS.desks, ...(seed.config.desks || {}) } }); _save(CFG_FILE(), _cfg); }
-  if (seed?.state) { _state = { day: seed.state.day ?? null, dayCount: seed.state.dayCount ?? 0, perSymbolLast: seed.state.perSymbolLast || {}, failedLiveAttempts: seed.state.failedLiveAttempts || {}, book: seed.state.book || [], events: [], lastTick: null }; _save(STATE_FILE(), _state); }
+  if (seed?.config) {
+    // v21.29.0 [R2 TEST FIXTURE]: suites that seed `executionMode:'live'` are
+    // explicitly testing live execution, so they also imply the operator's
+    // typed risk acknowledgement unless the test says otherwise (pass
+    // riskCapsAcknowledged:false to test the blocker itself). Production is
+    // never affected — this helper is test-only.
+    const seeded = { ...MTF_AUTO_DEFAULTS, ...seed.config, desks: { ...MTF_AUTO_DEFAULTS.desks, ...(seed.config.desks || {}) } };
+    if (String(seeded.executionMode || '').toLowerCase() === 'live') {
+      if (seed.config.riskCapsAcknowledged === undefined) {
+        seeded.riskCapsAcknowledged = true;
+        seeded.riskCapsAckPhrase = RISK_ACK_PHRASE;
+        seeded.riskCapsAckAt = seeded.riskCapsAckAt || Date.now();
+      } else if (seed.config.riskCapsAcknowledged === true && !seeded.riskCapsAckPhrase) {
+        seeded.riskCapsAckPhrase = RISK_ACK_PHRASE;
+      }
+    }
+    _cfg = _sanitizeCfg(seeded);
+    _save(CFG_FILE(), _cfg);
+  }
+  if (seed?.state) { _state = { day: seed.state.day ?? null, dayCount: seed.state.dayCount ?? 0, perSymbolLast: seed.state.perSymbolLast || {}, failedLiveAttempts: seed.state.failedLiveAttempts || {}, shadowStats: seed.state.shadowStats || {}, book: seed.state.book || [], events: [], lastTick: null }; _save(STATE_FILE(), _state); }
 }

@@ -1,5 +1,80 @@
 # Changelog
 
+## v21.29.0 — R0a–R11 AUDIT COMPLETION (SHADOW-FIRST SAFETY RELEASE) (2026-10-30)
+
+**User ask: R0a–R11 audit items accurately implement karo — safe bot-port reduce, V3 missing-candle fallback, order hygiene/idempotency, risk-arm blockers/presets/flatten-all, reversal/event/regime/derivatives filters, score calibration, runner/stall exits, correlation guard, UI telemetry, validation harness; direction certificate + 1-active-trade lock + real-money safety preserve rahe.**
+
+Minor release. Koi profit guarantee nahi; leveraged futures liquidation risk real hai. Naye entry/exit filters **default observe-only** (`shadow`/`off`) hain. Sirf **R1 order hygiene** aur **R2 LIVE-arm blockers** default ON hain. Direction integrity (LONG→BUY, SHORT→SELL) aur 1-session/1-open-trade lock untouched. Koi real order is release gate me place nahi hua.
+
+### R0a — Safe bot-port reduce (always ON)
+- `exec/port.js`: `ApiFuturesPort.reduce()` ab `safeReduceFuturesPosition` use karta hai — raw opposite order nahi. Pre-read side/flat/qty guards, requested-qty cap, post-trade re-read (`ambiguous` par 5-min hold).
+- `cancelOpenOrders` port wiring + `futures.js` open-order list/cancel helpers; `PositionManager` reduce ke baad 5-minute hold rakhta hai aur already-flat position ko duplicate close nahi karta.
+- Locks: `test/portSafeReduce.test.ts` (13), plus existing `execPort` / `positionManager` suites.
+
+### R0b — V3 missing-candle TP1 fallback (default `tick-hold`)
+- `TP1_CONFIRM_FALLBACK=tick-hold|off` parser; fallback tabhi jab exit V3 **enforce** ho, closed candles missing hon, TP1 touched ho, aur `>= TP1_FALLBACK_MIN_MS` (5s) + `>= TP1_FALLBACK_MIN_TICKS` (2) hold complete ho.
+- Missing-candle telemetry (`closedCandlesMissing`, `tp1Hold`) + one-way `tp1CloseConfirmedAt` latch — candle-cache rotation confirmation ko un-confirm nahi kar sakta. Candle evidence always wins over fallback.
+- Locks: `test/tp1FallbackV21290.test.ts` (10).
+
+### R1 — Futures order hygiene + LIVE-order idempotency (default ON: `FUTURES_ORDER_HYGIENE`)
+- `futures.js`: open-order list/cancel helpers with deps seam + honest verdicts (no optimistic “cancelled” claim). Close/reconciler/port paths stale orders clean karte hain; `[VERIFY-DOCS]` on exact CoinDCX futures endpoint shapes.
+- `tradeActionLog.js`: claim/finish/release + 5-minute TTL for live-order idempotency. Duplicate LIVE order same intent par block hota hai; deterministic refusal key release karta hai (retry possible), ambiguous timeout cooldown rakhta hai.
+- `shadow`/`off` aliases supported; LIVE-only duplicate gate paper ko touch nahi karta.
+- Locks: `test/orderHygieneR1.test.ts` (14).
+
+### R2 — Risk-arm blockers + SAFE preset + flatten-all (LIVE gates ON)
+- `riskArm.js`: required caps `riskPerTradePct`, `maxLeverage`, `maxWalletDeployPct`, `dailyLossPct`. Missing caps LIVE arming block karte hain; SAFE preset **suggestion only** (`presetOnly:true`, never auto-applied); typed acknowledgement `I ACCEPT THE RISK CAPS` (case/space tolerant) hi override hai. Liquidation distance guard (stop + buffer, polarity checked), consecutive-loss pause (LIVE-only, `after=3`, `min=120`), risk-based sizing labels.
+- `mtfAutoTick`: per-row LIVE arm + loss-pause gates; PAPER and EQUITY SIM unaffected. Config route arm validator persist se pehle chalta hai; `GET /api/ai/mtf-auto/risk-arm` read-only view deta hai.
+- `POST /api/ai/futures/flatten-all`: typed `FLATTEN ALL` mandatory; per-position verdicts + post-close re-read. `ok:true` sirf jab sab closes succeed **aur** re-read flat confirm kare; failed re-read `flat:null`, `ok:false`. Position-attached native TP/SL cleanup `unverified [VERIFY-LIVE]`.
+- Locks: `test/riskArmR2V21290.test.ts` (18), plus updated auto-trade suites.
+
+### R3 — Reversal guard v2 (default `shadow`)
+- `tradeGuards.js`: closed-bar-aware classes — board flip, last CLOSED bar against, 10-bar structure break, exhaustion + >=0.5R giveback. Tier 1 → tighten SL, tier 2 → reduce request, tier 3+ → exit. Shadow records tiers only; PAPER enforce acts; LIVE enforce additionally requires `liveEnabled` and fee cover (otherwise shadow/gated).
+- Deep-monitor exposes `reversalGuardV2`, `shouldReversalGuardClose`; exit reason `REVERSAL_GUARD_V2_EXIT`.
+
+### R4 — Event + session filter (default `shadow`)
+- Macro event blackout/haircut consumed from `eventGuard.js`; session micro-windows: NSE open/close 09:15–09:30 / 15:15–15:30 IST, crypto funding 00/08/16 UTC ±5m. `EVENT_SESSION_FILTER` env > config. Shadow never blocks; enforce can.
+
+### R5 — Regime filter (default `shadow`)
+- `regimeOf` aliases (BULL/BEAR/RANGE/VOLATILE/context.dir/ATR) → TREND_UP/TREND_DOWN/CHOP/HIGH_VOL/UNKNOWN. Counter-trend and CHOP block by default in enforce; HIGH_VOL opt-in. `REGIME_FILTER` env > config.
+
+### R6 — Perp derivatives veto (default `shadow`)
+- Funding extreme (±30 bps/8h), crowded long/short ratio (>=3 or <=1/3), and basis premium/discount (>=1%) veto the crowded side on FUTURES/CRYPTO perps only. `PERP_VETO` env > config; thresholds clamped.
+
+### R7 — Score calibration (default `off`)
+- `buildScoreCalibration` buckets settled rows by score (75/80/85/90/95/100 edges) with win-rate, avg PnL, expectancy R and per-bucket `n`. `applyScoreCalibration` **only** returns a calibrated win-prob when bucket `n >= calibrationMinN` (default 30); below that raw score decides (no fabricated confidence). Auto-trade entry gate uses it only when `SCORE_CALIBRATION=enforce`; `winProb.js` exposes `scoreCalibrationCurve` / `scoreCalibrationFor` hooks.
+
+### R8 — Runner after TP2 + stall exit (defaults `off`)
+- Runner: after TP2 a configured % rides with a peak-0.75R trail (TP1 floor), paper-first. LIVE runner stays **gated** even with `liveRunner` + `liveTp1Partial`; it additionally requires proven R0 safe-reduce + R1 order-idempotency (`[VERIFY-LIVE]`), otherwise TP2 closes full. Exit reason `TP2_RUNNER_TRAIL_EXIT`.
+- Stall exit: no TP1, peak < 0.25R and age >= 45m closes (PAPER). LIVE requires explicit `allowLive`; default gated. `STALL_EXIT`/`RUNNER_AFTER_TP2` env > config.
+
+### R9 — Correlation/cluster guard (default `shadow`)
+- Deterministic cluster map (MAJORS, ETH, ALT_L1, MEME, METALS, INDIA_INDEX, US_EQ) with ticket-suffix normalization (`BTCUSDT`, `B-ETH_USDT`, `XAU/USD`, `1000PEPE`). Blocks a new entry when the same market cluster already holds `clusterGuardMax` (default 2) open positions; `CLUSTER_GUARD` env > config.
+
+### R10 — UI telemetry
+- `mtfAutoStatus()` + deep-monitor payload me `guards`: live modes, thresholds, shadow harness totals/gates, calibration buckets.
+- `SignalRecheckPanel.tsx`: mode chips (OFF muted / SHADOW amber / ENFORCE green), SHADOW decisions + would-block + review-ready filters, CALIB settled/bucket-ready chip, per-row RV2 / RUNNER / STALL chips. `useAITrading.ts` status type updated.
+
+### R11 — Shadow-diff / replay validation harness
+- `shadowHarness.js`: per-filter decisions/would-block counters (persisted in state, bounded samples), acceptance gates (`>=50` decisions, `1–40%` would-block), replay `proposed vs baseline` with agreement/block-rate/examples, evaluator-error safe. Evidence is **not** consent — no flag auto-flips; manual review always required, one flag at a time, paper first.
+
+### Defaults
+`TP1_CONFIRM_FALLBACK=tick-hold` · `REVERSAL_GUARD_V2=shadow` · `EVENT_SESSION_FILTER=shadow` · `REGIME_FILTER=shadow` · `PERP_VETO=shadow` · `CLUSTER_GUARD=shadow` · `SCORE_CALIBRATION=off` · `RUNNER_AFTER_TP2=off` · `STALL_EXIT=off`. Env wins over persisted config; unknown values fall back safely (never silently enforce).
+
+### Gate evidence
+- New locks: `portSafeReduce` 13, `tp1FallbackV21290` 10, `orderHygieneR1` 14, `riskArmR2V21290` 18, `tradeGuardsR3R11V21290` 31.
+- Focused regression batch: 13 files / **288 tests PASS** (MTF auto-link, exit V3, TP1 partial/fallback, monitor telemetry, pro/smart/vol trail, UC flip, risk-arm, R1/R0a).
+- Second affected batch: 28 files / **556 tests PASS** (winProb/kelly, MTF phase-0/USDT/rows, recheck/site-recheck, direction locks/conflict, super-agent, expert/manual, isolation, v2093/v2094, durable, signal verifier).
+- Full release gate on the final tree: **259 files / 4742 tests PASS**, `tsc` clean, ESLint clean, version check `21.29.0`, `vite build` PASS, `check:routes` PASS (every frontend `/api/` call has a registered route). `npm run check` exit 0 on 2026-10-30.
+
+### `[VERIFY-DOCS]` / `[VERIFY-LIVE]` before enabling real money
+1. **R1 [VERIFY-DOCS]**: exact CoinDCX futures open-order list + cancel endpoint shapes/response fields; helpers stay honest (`unverified`) until docs or small-size live tests confirm.
+2. **F2 [VERIFY-LIVE]**: LIVE TP1 partial on a small position — order qty, remaining qty, SL re-arm, mirror booking.
+3. **F5 [VERIFY-LIVE]**: SL read-back/replace-vs-stack and `PROTECTED` badge on a small position.
+4. **R8 [VERIFY-LIVE]**: runner on LIVE requires native TP control proof + R0 safe reduce + R1 idempotency; until then LIVE TP2 closes full.
+5. **R2 flatten-all [VERIFY-LIVE]**: position-attached TP/SL cleanup after emergency close (currently reported unverified, never assumed).
+6. **R4 [VERIFY-DOCS]**: event calendar horizons are approximate; extra events via `AI_EVENT_EXTRA_JSON`.
+
 ## v21.28.0 — MTF BOARD + ACTIVE AUTO-TRADE DEEP MONITOR AUDIT (F1–F9, SHADOW-FIRST SAFETY RELEASE) (2026-10-30)
 
 **User ask: audit plan ko accurately implement karo — indicator correctness, signal confirmation, deep-monitor exits, CoinDCX position protection, reconciler/UI upgrades, phased rollout; direction certificate + 1-active-trade lock + real-money safety preserve rahe.**

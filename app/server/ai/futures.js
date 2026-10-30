@@ -45,6 +45,7 @@ import { normalizeSide, resolveActivePosSide, buildDirectionCertificate } from '
 import { withJournalLock, pushEntry, todayIST, dailyStats, ratchetSl, exitStageOf, loadProTraderConfig } from './coindcxOrders.js';
 import { validateTick, wickJournalEntry } from './wickFilter.js';
 import { futBookSnapshot } from './cxBookState.js';
+import { actionKey, claimAction, finishAction, releaseAction, __resetTradeActionLogForTests } from './tradeActionLog.js';
 // v21.23.11 MIRROR-SHIELD: candle wire-format drift → canonical ascending series.
 import { canonicalizeCandles } from './lib/candles.js';
 
@@ -1820,6 +1821,167 @@ export async function partialFuturesExit({ pair, qty, side, leverage }) {
     leverage: Math.max(1, Math.floor(Number(leverage) || 1)),
   });
 }
+// ============================================================
+// v21.29.0 [R1 ORDER HYGIENE] — futures open-order list/cancel.
+// [VERIFY-DOCS] The two paths below follow the documented CoinDCX
+// derivatives orders family (`GET …/orders/open`, `POST …/orders/cancel`)
+// but the EXACT open-order query shape and cancel body were not exercised
+// against a live account in this release. Every caller therefore gets an
+// honest verdict: `unsupported:true` when the response shape is unknown,
+// per-order `failed[]` entries when a cancel is rejected — never a blanket
+// `ok:true`. Production wiring additionally requires the deps seam to be
+// validated on a small live size before any emergency path relies on it.
+// ============================================================
+const ORDERS_OPEN_PATH = '/exchange/v1/derivatives/futures/orders/open'; // [VERIFY-DOCS]
+const ORDERS_CANCEL_PATH = '/exchange/v1/derivatives/futures/orders/cancel'; // [VERIFY-DOCS]
+
+function _mapOpenOrderRow(o = {}) {
+  return {
+    orderId: String(o.id ?? o.order_id ?? o.orderId ?? ''),
+    pair: String(o.pair ?? o.symbol ?? '').toUpperCase() || null,
+    side: String(o.side ?? '').toUpperCase() || null,
+    type: String(o.order_type ?? o.type ?? '').toUpperCase() || null,
+    qty: num(o.total_quantity ?? o.quantity ?? o.qty),
+    remainingQty: num(o.remaining_quantity ?? o.unfilled_quantity ?? o.remaining_qty),
+    price: num(o.price ?? o.limit_price),
+    status: String(o.status ?? '').toUpperCase() || null,
+    raw: o,
+  };
+}
+
+/** List resting futures orders for one pair (or the whole account). */
+export async function listFuturesOpenOrders({ pair = null, deps = null } = {}) {
+  const injected = deps?.listOpenOrders;
+  if (typeof injected === 'function') {
+    const r = await injected({ pair });
+    if (!r || r.ok !== true) return { ok: false, orders: [], error: String(r?.error || 'open-order read failed') };
+    return { ok: true, orders: (Array.isArray(r.orders) ? r.orders : []).map(_mapOpenOrderRow) };
+  }
+  let apiKey; let secret;
+  try { ({ apiKey, secret } = credGuard()); } catch (e) {
+    return { ok: false, orders: [], error: `open-order read blocked: ${String(e?.message || e).slice(0, 140)}` };
+  }
+  try {
+    const { coindcxPrivateGET } = await import('../mcp/coindcx.js');
+    const params = { timestamp: Date.now(), ...(pair ? { pair: String(pair).toUpperCase() } : {}) };
+    const resp = await coindcxPrivateGET(ORDERS_OPEN_PATH, apiKey, secret, params, {
+      mode: 'body', unit: 'ms', tsType: 'num',
+    });
+    const rows = Array.isArray(resp)
+      ? resp
+      : (Array.isArray(resp?.orders) ? resp.orders : (Array.isArray(resp?.data) ? resp.data : null));
+    if (!rows) {
+      return {
+        ok: false, unsupported: true, orders: [], raw: resp,
+        error: 'open-orders response shape unrecognized [VERIFY-DOCS] — cancel not attempted',
+      };
+    }
+    return { ok: true, orders: rows.map(_mapOpenOrderRow).filter(o => o.orderId), raw: resp };
+  } catch (e) {
+    return { ok: false, orders: [], error: String(e?.message || e).slice(0, 180) };
+  }
+}
+
+/** Cancel one resting futures order. Never invents success. */
+export async function cancelFuturesOpenOrder({ orderId, pair = null, deps = null } = {}) {
+  const id = String(orderId ?? '').trim();
+  if (!id) return { ok: false, error: 'cancelFuturesOpenOrder: orderId required' };
+  const injected = deps?.cancelOpenOrder;
+  if (typeof injected === 'function') {
+    const r = await injected({ orderId: id, pair });
+    return r?.ok === true
+      ? { ok: true, orderId: id, raw: r }
+      : { ok: false, orderId: id, error: String(r?.error || 'cancel rejected'), raw: r };
+  }
+  let apiKey; let secret;
+  try { ({ apiKey, secret } = credGuard()); } catch (e) {
+    return { ok: false, orderId: id, error: `cancel blocked: ${String(e?.message || e).slice(0, 140)}` };
+  }
+  try {
+    const resp = await coindcxPrivate(ORDERS_CANCEL_PATH, apiKey, secret, {
+      timestamp: Date.now(), id,
+      ...(pair ? { pair: String(pair).toUpperCase() } : {}),
+    });
+    const errOf = coindcxRespError(resp);
+    if (errOf) return { ok: false, orderId: id, error: errOf, raw: resp };
+    return { ok: true, orderId: id, raw: resp };
+  } catch (e) {
+    const msg = String(e?.message || e);
+    return {
+      ok: false, orderId: id, ambiguous: isAmbiguousTransportError(e),
+      error: msg.slice(0, 180),
+    };
+  }
+}
+
+/**
+ * Cancel ALL resting orders for a pair — the close/flatten hygiene step.
+ * Returns `ok:true` only when the list succeeded AND every cancel was
+ * accepted. `unsupported:true` means the exchange list shape is unknown:
+ * the caller must surface the manual-verification note instead of
+ * pretending the book is clean.
+ */
+export async function cancelFuturesOpenOrdersForPair({ pair, deps = null } = {}) {
+  const p = String(pair || '').toUpperCase();
+  if (!p) return { ok: false, error: 'cancelFuturesOpenOrdersForPair: pair required' };
+  const listed = await listFuturesOpenOrders({ pair: p, deps });
+  if (!listed.ok) {
+    return {
+      ok: false, unsupported: listed.unsupported === true, pair: p,
+      error: listed.error || 'open-order list failed',
+    };
+  }
+  const mine = listed.orders.filter(o => !o.pair || o.pair === p);
+  if (mine.length === 0) return { ok: true, pair: p, cancelled: [], failed: [], listed: 0 };
+  const cancelled = [];
+  const failed = [];
+  for (const o of mine) {
+    const r = await cancelFuturesOpenOrder({ orderId: o.orderId, pair: p, deps });
+    if (r.ok) cancelled.push(o.orderId);
+    else failed.push({ orderId: o.orderId, error: r.error, ambiguous: r.ambiguous === true });
+  }
+  return {
+    ok: failed.length === 0, pair: p, cancelled, failed,
+    listed: mine.length,
+    error: failed.length ? `${failed.length}/${mine.length} cancel(s) rejected` : undefined,
+  };
+}
+
+/**
+ * R1 hygiene mode: `on` (default) cancels resting orders on close, `shadow`
+ * only lists what WOULD be cancelled, `off` skips the exchange call entirely.
+ */
+export function orderHygieneMode() {
+  const raw = String(process.env.FUTURES_ORDER_HYGIENE ?? 'on').trim().toLowerCase();
+  if (raw === 'off' || raw === '0' || raw === 'false' || raw === 'disabled') return 'off';
+  if (raw === 'shadow' || raw === 'dry' || raw === 'dry-run') return 'shadow';
+  return 'on';
+}
+
+/**
+ * Close-path order hygiene: remove resting orders for the pair BEFORE the
+ * position exit so a stale limit cannot re-open/flip the book after close.
+ * Best-effort by design: a hygiene failure is reported in the close verdict
+ * but must never block the exit itself.
+ */
+export async function runOrderHygieneForPair({ pair, deps = null } = {}) {
+  const p = String(pair || '').toUpperCase();
+  const mode = orderHygieneMode();
+  if (!p || mode === 'off') return { ok: true, skipped: true, mode, pair: p || null };
+  if (mode === 'shadow') {
+    const listed = await listFuturesOpenOrders({ pair: p, deps }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+    return {
+      ok: true, shadow: true, mode, pair: p,
+      listed: listed?.ok === true ? listed.orders.length : null,
+      wouldCancel: listed?.ok === true ? listed.orders.map(o => o.orderId) : [],
+      unsupported: listed?.unsupported === true,
+      error: listed?.ok === true ? undefined : String(listed?.error || 'list failed'),
+    };
+  }
+  const res = await cancelFuturesOpenOrdersForPair({ pair: p, deps }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+  return { ...res, mode, pair: p };
+}
+
 /** NATIVE exchange TP/SL — the safety net that keeps working even when
  *  this server is down (Render free-tier sleeps between ticks). */
 export async function createFuturesTpsl({ positionId, stopLoss, takeProfit }) {
@@ -2341,10 +2503,50 @@ export async function executeFuturesSignal(opts) {
 let _mtfLiveOrderInFlight = false;
 
 export function __resetMtfLiveOrderLockForTests() {
+  try { __resetTradeActionLogForTests(); } catch { /* test-only */ }
   _mtfLiveOrderInFlight = false;
 }
 
 export async function executeMtfDualLiveOrder(opts = {}) {
+  // v21.29.0 [R1 ORDER IDEMPOTENCY]: one logical plan → one exchange
+  // mutation. Double-click / overlapping loops / a retry after restart all
+  // land on the same key. Success and AMBIGUOUS outcomes stay held for the
+  // TTL (never blind-retry); deterministic refusals release immediately.
+  const idemParts = opts?.idempotencyKey
+    ? ['mtf-live-explicit', opts.idempotencyKey]
+    : ['mtf-live', opts?.symbol, opts?.side, opts?.mode, opts?.source,
+      opts?.entry, opts?.stopLoss, opts?.t1, opts?.t2];
+  const idemKey = actionKey(idemParts);
+  const claim = claimAction(idemKey, {
+    ttlMs: 5 * 60_000,
+    meta: { symbol: opts?.symbol || null, side: opts?.side || null, source: opts?.source || null },
+  });
+  if (!claim.ok) {
+    const msg = `duplicate live order blocked (${claim.status || 'held'}) — idempotency key ${idemKey.slice(0, 8)} until ${new Date(Number(claim.until) || Date.now()).toISOString()}`;
+    return {
+      ok: false, blocked: true, duplicate: true, idempotencyKey: idemKey,
+      reason: msg, error: msg, retryAt: claim.until || null,
+    };
+  }
+  let res;
+  try {
+    res = await _executeMtfDualLiveOrderInner(opts);
+  } catch (e) {
+    // Unexpected throw — outcome may be ambiguous at the exchange. KEEP the
+    // key held; a reconcile must decide before another entry is allowed.
+    finishAction(idemKey, { status: 'ambiguous', result: { error: String(e?.message || e) } });
+    throw e;
+  }
+  const ambiguous = res?.ambiguous === true || res?.position?.status === 'UNKNOWN' || res?.inFlight === true;
+  if (res?.ok === true || ambiguous) {
+    finishAction(idemKey, { status: res?.ok === true ? 'done' : 'ambiguous', result: { ok: res?.ok === true, ambiguous } });
+  } else {
+    releaseAction(idemKey, { reason: String(res?.reason || res?.error || 'rejected') });
+  }
+  return { ...res, idempotencyKey: idemKey };
+}
+
+async function _executeMtfDualLiveOrderInner(opts = {}) {
   if (_mtfLiveOrderInFlight) {
     return {
       ok: false,
@@ -3271,6 +3473,12 @@ export async function closeCoinDcxActivePosition({ positionId, symbol, pair } = 
       ? `B-${String(symbol).toUpperCase().replace(/USDT$/i, '')}_USDT`
       : null;
 
+  // v21.29.0 [R1]: resting-order hygiene BEFORE the exit — a stale limit
+  // order on the same pair must not survive/re-fill after a close.
+  const orderHygiene = normPair
+    ? await runOrderHygieneForPair({ pair: normPair }).catch(e => ({ ok: false, error: String(e?.message || e) }))
+    : { ok: true, skipped: true };
+
   const j = loadJournalFresh();
   const jPos = Array.isArray(j?.positions)
     ? j.positions.find(p =>
@@ -3282,7 +3490,7 @@ export async function closeCoinDcxActivePosition({ positionId, symbol, pair } = 
 
   if (jPos) {
     const res = await closeFuturesPosition(jPos.id).catch(() => null);
-    if (res?.ok) return res;
+    if (res?.ok) return { ...res, orderHygiene };
   }
 
   // Direct CoinDCX position exit fallback (for positions opened directly on CoinDCX or adopted by exchange id)
@@ -3301,12 +3509,100 @@ export async function closeCoinDcxActivePosition({ positionId, symbol, pair } = 
       const exchList = await listFuturesPositions().catch(() => []);
       const row = exchList.find(p => p.pair === normPair && p.activePos !== 0);
       if (row?.id && String(row.id) !== String(exchPosId)) {
-        return exitFuturesPosition(row.id).catch(e => ({ ok: false, error: String(e?.message || e) }));
+        return exitFuturesPosition(row.id)
+          .then(r => ({ ...r, orderHygiene }))
+          .catch(e => ({ ok: false, error: String(e?.message || e), orderHygiene }));
       }
     }
-    return out1;
+    return { ...out1, orderHygiene };
   }
-  return { ok: false, error: 'Active CoinDCX position not found' };
+  return { ok: false, error: 'Active CoinDCX position not found', orderHygiene };
+}
+
+// ============================================================
+// v21.29.0 [R2 FLATTEN-ALL]
+// ------------------------------------------------------------
+// Emergency "close every open futures position". Design rules:
+//   • Typed confirmation is mandatory — no accidental one-click flatten.
+//   • Every close is an independent verdict; one failure never hides behind
+//     a blanket ok:true.
+//   • Resting-order hygiene runs BEFORE each close (via closeCoinDcxActive-
+//     Position). Position-attached native TP/SL cleanup is [VERIFY-LIVE]:
+//     not assumed, reported as unverified.
+//   • A post-close re-read decides `flat`; if the list cannot be re-read,
+//     `flat` is null (unknown), never a fabricated true.
+// ============================================================
+export const FLATTEN_ALL_PHRASE = 'FLATTEN ALL';
+
+export async function flattenAllFuturesPositions({ confirm = '', deps = null } = {}) {
+  const typed = String(confirm ?? '').trim().toUpperCase();
+  if (typed !== FLATTEN_ALL_PHRASE) {
+    return {
+      ok: false, blocked: true, reason: 'confirm-required', requested: 0,
+      closed: [], failed: [], flat: null,
+      error: `typed "${FLATTEN_ALL_PHRASE}" confirmation required — got "${String(confirm ?? '').slice(0, 40)}"`,
+    };
+  }
+  const list = deps?.listPositions || listFuturesPositions;
+  const closeOne = deps?.closePosition || closeCoinDcxActivePosition;
+  let rows;
+  try {
+    rows = await list();
+  } catch (e) {
+    return {
+      ok: false, phase: 'list', requested: 0, closed: [], failed: [], flat: null,
+      error: `futures position list failed: ${String(e?.message || e).slice(0, 160)}`,
+    };
+  }
+  const open = (Array.isArray(rows) ? rows : [])
+    .filter(p => p && p.id && Number(p.activePos) !== 0);
+  if (open.length === 0) {
+    return {
+      ok: true, requested: 0, closed: [], failed: [], flat: true,
+      note: 'no open futures positions — nothing to flatten',
+    };
+  }
+  const closed = [];
+  const failed = [];
+  for (const p of open) {
+    const qty = Math.abs(Number(p.activePos) || 0);
+    const row = {
+      positionId: String(p.id), pair: p.pair || null,
+      side: Number(p.activePos) > 0 ? 'LONG' : 'SHORT', qty,
+    };
+    const r = await Promise.resolve(closeOne({ positionId: row.positionId, pair: p.pair || null }))
+      .catch(e => ({ ok: false, error: String(e?.message || e) }));
+    if (r?.ok) {
+      closed.push({ ...row, orderHygiene: r.orderHygiene || null });
+    } else {
+      failed.push({
+        ...row, error: String(r?.error || 'close rejected'),
+        orderHygiene: r?.orderHygiene || null,
+      });
+    }
+  }
+  // Re-read truth. A failed re-read leaves `flat` unknown.
+  let remaining = null;
+  try {
+    const after = await list();
+    remaining = (Array.isArray(after) ? after : []).filter(p => p && p.id && Number(p.activePos) !== 0).length;
+  } catch { /* remaining stays null */ }
+  const flat = remaining === null ? null : remaining === 0;
+  return {
+    // Verified-flat only. A failed post-read is NOT success.
+    ok: failed.length === 0 && flat === true,
+    requested: open.length,
+    closed,
+    failed,
+    remaining,
+    flat,
+    tpSlCleanup: 'unverified [VERIFY-LIVE] — position-attached native TP/SL auto-cancel is not assumed',
+    note: flat === false
+      ? `${remaining} position(s) still open after flatten — manual exchange check required`
+      : (flat === null
+        ? 'closes attempted; post-close position re-read failed — verify flat manually'
+        : 'all futures positions flat'),
+  };
 }
 
 // ---------------- journal helpers (same files as coindcxOrders) ----------------
@@ -3465,6 +3761,16 @@ export async function watchFuturesPositions({ sendTelegram, getDeepSignal } = {}
           const long = p.side === 'LONG';
           let exitPrice = null, reason = 'Exchange closed (reconciled)';
           const ltp = byPair.get(p.pair);
+          // v21.29.0 [R1]: the exchange closed the position (native SL/TP or
+          // app) — sweep any resting orders for the pair so they cannot
+          // re-open a position the engine believes is flat.
+          const orderHygiene = await runOrderHygieneForPair({ pair: p.pair }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+          if (orderHygiene && orderHygiene.ok !== true && orderHygiene.unsupported !== true) {
+            pushEntry(j, {
+              kind: 'WATCH_ERROR', day: todayIST(), pair: p.pair, market: 'FUTURES',
+              reason: `order hygiene after exchange close: ${String(orderHygiene.error || 'cancel failed').slice(0, 160)}`,
+            });
+          }
           if (row.sl != null && row.sl > 0) { exitPrice = row.sl; reason = 'Exchange SL (native)'; }
           else if (row.tp != null && row.tp > 0) { exitPrice = row.tp; reason = 'Exchange TP (native)'; }
           else if (ltp > 0) { exitPrice = ltp; reason = 'Exchange closed (app/manual)'; }
@@ -3927,7 +4233,11 @@ export async function closeFuturesPosition(positionId, reason = 'Manual close') 
     if (p.mode === 'live' && (!p.exchangePositionId || !coindcxConnected())) {
       return { ok: false, error: 'LIVE position without exchange connection/id — reconcile ho raha hai, kuch second baad retry karo' };
     }
+    let orderHygiene = null;
     if (p.mode === 'live' && p.exchangePositionId && coindcxConnected()) {
+      // v21.29.0 [R1]: cancel resting orders before the exit (best-effort,
+      // never blocks the close). Verdict is returned for the journal/UI.
+      orderHygiene = await runOrderHygieneForPair({ pair: p.pair }).catch(e => ({ ok: false, error: String(e?.message || e) }));
       try {
         const xr = await exitFuturesPosition(p.exchangePositionId);
         // v20.9.1 [H1]: wrapped rejection pehle silently pass hota tha —
@@ -3945,7 +4255,7 @@ export async function closeFuturesPosition(positionId, reason = 'Manual close') 
     try { settlePositionOutcome(p, reason); } catch { /* best-effort */ }
     pushEntry(j, { kind: 'CLOSE', day: todayIST(), pair: p.pair, market: 'FUTURES', mode: p.mode, source: p.source, qty: p.qty, entryPrice: p.entryPrice, closePrice: ltp, pnlUSDT: p.pnlUSDT, pnlINR: p.pnlINR, reason });
     saveJournalFresh(j);
-    return { ok: true, position: p };
+    return { ok: true, position: p, ...(orderHygiene ? { orderHygiene } : {}) };
   });
 }
 

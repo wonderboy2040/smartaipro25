@@ -60,6 +60,21 @@ interface AutoTradeMonitorRow {
   trendStatus: string;
   reversalDetected: boolean;
   shouldBookProfitNow: boolean;
+  // v21.29.0 [R3/R8/R10] — guard telemetry on every monitored row.
+  reversalGuardV2?: {
+    mode: string; tier: number; tierLabel: string; classCount: number;
+    shadow: boolean; applied: boolean; shouldTighten: boolean; shouldExit: boolean;
+    reason: string | null; note: string;
+  } | null;
+  runnerAfterTp2?: {
+    mode: string; active: boolean; applied: boolean; shadow: boolean;
+    liveGated: boolean; trailSl: number | null; runnerQtyPct: number;
+    remainingQtyPct?: number | null; note: string;
+  } | null;
+  stallExit?: {
+    mode: string; active: boolean; applied: boolean; shadow: boolean;
+    stalled: boolean; ageMin: number; shouldExit: boolean; reason: string | null;
+  } | null;
   traded?: boolean;
   fullControl?: boolean;
   livePositionId?: string | null;
@@ -67,6 +82,25 @@ interface AutoTradeMonitorRow {
   leverage?: number;
   walletDeployPct?: number;
   deployedWalletINR?: number;
+}
+
+interface GuardTelemetry {
+  ok?: boolean;
+  modes: Record<string, string>;
+  thresholds?: Record<string, number>;
+  shadowHarness?: {
+    totals: { filters: number; decisions: number; wouldBlock: number; wouldBlockPct: number };
+    gates: Array<{ filter: string; readyForReview: boolean; reasons: string[] }>;
+    readyForReview: string[];
+    note?: string;
+  } | null;
+  calibration?: {
+    settled: number;
+    sufficient: boolean;
+    overall?: { n: number; winRate: number | null; sufficient: boolean };
+    buckets: Array<{ label: string; n: number; winRate: number | null; sufficient: boolean; expectancyR: number | null }>;
+  } | null;
+  note?: string;
 }
 
 interface RecheckRow {
@@ -96,6 +130,7 @@ interface RecheckView {
     tp1LockedCount: number;
     reversalAlertCount: number;
     protectionCounts?: Record<string, number>;
+    guards?: GuardTelemetry | null;
     heartbeat?: {
       lastDecisionAt: number | null;
       ageMs: number | null;
@@ -131,6 +166,19 @@ const STATE_STYLE: Record<string, { chip: string; label: string }> = {
 
 const DESK_TAG: Record<string, string> = {
   CRYPTO: '₿', FUTURES: '🛡', INDIA: '🇮🇳', GLOBALFUTURES: '🌍',
+};
+
+// v21.29.0 [R10] — guard-mode chips. OFF/Shadow are deliberately muted;
+// enforce is the only state that may block or close.
+const GUARD_MODE_STYLE: Record<string, string> = {
+  enforce: 'bg-emerald-500/15 text-emerald-200 border-emerald-500/40',
+  shadow: 'bg-amber-500/10 text-amber-300 border-amber-500/35',
+  off: 'bg-slate-700/25 text-slate-400 border-slate-600/35',
+};
+const GUARD_LABEL: Record<string, string> = {
+  reversalGuardV2: 'RV2', eventSessionFilter: 'EVENT', regimeFilter: 'REGIME',
+  perpVeto: 'PERP', clusterGuard: 'CLUSTER', scoreCalibration: 'CALIB',
+  runnerAfterTp2: 'RUNNER', stallExit: 'STALL',
 };
 
 // v21.28.0 F9: protection/ladder chips are driven by the server's honest
@@ -271,6 +319,38 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
               🔒 Full CoinDCX Position Control · 100% Wallet + TP1/TP2 + Multi-Stage SL Trail + Reversal Auto Profit-Book
             </span>
           </div>
+          {view.autoTradeDeepMonitor.guards?.modes && (
+            <div className="mt-1.5 flex items-center gap-1 flex-wrap text-[8px] font-mono">
+              {Object.entries(view.autoTradeDeepMonitor.guards.modes)
+                .filter(([k]) => GUARD_LABEL[k])
+                .map(([k, m]) => (
+                  <span
+                    key={k}
+                    title={m === 'shadow' ? 'Observe-only — never blocks/closes' : m === 'enforce' ? 'Active — may block/close' : 'Disabled'}
+                    className={`px-1 py-0.5 rounded border font-black ${GUARD_MODE_STYLE[m] || GUARD_MODE_STYLE.off}`}
+                  >
+                    {GUARD_LABEL[k]} {String(m).toUpperCase()}
+                  </span>
+                ))}
+              {view.autoTradeDeepMonitor.guards.shadowHarness && (
+                <span className="px-1 py-0.5 rounded border bg-slate-700/25 text-slate-300 border-slate-600/35" title={view.autoTradeDeepMonitor.guards.shadowHarness.note || ''}>
+                  🧪 SHADOW {view.autoTradeDeepMonitor.guards.shadowHarness.totals.decisions} decisions · {view.autoTradeDeepMonitor.guards.shadowHarness.totals.wouldBlock} would-block
+                  {view.autoTradeDeepMonitor.guards.shadowHarness.readyForReview.length > 0
+                    ? ` · ✅ review: ${view.autoTradeDeepMonitor.guards.shadowHarness.readyForReview.join(', ')}`
+                    : ''}
+                </span>
+              )}
+              {view.autoTradeDeepMonitor.guards.calibration && (
+                <span
+                  className="px-1 py-0.5 rounded border bg-slate-700/25 text-slate-300 border-slate-600/35"
+                  title={view.autoTradeDeepMonitor.guards.calibration.buckets.map(b => `${b.label}: n=${b.n} WR ${b.winRate ?? '—'}%`).join(' · ')}
+                >
+                  📐 CALIB {view.autoTradeDeepMonitor.guards.calibration.settled} settled
+                  {view.autoTradeDeepMonitor.guards.calibration.sufficient ? ' · bucket ready' : ' · n insufficient'}
+                </span>
+              )}
+            </div>
+          )}
           {activeAutoTrades.length > 0 ? (
             <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
               {activeAutoTrades.map((at, idx) => {
@@ -299,6 +379,24 @@ export const SignalRecheckPanel = memo(function SignalRecheckPanel({ market }: {
                         <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
                           {at.stageLabel}
                         </span>
+                        {at.reversalGuardV2 && at.reversalGuardV2.classCount > 0 && (
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${at.reversalGuardV2.applied ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' : 'bg-amber-500/10 text-amber-300 border-amber-500/35'}`}
+                            title={at.reversalGuardV2.note}
+                          >
+                            RV2 {at.reversalGuardV2.tierLabel}{at.reversalGuardV2.shadow ? ' · SHADOW' : ''}
+                          </span>
+                        )}
+                        {at.runnerAfterTp2?.active && (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-emerald-500/15 text-emerald-200 border border-emerald-500/35" title={at.runnerAfterTp2.note}>
+                            🏃 RUNNER{at.runnerAfterTp2.remainingQtyPct != null ? ` ${at.runnerAfterTp2.remainingQtyPct}%` : ''}
+                          </span>
+                        )}
+                        {at.stallExit?.stalled && (
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-black border ${at.stallExit.applied ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' : 'bg-amber-500/10 text-amber-300 border-amber-500/35'}`} title={at.stallExit.reason || undefined}>
+                            ⏳ STALL {at.stallExit.ageMin}m{at.stallExit.applied ? '' : ' · SHADOW'}
+                          </span>
+                        )}
                       </div>
                       <span className={`font-black ${at.currentR >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
                         {at.currentR >= 0 ? '+' : ''}{at.currentR}R (Peak +{at.peakR}R)

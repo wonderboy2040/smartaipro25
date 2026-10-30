@@ -344,7 +344,7 @@ describe('v21.23.6 G2 — LIVE session entry = ELITE/STRONG (superScore>=80) ONL
   });
 
   it('same hybrid mode: STRONG row (score 82) → LIVE order executes + opens', async () => {
-    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75 } });
+    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' } });
     const { paper } = fakePaper();
     const out = await mtfAutoTick(liveP(paper, { siteLiveActive: true, liveExecute: liveExecuteOk() }));
     expect(paper.openPaperTrade).toHaveBeenCalledTimes(1);
@@ -366,7 +366,7 @@ describe('v21.23.6 G2 — LIVE session entry = ELITE/STRONG (superScore>=80) ONL
   });
 
   it('desk-scope: crypto live session still places the CRYPTO LIVE order', async () => {
-    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75 } });
+    __resetMtfAutoForTests({ config: { enabled: true, executionMode: 'paper', minScore: 75, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' } });
     const { paper } = fakePaper();
     const liveExecute = liveExecuteOk();
     const out = await mtfAutoTick(liveP(paper, {

@@ -85,7 +85,7 @@ import {
   watchFuturesPositions, closeFuturesPosition,
   walletSnapshot, futuresMarketsView, fetchUsdInr, fetchFuturesPrices,
   syncCoinDcxActivePositionsForControl, updateCoinDcxPositionSl, closeCoinDcxActivePosition,
-  safeReduceFuturesPosition,
+  safeReduceFuturesPosition, flattenAllFuturesPositions,
 } from './futures.js';
 // v12.8 SUPERINTELLIGENCE REVERSAL RECOVERY — ₹ loss-cap → flip →
 // booking cycles (config echo + live cycle board for the UI).
@@ -223,7 +223,9 @@ import { dhanConnect, dhanDisconnect, dhanConnected, dhanProfile, scripMasterSta
 import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 // v21.16.0 + v21.20.0 MTF SIGNALS BOARD (Dual-Timeframe) + AUTO-LINK engine
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, mtfProEntryGate, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
-import { mtfAutoTick, mtfAutoStatus, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, markAutoTradeSlRetry, getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason } from './mtfAutoLink.js';
+import { mtfAutoTick, mtfAutoStatus, mtfAutoRiskArmState, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, markAutoTradeSlRetry, getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason } from './mtfAutoLink.js';
+// v21.29.0 [R2 RISK ARM] — arm blockers / typed override / SAFE preset.
+import { RISK_ACK_PHRASE, evaluateLiveArmRisk, evaluateLiveArmConfigPatch } from './riskArm.js';
 // v21.26.0 AI SUPER INTELLIGENCE — per-trade tick agent. Owns only routing /
 // registry / stream holds; every trade decision is mtfAutoLink's
 // mtfAutoSuperAgentManage (same gates as the 15s/60s sweeps).
@@ -1591,6 +1593,10 @@ export function registerAITradingRoutes(app, deps) {
       : killSwitch ? 'Global kill switch is ON — trading disabled'
       : tcfg.indiaMode !== 'live' ? 'India LIVE mode is not armed — type LIVE in the India console first (separate from crypto)'
       : null;
+    // v21.29.0 [R2] — missing money caps block crypto LIVE arming as well.
+    // The preset is returned for the UI to DISPLAY; this route never writes it.
+    const riskArm = evaluateLiveArmRisk(cfg || {});
+    const riskWhy = riskArm.ok ? null : (riskArm.blockers[0] || 'LIVE risk caps missing');
     return {
       tcfg,
       hasCreds,
@@ -1598,12 +1604,13 @@ export function registerAITradingRoutes(app, deps) {
       desks,
       siteLiveByDesk,
       siteLiveActive,
+      riskArm,
       deskReady: {
-        crypto: { ready: hasCreds && siteLiveByDesk.crypto, why: cryptoWhy },
+        crypto: { ready: hasCreds && siteLiveByDesk.crypto && riskArm.ok, why: cryptoWhy || riskWhy },
         india: { ready: siteLiveByDesk.india, why: indiaWhy },
       },
       deskArmable: {
-        crypto: { armable: !killSwitch && desks.crypto && hasCreds, why: cryptoWhy },
+        crypto: { armable: !killSwitch && desks.crypto && hasCreds && riskArm.ok, why: cryptoWhy || riskWhy },
         india: { armable: !killSwitch && desks.india && tcfg.indiaMode === 'live', why: indiaWhy },
       },
     };
@@ -1928,6 +1935,7 @@ export function registerAITradingRoutes(app, deps) {
         deskReady: ready.deskReady,
         deskArmable: ready.deskArmable,
         killSwitch: ready.killSwitch,
+        riskArm: ready.riskArm,
         coindcxConnected: ready.hasCreds,
         // v21.26.0: dedicated per-trade tick agent health + live states
         // (ARMED / MONITORING / TP1_SECURED / FLIPPED / PAUSED / IDLE).
@@ -1948,6 +1956,29 @@ export function registerAITradingRoutes(app, deps) {
       // autoSyncSiteLive in the same request is still honoured.
       if (body.executionMode === 'paper' && body.autoSyncSiteLive === undefined) {
         body.autoSyncSiteLive = false;
+      }
+      // v21.29.0 [R2 LIVE-ARM BLOCKER]: arming LIVE requires the four money
+      // caps. The SAFE preset is only DISPLAYED in the 400 payload — this
+      // route never applies it. A typed acknowledgement (exact phrase) is the
+      // only override, and only if the user sent it in this request (or it is
+      // already persisted from a previous deliberate override).
+      const armingLive = body.executionMode !== undefined
+        && String(body.executionMode).toLowerCase() === 'live';
+      const armCheck = evaluateLiveArmConfigPatch({
+        currentCfg: loadMtfAutoConfig(),
+        patch: body,
+        armingLive,
+      });
+      if (!armCheck.ok) {
+        return res.status(400).json({
+          ok: false, blocked: true,
+          ...armCheck,
+          ...(armCheck.arm || {}),
+        });
+      }
+      if (armCheck.typedAck) {
+        body.riskCapsAckPhrase = RISK_ACK_PHRASE;
+        body.riskCapsAckAt = Date.now();
       }
       const cfg = updateMtfAutoConfig(body);
       // v21.20.0 + v21.22.0: When user activates LIVE mode on the MTF Dual Board,
@@ -1970,9 +2001,43 @@ export function registerAITradingRoutes(app, deps) {
         deskReady: ready.deskReady,
         deskArmable: ready.deskArmable,
         killSwitch: ready.killSwitch,
+        // v21.29.0 [R2] — post-save arm state (never auto-applies the preset).
+        riskArm: ready.riskArm,
       });
     } catch (e) {
       jsonError(res, 400, 'mtf auto config failed', e);
+    }
+  });
+
+  /**
+   * v21.29.0 [R2] — read-only risk-arm view.
+   * Returns missing caps, the SAFE preset (suggestion only), the typed ack
+   * phrase, and the current consecutive-loss pause. No mutation.
+   */
+  app.get('/api/ai/mtf-auto/risk-arm', (_req, res) => {
+    try {
+      const cfg = loadMtfAutoConfig();
+      const state = mtfAutoRiskArmState(cfg);
+      res.set('Cache-Control', 'no-store');
+      res.json({
+        ok: true,
+        ...state,
+        executionMode: cfg.executionMode,
+        riskCaps: {
+          riskPerTradePct: cfg.riskPerTradePct,
+          maxRiskPerTradePct: cfg.maxRiskPerTradePct,
+          maxLeverage: cfg.maxLeverage,
+          maxWalletDeployPct: cfg.maxWalletDeployPct,
+          dailyLossPct: cfg.dailyLossPct,
+          maxTradesPerDay: cfg.maxTradesPerDay,
+        },
+        // The UI may render this as a one-click SUGGESTION, but applying it
+        // must be a separate explicit config POST (never automatic).
+        presetOnly: true,
+        presetApply: 'POST /api/ai/mtf-auto/config with the preset fields; this endpoint never writes.',
+      });
+    } catch (e) {
+      jsonError(res, 500, 'risk-arm status failed', e);
     }
   });
 
@@ -1989,6 +2054,7 @@ export function registerAITradingRoutes(app, deps) {
         deskReady: ready.deskReady,
         deskArmable: ready.deskArmable,
         killSwitch: ready.killSwitch,
+        riskArm: ready.riskArm,
       });
     } catch (e) {
       jsonError(res, 400, 'mtf auto toggle failed', e);
@@ -2588,6 +2654,22 @@ export function registerAITradingRoutes(app, deps) {
       });
       res.json(r);
     } catch (e) { jsonError(res, 500, 'exec enter failed', e); }
+  });
+
+  /**
+   * v21.29.0 [R2 FLATTEN-ALL] — emergency close of every open futures
+   * position. Typed `FLATTEN ALL` confirmation is mandatory. Per-position
+   * verdicts are returned; native position-attached TP/SL cleanup stays
+   * `unverified [VERIFY-LIVE]` (never assumed).
+   */
+  app.post('/api/ai/futures/flatten-all', async (req, res) => {
+    try {
+      const { confirm } = req.body || {};
+      const out = await flattenAllFuturesPositions({ confirm });
+      return res.status(out.ok ? 200 : (out.blocked ? 400 : 502)).json(out);
+    } catch (e) {
+      jsonError(res, 500, 'flatten-all failed', e);
+    }
   });
 
   // ---------------- GLOBAL FUTURES markets view (v6.8) ----------------

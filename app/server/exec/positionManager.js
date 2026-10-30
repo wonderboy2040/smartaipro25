@@ -66,6 +66,11 @@ export class PositionManager {
     this._cfg = { ...DEFAULTS, ...cfg };
     // in-memory position state (mirrors exchange but with our exit-stage + trail)
     this._state = new Map(); // id → { stage, peakUnrealizedR, trailSl, openedAt, candlesSeen, clientId }
+    // v21.29.0 [R0a NO-BLIND-RETRY]: an ambiguous reduce (order accepted but
+    // exchange qty re-read did not confirm) must NOT be retried every candle
+    // — a second opposite-side order could double-close. Port supplies
+    // retryAfterMs; we hold that position id until the stamp expires.
+    this._reduceHolds = new Map(); // id → epoch-ms until which reduce is held
   }
 
   /**
@@ -335,14 +340,28 @@ export class PositionManager {
           else { actions.push({ id: p.id, kind: 't1-full-exit:failed', close: res }); this._alertCall(`⚠️ T1 full-exit FAILED on ${p.pair}: ${res?.error || 'unknown'} — retry next candle, exchange app check karo.`); }
           continue;
         }
+        const t1Hold = this._reduceHoldActive(p.id);
+        if (t1Hold.active) {
+          actions.push({ id: p.id, kind: 't1:reduce-hold', reduceQty, msLeft: t1Hold.msLeft });
+          continue;
+        }
         const redRes = await this._port.reduce({ positionId: p.id, qty: reduceQty });
         // v20.7.10 FIX: reduce fail → stage ADVANCE MAT (pehle phantom
         // 40% trim journal hota tha — jo kabhi hua hi nahi — aur SL BE
         // pe move ho jata tha; runner ladder phantom qty pe chalti thi).
-        // Agla candle phir try hoga.
+        // v21.29.0 [R0a]: already-flat = idempotent success (state delete,
+        // koi SL move nahi); ambiguous = 5-min hold (no blind retry).
+        if (redRes?.alreadyFlat) {
+          actions.push({ id: p.id, kind: 't1:already-flat', reduceQty });
+          this._state.delete(p.id);
+          continue;
+        }
         if (!redRes?.ok) {
-          actions.push({ id: p.id, kind: 't1:reduce-failed', reduceQty, close: redRes });
-          this._alertCall(`⚠️ T1 reduce FAILED on ${p.pair}: ${redRes?.error || 'unknown'} — ladder retry next candle.`);
+          const held = this._stampReduceHold(p.id, redRes?.retryAfterMs, 't1-reduce');
+          actions.push({ id: p.id, kind: 't1:reduce-failed', reduceQty, close: redRes, hold: held });
+          this._alertCall(redRes?.ambiguous
+            ? `⚠️ T1 reduce AMBIGUOUS on ${p.pair}: ${redRes?.error || 'unverified'} — 5 min tak koi blind retry nahi, exchange app se qty verify karo.`
+            : `⚠️ T1 reduce FAILED on ${p.pair}: ${redRes?.error || 'unknown'} — ladder retry next candle.`);
           continue;
         }
         // SL → breakeven + fees (rough: breakeven = entry; fees ~0.05%)
@@ -373,10 +392,23 @@ export class PositionManager {
           else { actions.push({ id: p.id, kind: 't2-full-exit:failed', close: res }); this._alertCall(`⚠️ T2 full-exit FAILED on ${p.pair}: ${res?.error || 'unknown'} — retry next candle.`); }
           continue;
         }
+        const t2Hold = this._reduceHoldActive(p.id);
+        if (t2Hold.active) {
+          actions.push({ id: p.id, kind: 't2:reduce-hold', reduceQty, msLeft: t2Hold.msLeft });
+          continue;
+        }
         const redRes = await this._port.reduce({ positionId: p.id, qty: reduceQty });
+        if (redRes?.alreadyFlat) {
+          actions.push({ id: p.id, kind: 't2:already-flat', reduceQty });
+          this._state.delete(p.id);
+          continue;
+        }
         if (!redRes?.ok) {
-          actions.push({ id: p.id, kind: 't2:reduce-failed', reduceQty, close: redRes });
-          this._alertCall(`⚠️ T2 reduce FAILED on ${p.pair}: ${redRes?.error || 'unknown'} — ladder retry next candle.`);
+          const held = this._stampReduceHold(p.id, redRes?.retryAfterMs, 't2-reduce');
+          actions.push({ id: p.id, kind: 't2:reduce-failed', reduceQty, close: redRes, hold: held });
+          this._alertCall(redRes?.ambiguous
+            ? `⚠️ T2 reduce AMBIGUOUS on ${p.pair}: ${redRes?.error || 'unverified'} — 5 min tak koi blind retry nahi, exchange app se qty verify karo.`
+            : `⚠️ T2 reduce FAILED on ${p.pair}: ${redRes?.error || 'unknown'} — ladder retry next candle.`);
           continue;
         }
         // SL → T1 level (1R from the ORIGINAL stop distance — see _rLevel)
@@ -452,9 +484,21 @@ export class PositionManager {
           actions.push({ id: p.id, kind: 'reversal-reduce:skip', classes: n, note: 'reduceQty rounded to 0 (dust book) — SL-tighten hi guard hai' });
           continue;
         }
+        const revHold = this._reduceHoldActive(p.id);
+        if (revHold.active) {
+          actions.push({ id: p.id, kind: 'reversal-reduce:hold', classes: n, reduceQty, msLeft: revHold.msLeft });
+          continue;
+        }
         const res = await this._port.reduce({ positionId: p.id, qty: reduceQty });
-        if (res?.ok) { st.qty = Math.max(0, st.qty - reduceQty); actions.push({ id: p.id, kind: 'reversal-reduce', classes: n, reduceQty }); }
-        else { actions.push({ id: p.id, kind: 'reversal-reduce:failed', classes: n, reduceQty, close: res }); this._alertCall(`⚠️ REVERSAL reduce FAILED on ${p.pair}: ${res?.error || 'unknown'} — retry next candle.`); }
+        if (res?.alreadyFlat) { this._state.delete(p.id); actions.push({ id: p.id, kind: 'reversal-reduce:already-flat', classes: n, reduceQty }); }
+        else if (res?.ok) { st.qty = Math.max(0, st.qty - reduceQty); actions.push({ id: p.id, kind: 'reversal-reduce', classes: n, reduceQty }); }
+        else {
+          const held = this._stampReduceHold(p.id, res?.retryAfterMs, 'reversal-reduce');
+          actions.push({ id: p.id, kind: 'reversal-reduce:failed', classes: n, reduceQty, close: res, hold: held });
+          this._alertCall(res?.ambiguous
+            ? `⚠️ REVERSAL reduce AMBIGUOUS on ${p.pair}: ${res?.error || 'unverified'} — 5 min tak koi blind retry nahi, exchange app se qty verify karo.`
+            : `⚠️ REVERSAL reduce FAILED on ${p.pair}: ${res?.error || 'unknown'} — retry next candle.`);
+        }
       } else if (n >= 1) {
         // tighten SL to breakeven + fees
         const be = st.side === 'LONG' ? st.entry * 1.0005 : st.entry * 0.9995;
@@ -506,6 +550,23 @@ export class PositionManager {
       }) || 5;
     } catch { return 5; }
   }
+  /** v21.29.0 R0a: reduce retry hold — active until stamp expires. */
+  _reduceHoldActive(id, now = Date.now()) {
+    const key = String(id);
+    const until = Number(this._reduceHolds.get(key) || 0);
+    if (until > now) return { active: true, until, msLeft: until - now };
+    if (until > 0) this._reduceHolds.delete(key);
+    return { active: false, until: 0, msLeft: 0 };
+  }
+
+  _stampReduceHold(id, ms, reason = 'ambiguous') {
+    const hold = Math.max(0, Number(ms) || 0);
+    if (!(hold > 0)) return null;
+    const until = Date.now() + hold;
+    this._reduceHolds.set(String(id), until);
+    return { until, reason, holdMs: hold };
+  }
+
   _unrealizedR(st, mark) {
     const pnl = (st.side === 'LONG' ? 1 : -1) * st.qty * (mark - st.entry);
     const risk = st.riskUSDT || (st.qty * Math.abs(st.entry - st.sl));

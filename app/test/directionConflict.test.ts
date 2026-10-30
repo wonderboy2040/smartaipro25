@@ -168,7 +168,7 @@ describe('P0 direction conflict guards (fuseDualTf + Phase 0–3 Direction Accur
   it('P0-3: mtfAutoTick live fallback never bypasses autoBlockers or boardSideConflict', async () => {
     __resetMtfAutoForTests();
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ markets: ['CRYPTO'], executionMode: 'live', liveExecution: true, minScore: 75 });
+    updateMtfAutoConfig({ markets: ['CRYPTO'], executionMode: 'live', liveExecution: true, minScore: 75, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
 
     const conflictedRow = {
       ok: true,

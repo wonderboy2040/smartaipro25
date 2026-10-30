@@ -493,7 +493,7 @@ describe('mtfAutoLink — durable persistence + boot reload', () => {
   });
 
   it('reload hook rehydrates config + book after module-eval capture', () => {
-    updateMtfAutoConfig({ enabled: true, minScore: 82, executionMode: 'live' });
+    updateMtfAutoConfig({ enabled: true, minScore: 82, executionMode: 'live', riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
     recordPaperMtfBoardTrade({
       symbol: 'ETH', market: 'CRYPTO', side: 'SHORT',
       entry: 200, stopLoss: 205, t1: 190, t2: 180, qty: 1,

@@ -113,7 +113,7 @@ const mkPaper = () => {
 beforeEach(() => {
   __resetMtfAutoForTests();
   setMtfAutoEnabled(true);
-  updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false } });
+  updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false }, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
 });
 
 // ---------------------------------------------------------------
@@ -231,7 +231,7 @@ describe('v21.23.10 S3 — exchange close verdict check (fabricated CLOSE cure)'
     const now = Date.now();
     seedOpenLive(now);
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false } });
+    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false }, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
     const hp = mkPaper();
     const out = await mtfAutoTick({
       boards: flipBoard(), paper: hp.paper,
@@ -252,7 +252,7 @@ describe('v21.23.10 S3 — exchange close verdict check (fabricated CLOSE cure)'
     const now = Date.now();
     seedOpenLive(now);
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false } });
+    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false }, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
     const hp = mkPaper();
     const out = await mtfAutoTick({
       boards: flipBoard(), paper: hp.paper,
@@ -272,7 +272,7 @@ describe('v21.23.10 S3 — exchange close verdict check (fabricated CLOSE cure)'
     const now = Date.now();
     seedOpenLive(now);
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false } });
+    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false }, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
     const hp = mkPaper();
     const out = await mtfAutoTick({
       boards: flipBoard(), paper: hp.paper,
@@ -517,7 +517,7 @@ describe('v21.23.10 S13 — board-rotation snapshot: flip detection zinda', () =
     const t0 = Date.now();
     seedLive(t0);
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false } });
+    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false }, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
     const hp = mkPaper();
     const out = await mtfAutoTick({
       now: t0, boards: mkBoards([]), paper: hp.paper,
@@ -531,7 +531,7 @@ describe('v21.23.10 S13 — board-rotation snapshot: flip detection zinda', () =
     const t0 = Date.now();
     seedLive(t0);
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false } });
+    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false }, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
     const hp = mkPaper();
     const out = await mtfAutoTick({
       now: t0, boards: flipRow(), paper: hp.paper,
@@ -548,7 +548,7 @@ describe('v21.23.10 S13 — board-rotation snapshot: flip detection zinda', () =
     // exit turant fire hoga isliye snapshot-store step ke liye SAME-SIDE row dikhao)
     seedLive(t0);
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false } });
+    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false }, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
     const hp = mkPaper();
     const outA = await mtfAutoTick({
       now: t0, boards: flipRow(), paper: hp.paper,
@@ -574,7 +574,7 @@ describe('v21.23.10 S13 — board-rotation snapshot: flip detection zinda', () =
     const t0 = Date.now();
     seedLive(t0);
     setMtfAutoEnabled(true);
-    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false } });
+    updateMtfAutoConfig({ executionMode: 'live', desks: { crypto: true, india: false }, riskCapsAcknowledged: true, riskCapsAckPhrase: 'I ACCEPT THE RISK CAPS' });
     const hp = mkPaper();
     await mtfAutoTick({
       now: t0, boards: flipRow(), paper: hp.paper,
