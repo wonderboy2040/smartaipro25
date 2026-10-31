@@ -118,6 +118,9 @@ function _newEntry(row) {
     lastAction: null,
     lastActionAt: null,
     lastError: null,
+    trendPct: 0,
+    trendAdverse: false,
+    trendStrength: 0,
     armedAt: Date.now(),
     busy: false,
     pending: null,
@@ -296,11 +299,11 @@ function _velocity(entry) {
   const isLong = side === 'LONG';
   const now = Date.now();
   const recent = entry.ticks.filter(s => now - s.at <= VELOCITY_WINDOW_MS);
-  if (recent.length < 3) return { adverse: false, pct: 0, spanMs: 0, consecutive: 0 };
+  if (recent.length < 3) return { adverse: false, pct: 0, spanMs: 0, consecutive: 0, trendPct: 0, trendAdverse: false, trendStrength: 0 };
   const first = recent[0];
   const last = recent[recent.length - 1];
   const spanMs = Math.max(0, last.at - first.at);
-  if (!(first.price > 0)) return { adverse: false, pct: 0, spanMs, consecutive: 0 };
+  if (!(first.price > 0)) return { adverse: false, pct: 0, spanMs, consecutive: 0, trendPct: 0, trendAdverse: false, trendStrength: 0 };
   // Positive = AGAINST the trade.
   const movePct = isLong
     ? (first.price - last.price) / first.price
@@ -326,6 +329,11 @@ function _velocity(entry) {
     pct: +(movePct * 100).toFixed(3),
     spanMs,
     consecutive,
+    // Signed trend: positive = WITH the trade, negative = against it. The
+    // pre-TP1 trail consumes this only for extra tightening.
+    trendPct: +(-movePct * 100).toFixed(3),
+    trendAdverse: Boolean(spanMs >= VELOCITY_MIN_SPAN_MS && movePct >= VELOCITY_MIN_MOVE_PCT),
+    trendStrength: +Math.min(1, Math.abs(movePct) / VELOCITY_HARD_MOVE_PCT).toFixed(3),
   };
 }
 
@@ -401,6 +409,8 @@ async function _handlePrice(entry, price, source, tickAgeMs = null) {
       tickAgeMs: Number.isFinite(Number(tickAgeMs)) ? Number(tickAgeMs) : null,
       velocityAdverse: vel.adverse,
       velocityPct: vel.pct,
+      trendPct: vel.trendPct,
+      trendAdverse: vel.trendAdverse,
       p: _manageP(),
     });
     entry.tickCount += 1;
@@ -409,6 +419,9 @@ async function _handlePrice(entry, price, source, tickAgeMs = null) {
     entry.lastSource = source || null;
     entry.lastTickAgeMs = Number.isFinite(Number(tickAgeMs)) ? Number(tickAgeMs) : null;
     entry.lastHandlerMs = Date.now() - started;
+    entry.trendPct = vel.trendPct;
+    entry.trendAdverse = vel.trendAdverse;
+    entry.trendStrength = vel.trendStrength;
     entry.lastError = null;
     _lastTickAt = Date.now();
     if (res?.state) entry.state = res.state;
@@ -579,6 +592,9 @@ export function autoTradeSuperAgentStatus() {
     lastSource: e.lastSource,
     lastAction: e.lastAction,
     lastActionAt: e.lastActionAt,
+    trendPct: e.trendPct,
+    trendAdverse: e.trendAdverse,
+    trendStrength: e.trendStrength,
     lastError: e.lastError,
     subscribed: e.subscribed,
     armedAt: e.armedAt,

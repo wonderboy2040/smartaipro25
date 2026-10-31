@@ -70,6 +70,10 @@ import {
   trailProfileResolved, tp1ClosePctFor, classifyVolatility,
   VOL_CLASS, MOMENTUM,
 } from './volTrail.js';
+// v21.31.0 PRE-TP1 NO-LOSS SMART TRAIL: fee-floor + volatility-classed buffer
+// and ratchet-only giveback, armed before TP1. Pure module; this file owns the
+// wiring into the PRO ladder. Trend is used only to tighten, never to loosen.
+import { evaluatePreTp1NoLossTrail } from './preTp1Trail.js';
 // v21.24.0 SMART TRAIL v2: noise-aware ratchet + rolling TP2 (shadow default; SMART_TRAIL_V2=enforce to act).
 import { smartTrailMode, smartTrailConfig, smartTrailPlan, smartExtendTarget } from './smartTrail.js';
 // v21.25.0 DIRECTION CERTIFICATE — strict side vocabulary + explicit
@@ -167,6 +171,12 @@ export const MTF_AUTO_DEFAULTS = {
   // no-loss scratch." true = pro ladder; false = legacy v1/v2 stage trail
   // (kept only as an explicit diagnostic escape hatch).
   proExitPolicy: true,
+  // v21.31.0 PRE-TP1 NO-LOSS SMART TRAIL (user spec: "TP1 tak wait nahi kar
+  // sakte — SL no loss only profit ke hisaab se smartly trail ho"). This
+  // supersedes the old "no trail before TP1" lock while KEEPING the PRO
+  // post-TP1 ladder. `enforce` = act on the pre-TP1 proposal; `shadow` =
+  // telemetry only; `off` = exact v21.30.0 behaviour. Env: PRE_TP1_TRAIL.
+  preTp1Trail: 'enforce',
   // v21.28.0 F1: closed-bar stability auto/manual gate (default OFF = shadow).
   closedBarConfirm: false,
   // v21.30.0 [SIGNAL TIMING + DIRECTION]: fail-open entry-timing guard.
@@ -414,6 +424,9 @@ function _sanitizeCfg(cfg) {
   out.deepMonitorEnabled = cfg.deepMonitorEnabled !== false;
   // v21.26.1 PRO TRADER EXIT POLICY - default ON; explicit opt-out only.
   out.proExitPolicy = cfg.proExitPolicy !== false;
+  // v21.31.0: pre-TP1 no-loss trail. Unknown values fail safe to the
+  // documented default (enforce) rather than silently disabling protection.
+  out.preTp1Trail = normalizeGuardMode(cfg.preTp1Trail, 'enforce');
   // v21.28.0 [F1/F2 NEW FLAGS — SAFE DEFAULTS]:
   //   closedBarConfirm = false → shadow telemetry only (forming-bar signal
   //     still trades). true → auto/manual entry requires last closed bar par
@@ -581,6 +594,7 @@ export function mtfAutoGuardTelemetry(cfg = loadMtfAutoConfig()) {
       runnerAfterTp2: runnerAfterTp2Mode(),
       stallExit: stallExitMode(),
       entryTimingGuard: entryTimingGuardMode(),
+      preTp1Trail: preTp1TrailMode(),
       exitPolicyV3: exitPolicyV3Mode(),
       tp1ConfirmFallback: tp1ConfirmFallbackMode(),
     },
@@ -823,6 +837,14 @@ export function scoreCalibrationMode() { return _guardMode('scoreCalibration', '
 export function runnerAfterTp2Mode() { return _guardMode('runnerAfterTp2', 'RUNNER_AFTER_TP2', 'off'); }
 export function stallExitMode() { return _guardMode('stallExit', 'STALL_EXIT', 'off'); }
 export function entryTimingGuardMode() { return _guardMode('entryTimingGuard', 'ENTRY_TIMING_GUARD', 'enforce'); }
+// v21.31.0 — per-call override exists for tests/shadow previews; otherwise env
+// wins over persisted config, matching the R3–R9 rollout convention.
+export function preTp1TrailMode(override = null) {
+  if (override != null && String(override).trim() !== '') {
+    return normalizeGuardMode(override, 'enforce');
+  }
+  return _guardMode('preTp1Trail', 'PRE_TP1_TRAIL', 'enforce');
+}
 
 /** Pure TP1 close-confirmation check. `closedCandles` MUST contain only closed
  *  bars (caller drops the forming bar). Returns null when there is no usable
@@ -1026,6 +1048,7 @@ function _blockedDirectionDeepEval({ trade, cert, entry, initialSl, currentSl, t
     t2Extended: false,
     t2Extensions: Number(trade.t2Extensions) || 0,
     smartTrail: null,
+    preTp1Trail: null,
     checkedAt: Date.now(),
   };
 }
@@ -1237,6 +1260,8 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   let stageCode = 'STAGE_0_INITIAL_GUARD';
   let stageLabel = 'Stage 0 · Initial SL Guard';
   let candidateSl = currentSl;
+  let preTp1Telemetry = null;
+  const preTp1Mode = preTp1TrailMode(liveCtx.preTp1Trail);
 
   const priceAtR = (rMult) => +(isLong ? entry + rMult * risk : entry - rMult * risk).toFixed(6);
   const tightenSl = (current, proposed) => {
@@ -1264,12 +1289,48 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
         : 'Stage 4 - TP1 Secured | SL Locked at Fee-Breakeven';
       candidateSl = tightenSl(candidateSl, exitV3Enforce ? v3BePlusBufferSl : (feeFloor > 0 ? feeFloor : entry));
     } else {
-      stageCode = 'STAGE_0_INITIAL_GUARD';
-      stageLabel = 'Stage 0 - Initial SL Guard (PRO: no trail before TP1)';
+      // v21.31.0 PRE-TP1 NO-LOSS SMART TRAIL — supersedes the old "no trail
+      // before TP1" lock. The exact fee-breakeven floor + volatility buffer
+      // is locked as soon as the favourable excursion can pay fees; after
+      // that the stop ratchets behind the peak. Ratchet-only: never loosens,
+      // never crosses LTP. `off` restores the v21.30.0 initial-SL lock.
+      preTp1Telemetry = evaluatePreTp1NoLossTrail({
+        mode: preTp1Mode,
+        side,
+        entry,
+        initialStopLoss: initialSl,
+        currentStopLoss: candidateSl,
+        peakPrice,
+        ltp,
+        risk,
+        feeFloor,
+        volClass,
+        momentumState,
+        tickTrendPct: liveCtx.tickTrendPct,
+        tickTrendAdverse: liveCtx.tickTrendAdverse === true || _hint0,
+        allowMove: liveCtx.allowSlMove !== false,
+      });
+      const _preSl = preTp1Telemetry.proposedSl ?? preTp1Telemetry.wouldApplySl;
+      if (preTp1Mode === 'enforce' && preTp1Telemetry.applied && preTp1Telemetry.proposedSl > 0) {
+        candidateSl = tightenSl(candidateSl, preTp1Telemetry.proposedSl);
+        stageCode = 'STAGE_0B_PRE_TP1_TRAIL';
+        stageLabel = `Stage 0B · Pre-TP1 No-Loss Smart Trail (SL ${_preSl} · +${preTp1Telemetry.lockedProfitR}R locked · ${volClass})`;
+      } else if (preTp1Mode === 'enforce' && preTp1Telemetry.armed) {
+        stageCode = 'STAGE_0B_PRE_TP1_TRAIL';
+        stageLabel = `Stage 0B · Pre-TP1 No-Loss Trail Armed (${preTp1Telemetry.reason} · no-loss floor ${preTp1Telemetry.noLossSl})`;
+      } else if (preTp1Mode === 'shadow' && preTp1Telemetry.armed) {
+        stageLabel = `Stage 0 · Initial SL Guard · PRE-TP1 TRAIL SHADOW (would lock ${_preSl ?? '—'})`;
+      } else if (preTp1Mode === 'off') {
+        stageLabel = 'Stage 0 - Initial SL Guard (PRO: no trail before TP1)';
+      } else {
+        stageLabel = preTp1Telemetry.reason === 'fee_not_covered'
+          ? `Stage 0 · Initial SL Guard · PRE-TP1 trail waiting for fee-breakeven ${feeFloor}`
+          : `Stage 0 · Initial SL Guard · PRE-TP1 trail arms at ${preTp1Telemetry.armR}R`;
+      }
       if (exitV3Enforce && tp1Touched && tp1CloseConfirmed !== true) {
         stageLabel += ' · TP1 touch awaiting closed-bar confirm';
       }
-      // candidateSl stays at the carried stop - initial SL is the backstop.
+      preTp1Telemetry = { ...preTp1Telemetry, engineSl: +candidateSl.toFixed(6) };
     }
   } else if (peakR >= 1.4 || (tp1Touched && peakR >= 1.25)) {
     stageCode = 'STAGE_5_RUNNER_TO_TP2';
@@ -1473,6 +1534,10 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
   const proPreTp1Scratch = proExitPolicy && !tp1Ladder && reversalConfirmed && feeCovered;
   const proPostTp1Reversal = proExitPolicy && tp1Ladder && !tp2Touched && reversalConfirmed && feeCovered;
   const legacyReversalProfit = !proExitPolicy && reversalConfirmed && feeCovered && currentR >= 0.12;
+  // A gap through the pre-TP1 trail can land BELOW the fee floor: the stop did
+  // its job, but the fill is not provably fee-safe. Label it honestly instead
+  // of claiming the untouched initial SL was hit.
+  const preTp1TrailFeeGapExit = Boolean(preTp1Telemetry?.armed && trailedSlHit && !feeCovered);
   const shouldBookProfitNow = Boolean(
     effectiveTp2Close
     || shouldRunnerExit
@@ -1501,9 +1566,11 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
                 ? (tp1Touched ? 'T1_BOOKED_REVERSAL_PROFIT_LOCK' : 'PRE_T1_REVERSAL_PROFIT_BOOKED')
                 : (trailedSlHit && feeCovered)
                   ? 'TRAILED_SL_PROFIT_BOOKED'
-                  : shouldExitDefensiveSl
-                    ? (proExitPolicy ? 'INITIAL_SL_PROTECTIVE_EXIT' : 'TRAILED_SL_PROTECTIVE_EXIT')
-                    : null;
+                  : preTp1TrailFeeGapExit
+                    ? 'PRE_TP1_TRAIL_FEE_GAP_EXIT'
+                    : shouldExitDefensiveSl
+                      ? (proExitPolicy ? 'INITIAL_SL_PROTECTIVE_EXIT' : 'TRAILED_SL_PROTECTIVE_EXIT')
+                      : null;
 
   const grossPnl = +(favorableMove * qty).toFixed(4);
   const movePctFromEntry = entry > 0 ? +(((favorableMove / entry) * 100)).toFixed(3) : 0;
@@ -1627,6 +1694,9 @@ export function evaluateActiveTradeDeepMonitor(trade = {}, liveCtx = {}) {
     t1ClosePct: profile.tp1ClosePct,
     // v21.24.0 SMART TRAIL v2 telemetry (shadow = report only, enforce = acted on)
     trailEngine: smartTakesOver ? 'v2' : 'v1',
+    // v21.31.0 pre-TP1 no-loss trail telemetry (null outside the PRO pre-TP1
+    // branch: TP1 already locked / TP2 hit / legacy engine).
+    preTp1Trail: preTp1Telemetry,
     t2Extended,
     t2Extensions: (Number(trade.t2Extensions) || 0) + (t2Extended ? 1 : 0),
     smartTrail: smartCfg ? {
@@ -2935,6 +3005,10 @@ export async function mtfAutoTick(p = {}) {
         closedCandles: deepCandles,
         reversalConfirmed: revByRow,
         proExitPolicy: cfg.proExitPolicy !== false,
+        // v21.31.0: this sweep may evaluate a ≤120s board snapshot. It still
+        // reports pre-TP1 trail telemetry, but only the realtime tick agent
+        // and the fresh-quote 3s loop may ratchet the stop.
+        allowSlMove: false,
         now,
       });
       stampTp1ConfirmHold(b, deepEval, { now, closedCandles: deepCandles });
@@ -3053,6 +3127,7 @@ export async function mtfAutoTick(p = {}) {
 
       // v21.24.0 SMART TRAIL v2 telemetry + ROLLING TP2 (enforce only moves the target).
       b.smartTrail = deepEval.smartTrail || null;
+      b.preTp1Trail = deepEval.preTp1Trail || null;
       if (deepEval.t2Extended && Number(deepEval.t2) > 0) {
         const prevT2 = b.t2;
         b.t2 = deepEval.t2;
@@ -4175,12 +4250,17 @@ export function _ladderTracker(_b = {}, mon = {}) {
   const t1 = Number(mon.t1 ?? _b.t1) || null;
   const t2 = Number(mon.t2 ?? _b.t2) || null;
   const liveSl = Number(mon.trailedStopLoss ?? _b.trailedStopLoss ?? _b.stopLoss) || null;
+  const pre = mon.preTp1Trail || null;
+  const preAvailable = pre?.available === true;
+  const preArmed = pre?.armed === true;
+  const preApplied = pre?.applied === true;
 
   let rung = 'INITIAL_SL';
   if (tp2Hit) rung = 'TP2_EXIT';
   else if (tp2Approach && tp1Ladder) rung = 'TP1_LOCK';
   else if (tp1Ladder) rung = 'FEE_BE';
   else if (awaitingClose) rung = 'TP1_CONFIRM';
+  else if (preArmed) rung = 'PRE_TP1_TRAIL';
 
   const steps = [
     {
@@ -4203,6 +4283,15 @@ export function _ladderTracker(_b = {}, mon = {}) {
       state: tp2Hit ? 'ACTIVE' : 'PENDING',
     },
   ];
+  if (preAvailable) {
+    steps.splice(1, 0, {
+      key: 'PRE_TP1_TRAIL',
+      label: pre?.volClass ? `Pre-TP1 no-loss trail (${pre.volClass})` : 'Pre-TP1 no-loss trail',
+      price: pre?.proposedSl ?? pre?.wouldApplySl ?? liveSl,
+      stop: pre?.proposedSl ?? pre?.wouldApplySl ?? liveSl,
+      state: preApplied ? 'ACTIVE' : (preArmed ? 'WAITING' : 'PENDING'),
+    });
+  }
   if (awaitingClose) {
     steps.splice(1, 0, {
       key: 'TP1_CONFIRM', label: 'TP1 close-confirm', price: t1,
@@ -4220,7 +4309,11 @@ export function _ladderTracker(_b = {}, mon = {}) {
     steps,
     note: awaitingClose
       ? 'V3 enforce: wick TP1 cannot move the stop until a closed bar confirms'
-      : null,
+      : preApplied
+        ? 'Pre-TP1 no-loss trail: fee-breakeven + volatility buffer locked; ratchet-only'
+        : preArmed
+          ? 'Pre-TP1 no-loss trail armed — waiting for a valid ratchet level'
+          : null,
   };
 }
 
@@ -4253,14 +4346,34 @@ export function _nextActionPreview(_b = {}, mon = {}, protection = null) {
       detail: `TP1 secured — stop at fee-BE${mon.exitPolicyV3?.applied ? '+buffer' : ''} · runner → TP2 ${px(mon.t2) ?? '—'}`,
     };
   }
+  const pre = mon.preTp1Trail;
+  if (pre?.available && pre.armed) {
+    const sl = px(pre.proposedSl ?? pre.wouldApplySl ?? mon.trailedStopLoss);
+    const shadow = pre.mode === 'shadow';
+    return {
+      code: shadow
+        ? 'PRE_TP1_TRAIL_SHADOW'
+        : (pre.applied ? 'PRE_TP1_TRAIL_LOCKED' : 'PRE_TP1_TRAIL_ARMED'),
+      label: shadow
+        ? `👁️ PRE-TP1 TRAIL SHADOW · would lock ${sl ?? '—'}`
+        : `🔒 PRE-TP1 NO-LOSS SL ${sl ?? '—'}`,
+      urgency: shadow ? 'neutral' : (pre.applied ? 'ok' : 'neutral'),
+      detail: `${String(pre.mode).toUpperCase()} · arm ${pre.armR}R · fee ${px(pre.feeFloor) ?? '—'} + ${pre.bufferR}R buffer · vol ${pre.volClass} · trend ${pre.trendAdverse ? 'adverse → tightened' : 'with trade'} · ratchet-only`,
+    };
+  }
   const dist = Number(mon.distToTp1Pct);
+  const preHint = pre?.available
+    ? (pre.reason === 'fee_not_covered'
+      ? `Pre-TP1 trail waiting for fee-breakeven ${px(pre.feeFloor) ?? '—'}`
+      : `Pre-TP1 trail arms at ${pre.armR}R`)
+    : null;
   return {
     code: 'HOLD_INITIAL_SL',
     label: `🛡️ HOLD · INITIAL SL ${px(mon.initialStopLoss) ?? '—'}`,
     urgency: protection && ['UNVERIFIED', 'DIVERGED', 'SYNC_PENDING'].includes(protection.state) ? 'warn' : 'neutral',
     detail: Number.isFinite(dist)
-      ? `No stop move before TP1 · TP1 ${px(mon.t1) ?? '—'} (${Math.abs(dist)}% ${dist >= 0 ? 'away' : 'beyond'})`
-      : 'No stop move before TP1 (target unavailable)',
+      ? `${preHint ? `${preHint} · ` : ''}TP1 ${px(mon.t1) ?? '—'} (${Math.abs(dist)}% ${dist >= 0 ? 'away' : 'beyond'})`
+      : (preHint || 'No stop move before TP1 (target unavailable)'),
   };
 }
 
@@ -4291,6 +4404,9 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
       // A fallback/stale book LTP may keep SL telemetry alive, but it must
       // NEVER move TP2 - only a real, sanity-checked quote can extend.
       allowTpExtension: allowTpExtension && hasFreshQuote,
+      // A stale book quote must never ratchet a stop. Pre-TP1 trail is still
+      // reported (shadow telemetry) but cannot move the carried SL.
+      allowSlMove: hasFreshQuote,
       proExitPolicy: cfg.proExitPolicy !== false,
       now: hbNow,
     });
@@ -4327,6 +4443,7 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
         bookUpdated = true;
       }
       b.smartTrail = mon.smartTrail || null;
+      b.preTp1Trail = mon.preTp1Trail || null;
       b.currentR = mon.currentR;
       b.peakR = mon.peakR;
       b.deepMonitorStage = mon.stageCode;
@@ -4391,6 +4508,7 @@ export function getActiveAutoTradesDeepMonitor(liveQuotes = {}, opts = {}) {
   return {
     activeCount: rows.length,
     trailingActiveCount: rows.filter(r => r.slTrailed || r.stageCode !== 'STAGE_0_INITIAL_GUARD').length,
+    preTp1TrailArmedCount: rows.filter(r => r.preTp1Trail?.armed === true).length,
     tp1LockedCount: rows.filter(r => r.tp1Hit).length,
     reversalAlertCount: rows.filter(r => r.reversalDetected).length,
     directionBlockedCount: rows.filter(r => r.directionBlocked === true || r.directionCertificate?.ok === false).length,
@@ -4469,6 +4587,7 @@ export function mtfAutoStatus(liveQuotes = {}, opts = {}) {
     maxTradesPerDay: cfg.maxTradesPerDay,
     quotaUnlimited: Number(cfg.maxTradesPerDay) === 0,
     proExitPolicy: cfg.proExitPolicy !== false,
+    preTp1Trail: preTp1TrailMode(),
     maxOpenPositions: cfg.maxOpenPositions,
     cooldownMin: cfg.cooldownMin,
     desks: cfg.desks,
@@ -4711,6 +4830,8 @@ export async function mtfAutoSuperAgentManage(input = {}) {
     )
   );
 
+  const tickAgeMs = Number(input.tickAgeMs);
+  const tickFresh = !(Number.isFinite(tickAgeMs) && tickAgeMs > 5_000);
   const saCandles = closedCandlesFor(b.symbol, b.execMarket || b.market, { now });
   const deepEval = evaluateActiveTradeDeepMonitor({
     ...b,
@@ -4724,6 +4845,12 @@ export async function mtfAutoSuperAgentManage(input = {}) {
     closedCandles: saCandles,
     reversalConfirmed: revByRow,
     proExitPolicy: cfg.proExitPolicy !== false,
+    // v21.31.0: signed tick trend (from this agent's rolling WS samples) is
+    // used only to TIGHTEN the pre-TP1 no-loss trail. A stale fallback tick
+    // may report telemetry but must not ratchet the stop.
+    tickTrendPct: input.trendPct,
+    tickTrendAdverse: input.trendAdverse === true,
+    allowSlMove: tickFresh,
     now,
   });
   stampTp1ConfirmHold(b, deepEval, { now, closedCandles: saCandles });
@@ -4745,8 +4872,6 @@ export async function mtfAutoSuperAgentManage(input = {}) {
   const prevStage = b.deepMonitorStage;
   const tradeAgeMs = Math.max(0, now - (Number(b.openedAt) || now));
   const isRuntimeClock = input.isRuntimeClock !== false;
-  const tickAgeMs = Number(input.tickAgeMs);
-  const tickFresh = !(Number.isFinite(tickAgeMs) && tickAgeMs > 5_000);
 
   // ---- stamp the deep-monitor result on the book row (single source of truth) ----
   b.ltp = ltp;
@@ -4765,11 +4890,14 @@ export async function mtfAutoSuperAgentManage(input = {}) {
   b.momentumState = deepEval.momentumState || b.momentumState || null;
   b.t1ClosePct = deepEval.t1ClosePct || b.t1ClosePct || 0.5;
   b.smartTrail = deepEval.smartTrail || null;
+  b.preTp1Trail = deepEval.preTp1Trail || null;
   b.superAgentLastTickAt = now;
   b.superAgentLastPrice = ltp;
   b.superAgentTickCount = (Number(b.superAgentTickCount) || 0) + 1;
   b.superAgentVelocityPct = Number(input.velocityPct) || 0;
   b.superAgentVelocityAdverse = Boolean(input.velocityAdverse);
+  b.superAgentTrendPct = Number.isFinite(Number(input.trendPct)) ? Number(input.trendPct) : 0;
+  b.superAgentTrendAdverse = input.trendAdverse === true;
   b.superAgentAdverseConfirmed = Boolean(revByRow || input.velocityAdverse);
   b.superAgentMinLossR = clampN(cfg.superAgentMinLossR, -0.90, -0.10, -0.35);
 
@@ -5143,7 +5271,10 @@ export async function mtfAutoSuperAgentManage(input = {}) {
     ltp,
     tp1Hit: Boolean(b.t1Hit),
     tp2Hit: Boolean(deepEval.tp2Hit),
+    preTp1Trail: deepEval.preTp1Trail || null,
     adverseConfirmed,
+    trendPct: Number.isFinite(Number(input.trendPct)) ? Number(input.trendPct) : 0,
+    trendAdverse: input.trendAdverse === true,
     velocityPct: Number(input.velocityPct) || 0,
   };
 }

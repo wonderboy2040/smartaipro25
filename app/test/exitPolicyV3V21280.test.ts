@@ -162,10 +162,18 @@ describe('v21.28.0 EXIT_POLICY_V3 — shadow never changes decisions', () => {
 
 describe('v21.28.0 EXIT_POLICY_V3 — enforce close-confirmed ladder', () => {
   const prev = process.env.EXIT_POLICY_V3;
-  beforeEach(() => { process.env.EXIT_POLICY_V3 = 'enforce'; });
+  const prevPreTp1 = process.env.PRE_TP1_TRAIL;
+  beforeEach(() => {
+    process.env.EXIT_POLICY_V3 = 'enforce';
+    // V3 ladder semantics are independent of the v21.31.0 pre-TP1 trail:
+    // pin the older policy here so a wick-TP1 assertion never depends on it.
+    process.env.PRE_TP1_TRAIL = 'off';
+  });
   afterEach(() => {
     if (prev === undefined) delete process.env.EXIT_POLICY_V3;
     else process.env.EXIT_POLICY_V3 = prev;
+    if (prevPreTp1 === undefined) delete process.env.PRE_TP1_TRAIL;
+    else process.env.PRE_TP1_TRAIL = prevPreTp1;
   });
 
   it('wick-only TP1 does NOT latch: initial SL stands', () => {

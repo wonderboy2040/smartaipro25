@@ -86,7 +86,7 @@ describe('v21.26.1 PRO ladder - pre-TP1 initial SL is untouchable', () => {
   it('normal +0.22R pop then pullback does NOT trail or close (the -Rs.24 root cause)', () => {
     const ev = evaluateActiveTradeDeepMonitor(
       dmTrade({ peakPrice: 100.22 }),
-      { ltp: 100.05 },
+      { ltp: 100.05, preTp1Trail: 'off' },
     );
     expect(ev.stageCode).toBe('STAGE_0_INITIAL_GUARD');
     expect(ev.trailedStopLoss).toBe(99);          // initial SL untouched
@@ -101,6 +101,7 @@ describe('v21.26.1 PRO ladder - pre-TP1 initial SL is untouchable', () => {
       dmTrade({ peakPrice: 100.6 }),
       {
         ltp: 100.6,
+        preTp1Trail: 'off',
         boardRow: { side: 'LONG', triggerFired: true, superScore: 85, reversalRisk: true, context: { exhausted: true } },
       },
     );
@@ -112,7 +113,7 @@ describe('v21.26.1 PRO ladder - pre-TP1 initial SL is untouchable', () => {
   it('deep giveback (peak 0.95R -> 0.50R) is HOLD pre-TP1, not a reversal book', () => {
     const ev = evaluateActiveTradeDeepMonitor(
       dmTrade({ peakPrice: 100.95 }),
-      { ltp: 100.5 },
+      { ltp: 100.5, preTp1Trail: 'off' },
     );
     expect(ev.tp1Hit).toBe(false);
     expect(ev.stageCode).toBe('STAGE_0_INITIAL_GUARD');

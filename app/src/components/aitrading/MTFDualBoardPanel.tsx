@@ -431,11 +431,21 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       : String(t.market || '').toUpperCase() !== 'INDIA'
   ));
   const superAgentStates = [...new Set(superAgentTrades.map(t => t.state).filter(Boolean))];
+  // v21.31.0 PRE-TP1 NO-LOSS SMART TRAIL — server is the single owner; this is
+  // display only. `off` hides the badge entirely.
+  const preTp1Mode = String(auto?.preTp1Trail || auto?.deepMonitor?.guards?.modes?.preTp1Trail || 'off').toLowerCase();
+  const preTp1Armed = Number(auto?.deepMonitor?.preTp1TrailArmedCount) || 0;
+  const preTp1Title = [
+    `Mode: ${preTp1Mode} · arm after a volatility-scaled favourable move · SL floor = fee-breakeven + vol buffer`,
+    'Ratchet-only: SL sirf profit direction me move hota hai; kabhi loose nahi hota aur LTP ko cross nahi karta.',
+    'Trend: live WebSocket tick window (no 1ms fabricated feed). Adverse trend sirf tighten karta hai.',
+  ].join('\n');
   const superAgentTitle = auto?.superAgent
     ? [
         `Primary: ${auto.superAgent.primarySource || 'WebSocket tick'} · polling ${auto.superAgent.pollingMs ?? 0}ms · fallback watchdog ${auto.superAgent.fallbackMs ?? 1000}ms`,
         'TP2 hit → agent IDLE · confirmed reversal → minimal-loss close + immediate reverse entry',
-        ...superAgentTrades.map(t => `${t.symbol} ${t.side || ''} ${t.state} · ${t.tickCount ?? 0} ticks · ${t.lastSource || 'waiting'} · handler ${t.lastHandlerMs ?? '—'}ms`),
+        `Pre-TP1 no-loss trail: ${preTp1Mode.toUpperCase()}${preTp1Armed > 0 ? ` · ${preTp1Armed} armed` : ''} · ratchet-only`,
+        ...superAgentTrades.map(t => `${t.symbol} ${t.side || ''} ${t.state} · ${t.tickCount ?? 0} ticks · ${t.lastSource || 'waiting'} · handler ${t.lastHandlerMs ?? '—'}ms · trend ${t.trendPct ?? 0}%${t.trendAdverse ? ' (adverse)' : ''}`),
       ].join('\n')
     : 'AI super agent status unavailable';
   const activeTradedRows = useMemo(
@@ -977,6 +987,20 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
                   🤖 AI SUPER AGENT · {superAgentTrades.length > 0
                     ? `${superAgentTrades.length} × ${superAgentStates.join(' / ')}`
                     : 'READY · WS TICK 0ms'}
+                </span>
+              )}
+              {preTp1Mode !== 'off' && (
+                <span
+                  data-testid="mtf-pre-tp1-trail-badge"
+                  className={`px-2 py-0.5 rounded-md border text-[9px] font-mono ${
+                    preTp1Mode === 'enforce'
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                      : 'bg-amber-500/10 border-amber-500/35 text-amber-200'
+                  }`}
+                  title={preTp1Title}
+                >
+                  🛡️ PRE-TP1 NO-LOSS TRAIL · {preTp1Mode.toUpperCase()}
+                  {preTp1Armed > 0 ? ` · ${preTp1Armed} ARMED` : ''}
                 </span>
               )}
             </div>

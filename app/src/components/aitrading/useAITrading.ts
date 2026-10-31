@@ -1187,8 +1187,10 @@ export interface MtfAutoStatus {
   maxTradesPerDay: number; maxOpenPositions?: number; cooldownMin: number;
   /** v21.26.1: 0 = unlimited daily trades (1-session lock still enforced). */
   quotaUnlimited?: boolean;
-  /** v21.26.1: pro trader exit ladder (no trail before TP1). */
+  /** v21.26.1: pro trader exit ladder (post-TP1 locks; v21.31.0 adds pre-TP1 trail). */
   proExitPolicy?: boolean;
+  /** v21.31.0: pre-TP1 no-loss smart trail mode (enforce | shadow | off). */
+  preTp1Trail?: string;
   desks?: { india: boolean; crypto: boolean }; timeStopEnabled?: boolean;
   inrPerUsdt?: number; ccyMode?: string;
   executionMode?: 'paper' | 'live';
@@ -1294,6 +1296,8 @@ export interface MtfAutoStatus {
   deepMonitor?: {
     activeCount: number;
     trailingActiveCount: number;
+    /** v21.31.0 — rows whose pre-TP1 no-loss trail is armed. */
+    preTp1TrailArmedCount?: number;
     tp1LockedCount: number;
     reversalAlertCount: number;
     /** v21.25.0 — deep-monitor direction integrity (manual LIVE rows included). */
@@ -1359,6 +1363,33 @@ export interface MtfAutoStatus {
       originalQty?: number | null;
       qtyAfterTp1?: number | null;
       t1PartialBooked?: boolean;
+      /** v21.31.0 — pre-TP1 no-loss trail telemetry (null outside PRO pre-TP1). */
+      preTp1Trail?: {
+        mode: 'enforce' | 'shadow' | 'off' | string;
+        available: boolean;
+        active: boolean;
+        armed: boolean;
+        applied: boolean;
+        reason: string | null;
+        volClass: string;
+        momentumState?: string;
+        armR: number;
+        armPrice?: number | null;
+        peakR?: number;
+        feeFloor?: number | null;
+        feeR?: number | null;
+        bufferR: number;
+        givebackR?: number;
+        noLossSl?: number | null;
+        trailSl?: number | null;
+        proposedSl?: number | null;
+        wouldApplySl?: number | null;
+        lockedProfitR?: number;
+        trendPct?: number | null;
+        trendAdverse?: boolean;
+        trendTightened?: boolean;
+        ratchetOnly?: boolean;
+      } | null;
       peakPrice: number;
       currentR: number;
       peakR: number;
@@ -1416,6 +1447,8 @@ export interface MtfAutoStatus {
       lastTickAgeMs?: number | null; lastHandlerMs?: number | null;
       lastSource?: string | null; lastAction?: string | null; lastActionAt?: number | null;
       lastError?: string | null; subscribed?: boolean; armedAt?: number | null;
+      /** v21.31.0 — signed WS tick trend (+ = with trade). */
+      trendPct?: number; trendAdverse?: boolean; trendStrength?: number;
     }>;
     idle?: Array<{
       at: number; symbol: string; market: string; execMarket?: string;

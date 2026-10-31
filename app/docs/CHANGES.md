@@ -1,5 +1,30 @@
 # Changelog
 
+## v21.31.0 — PRE-TP1 NO-LOSS SMART SL TRAIL + LIVE TICK TREND (2026-10-31)
+
+**User ask: Auto Trade lagne par AI Agent activate ho; TP1 ka wait na karna pade; highest-volatility market me SL smartly trail ho; SL no-loss/only-profit basis par aage badhe; direction/trend realtime live market se fetch hota rahe.**
+
+Minor release. Koi profit guarantee nahi; leveraged futures liquidation aur gap risk real hai. Is release me koi real live order place nahi hua aur live server boot nahi kiya gaya. Naya behaviour flag ke peeche hai; direction certificate, 1-active-trade lock aur paper-first safety unchanged hain.
+
+### Pre-TP1 no-loss trail (`PRE_TP1_TRAIL=enforce|shadow|off`, default `enforce`)
+- New `server/ai/preTp1Trail.js`: pure, deterministic pre-TP1 stop proposal. `enforce` acts; `shadow` reports only; `off` restores exact v21.30.0 “no trail before TP1” behaviour.
+- Arm requires a **volatility-classed favourable excursion** (LOW 0.30R / NORMAL 0.38R / HIGH 0.50R / EXTREME 0.65R), raised further when the fee distance is large. Momentum scales the width (SURGING wider, FADING tighter).
+- Once armed, the floor is **exact round-trip fee-breakeven + volatility buffer** (LOW 0.06R / NORMAL 0.10R / HIGH 0.16R / EXTREME 0.22R). This is a net-profit floor, not raw entry.
+- Trail = favourable peak − volatility giveback (LOW 0.30R / NORMAL 0.42R / HIGH 0.60R / EXTREME 0.80R). The higher of the floor and the trail wins for LONG (mirror for SHORT).
+- **Ratchet-only:** the proposal can only improve the carried stop (higher LONG / lower SHORT). It never loosens, and it refuses any candidate at/through LTP (instant-fill guard). A stale quote (`allowMove:false`) computes telemetry but cannot move the stop.
+- **Live trend:** the super agent derives a signed trend from its rolling WebSocket tick samples and passes `trendPct` / `trendAdverse`. An adverse trend tightens the giveback (×0.65, floor 0.15R) and allows an earlier fee-covered defensive arm. A favourable trend is ignored — it never widens a locked stop.
+- Deep monitor now emits `STAGE_0B_PRE_TP1_TRAIL`, `preTp1Trail` telemetry, a ladder rung and `PRE_TP1_TRAIL_LOCKED|ARMED|SHADOW` next-action previews. `mtfAutoStatus` exposes the mode and armed count; the UI shows a mode/armed badge.
+- A trail hit above the fee floor books as `TRAILED_SL_PROFIT_BOOKED`; a gap through the trail below the fee floor is labelled `PRE_TP1_TRAIL_FEE_GAP_EXIT` instead of pretending the untouched initial SL was hit.
+- Before the arm threshold the **initial SL remains the protection** — “no loss” is only claimed after the fee-covered floor is armed.
+
+### Honest realtime latency
+- No 1ms market feed is fabricated. The hot path remains `liveFeed.subscribe` WebSocket ticks (same event-loop turn) with the existing 1s watchdog fallback. Actual latency is the upstream source’s (Binance perps sub-second; CoinDCX book ~1s). `pollingMs: 0` remains the honest contract.
+
+### Verification / safety notes
+- LIVE exchange SL/TP acceptance and read-back remain `[VERIFY-LIVE]` on a real small position; the book never claims an exchange stop it has not verified.
+- `PRE_TP1_TRAIL=shadow` records the would-be stop without moving it; `off` restores the old PRO lock.
+- Locks: new `test/preTp1NoLossTrailV21310.test.ts` (18); legacy PRO/V3 ladder tests pin `PRE_TP1_TRAIL=off` where they intentionally assert the old no-trail contract.
+
 ## v21.30.0 — SIGNAL TIMING + DIRECTION HARDENING, LIVE-ARM UX, PHASE-AWARE ORDER HYGIENE (2026-10-31)
 
 **User ask: site ka poora code deep-check karke late-reversal entries aur stated direction ke against jaane wale signals fix karo; site load hone par LIVE button arm na hone ka bug fix karo; S1–S11 plan accurately apply karo (safe order me). Direction certificate (LONG→BUY / SHORT→SELL), 1-active-trade lock aur paper-first safety preserve rahe.**
