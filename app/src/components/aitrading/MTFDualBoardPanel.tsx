@@ -371,6 +371,11 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   const deskKey: 'india' | 'crypto' = market === 'INDIA' ? 'india' : 'crypto';
   const deskReadiness = auto?.deskReady?.[deskKey] || null;
   const deskArmable = auto?.deskArmable?.[deskKey] || null;
+  // v21.30.0 [LIVE-ARM UX]: the LIVE click patches the money caps itself.
+  // Gate the click on the PREREQUISITES (desk on + kill switch off + creds,
+  // India typed-LIVE) so a caps-only block no longer aborts before the
+  // patch that fixes it. Older servers lack the field -> strict fallback.
+  const deskPrereq = auto?.prereqArmable?.[deskKey] || deskArmable;
   // v21.26.2 [LIVE-READY RECONCILE]: the legacy CoinDCX desk state
   // (`/api/ai/trading/state.blocked.notConnected`) only looks at the saved
   // mcp-coindcx.json file, while this engine resolves the SAME keys from .env
@@ -391,8 +396,8 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
   // typed-LIVE-only and GLOBALFUTURES stays PAPER-only.
   const cryptoClickArmable = deskKey === 'crypto'
     && market !== 'GLOBALFUTURES'
-    && deskArmable?.armable === true;
-  const canArmLive = (!auto?.deskArmable || deskArmable?.armable === true)
+    && deskPrereq?.armable === true;
+  const canArmLive = (!auto?.deskArmable || deskPrereq?.armable === true)
     && (liveExecEnabled || cryptoClickArmable);
   // v21.23.18 [STABLE LIVE + HONEST READINESS]:
   // Pehle isLiveAuto volatile `autoFresh` + `deskReadiness.ready` par depend
@@ -415,8 +420,8 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
             : null)
     : null;
   const liveBlockWhy = liveWarnWhy;
-  const armBlockWhy = !isLiveAuto && deskArmable?.armable === false
-    ? (deskArmable.why || 'LIVE prerequisites are not met')
+  const armBlockWhy = !isLiveAuto && deskPrereq?.armable === false
+    ? (deskPrereq.why || 'LIVE prerequisites are not met')
     : null;
   // v21.26.0 AI SUPER AGENT: this desk's live tick agents (WS hot path) and
   // their states. Purely display — the server agent remains the single owner.
@@ -596,7 +601,8 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       notify(false, `⏸ LIVE entries Phase 0 me PAUSED hain — pehle "RESUME ENTRIES" dabao. Existing positions ka SL management chalu hai.`);
       return;
     }
-    const arm = status?.deskArmable?.[deskKey];
+    const arm = status?.prereqArmable?.[deskKey] || status?.deskArmable?.[deskKey];
+    const capsOnlyBlock = status?.capsOnlyBlock?.[deskKey] === true;
     if (!liveExecEnabled) {
       if (market === 'GLOBALFUTURES') {
         notify(false, '⛔ GLOBALFUTURES SIM desk PAPER-only hai — LIVE execution available nahi. (LIVE button crypto/India desks ke liye hai.)');
@@ -613,11 +619,11 @@ export const MTFDualBoardPanel = memo(function MTFDualBoardPanel({ market, onDee
       // The click is the user's LIVE intent, but it arms REAL orders — keep
       // an explicit confirm (same safety class as RESUME ENTRIES).
       const ok = typeof window === 'undefined' || window.confirm(
-        `⚡ CRYPTO LIVE arm karein? REAL CoinDCX orders possible honge — ${walletDeployPct}% wallet (₹${deployed95WalletINR.toLocaleString('en-IN')}) @ ${activeLeverage}x, 1% risk/trade, 1 session = 1 trade. Server typed-LIVE + creds verify karega.`,
+        `⚡ CRYPTO LIVE arm karein? REAL CoinDCX orders possible honge — ${walletDeployPct}% wallet (₹${deployed95WalletINR.toLocaleString('en-IN')}) @ ${activeLeverage}x, 1% risk/trade, 1 session = 1 trade.${capsOnlyBlock ? ' Missing risk caps is click se apply honge.' : ''} Server typed-LIVE + creds verify karega.`,
       );
       if (!ok) return;
     }
-    if (status?.deskArmable && arm?.armable === false) {
+    if (arm && arm.armable === false) {
       notify(false, `⛔ LIVE arm blocked — ${arm.why || 'LIVE prerequisites are not met'}`);
       return;
     }

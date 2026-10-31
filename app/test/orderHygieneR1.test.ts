@@ -16,6 +16,7 @@ import {
 import {
   listFuturesOpenOrders, cancelFuturesOpenOrder, cancelFuturesOpenOrdersForPair,
   orderHygieneMode, runOrderHygieneForPair, executeMtfDualLiveOrder,
+  classifyOpenOrder, orderHygieneScope, confirmFuturesFlatForPair,
 } from '../server/ai/futures.js';
 
 beforeEach(() => { __resetTradeActionLogForTests(); });
@@ -167,6 +168,137 @@ describe('v21.29.0 R1 — order hygiene modes', () => {
     });
     expect(r.ok).toBe(true);
     expect(r.cancelled).toEqual(['o1']);
+  });
+});
+
+describe('v21.30.0 S1 — order classification + phase-aware hygiene', () => {
+  const prevMode = process.env.FUTURES_ORDER_HYGIENE;
+  const prevScope = process.env.FUTURES_HYGIENE_SCOPE;
+  afterEach(() => {
+    if (prevMode === undefined) delete process.env.FUTURES_ORDER_HYGIENE;
+    else process.env.FUTURES_ORDER_HYGIENE = prevMode;
+    if (prevScope === undefined) delete process.env.FUTURES_HYGIENE_SCOPE;
+    else process.env.FUTURES_HYGIENE_SCOPE = prevScope;
+  });
+
+  const mixedOrders = () => ([
+    { id: 'e1', pair: 'B-BTC_USDT', type: 'LIMIT', limit_price: 100 },
+    { id: 'p1', pair: 'B-BTC_USDT', type: 'STOP_MARKET' },
+    { id: 'p2', pair: 'B-BTC_USDT', type: 'TAKE_PROFIT_MARKET' },
+    { id: 'p3', pair: 'B-BTC_USDT', type: 'LIMIT', reduce_only: true },
+    { id: 'u1', pair: 'B-BTC_USDT', type: 'SOMETHING_NEW' },
+  ]);
+
+  it('classifies entry / protective / unknown without guessing', () => {
+    expect(classifyOpenOrder({ type: 'LIMIT' })).toBe('ENTRY');
+    expect(classifyOpenOrder({ type: 'MARKET' })).toBe('ENTRY');
+    expect(classifyOpenOrder({})).toBe('ENTRY'); // legacy R1 row
+    expect(classifyOpenOrder({ type: 'STOP_MARKET' })).toBe('PROTECTIVE');
+    expect(classifyOpenOrder({ type: 'TAKE_PROFIT_MARKET' })).toBe('PROTECTIVE');
+    expect(classifyOpenOrder({ type: 'LIMIT', raw: { stop_price: '95' } })).toBe('PROTECTIVE');
+    expect(classifyOpenOrder({ type: 'LIMIT', raw: { reduce_only: true } })).toBe('PROTECTIVE');
+    expect(classifyOpenOrder({ type: 'SOMETHING_NEW' })).toBe('UNKNOWN');
+  });
+
+  it('scope defaults to entry-only and parses all', () => {
+    delete process.env.FUTURES_HYGIENE_SCOPE;
+    expect(orderHygieneScope()).toBe('entry-only');
+    process.env.FUTURES_HYGIENE_SCOPE = 'ALL';
+    expect(orderHygieneScope()).toBe('all');
+  });
+
+  it('pre-close cancels ENTRY only; PROTECTIVE + UNKNOWN stay', async () => {
+    process.env.FUTURES_ORDER_HYGIENE = 'on';
+    delete process.env.FUTURES_HYGIENE_SCOPE;
+    const cancelled: string[] = [];
+    const r = await runOrderHygieneForPair({
+      pair: 'B-BTC_USDT', phase: 'pre-close',
+      deps: {
+        listOpenOrders: async () => ({ ok: true, orders: mixedOrders() }),
+        cancelOpenOrder: async ({ orderId }) => { cancelled.push(orderId); return { ok: true, orderId }; },
+      },
+    });
+    expect(r.ok).toBe(true);
+    expect(r.cancelled).toEqual(['e1']);
+    expect(cancelled).toEqual(['e1']);
+    expect(r.kept.map((k: any) => k.orderId).sort()).toEqual(['p1', 'p2', 'p3', 'u1']);
+    expect(r.classified).toMatchObject({ ENTRY: 1, PROTECTIVE: 3, UNKNOWN: 1 });
+  });
+
+  it('post-flat cancels ENTRY + PROTECTIVE; UNKNOWN is never auto-cancelled', async () => {
+    process.env.FUTURES_ORDER_HYGIENE = 'on';
+    const cancelled: string[] = [];
+    const r = await runOrderHygieneForPair({
+      pair: 'B-BTC_USDT', phase: 'post-flat',
+      deps: {
+        listOpenOrders: async () => ({ ok: true, orders: mixedOrders() }),
+        cancelOpenOrder: async ({ orderId }) => { cancelled.push(orderId); return { ok: true, orderId }; },
+      },
+    });
+    expect(r.ok).toBe(true);
+    expect(cancelled.sort()).toEqual(['e1', 'p1', 'p2', 'p3']);
+    expect(r.kept).toEqual([{ orderId: 'u1', class: 'UNKNOWN' }]);
+  });
+
+  it('scope=all widens pre-close, but rearm stays ENTRY-only', async () => {
+    process.env.FUTURES_ORDER_HYGIENE = 'on';
+    const wide: string[] = [];
+    await runOrderHygieneForPair({
+      pair: 'B-BTC_USDT', phase: 'pre-close', scope: 'all',
+      deps: {
+        listOpenOrders: async () => ({ ok: true, orders: mixedOrders() }),
+        cancelOpenOrder: async ({ orderId }) => { wide.push(orderId); return { ok: true, orderId }; },
+      },
+    });
+    expect(wide.sort()).toEqual(['e1', 'p1', 'p2', 'p3']);
+
+    const rearm: string[] = [];
+    await runOrderHygieneForPair({
+      pair: 'B-BTC_USDT', phase: 'rearm', scope: 'all',
+      deps: {
+        listOpenOrders: async () => ({ ok: true, orders: mixedOrders() }),
+        cancelOpenOrder: async ({ orderId }) => { rearm.push(orderId); return { ok: true, orderId }; },
+      },
+    });
+    expect(rearm).toEqual(['e1']);
+  });
+
+  it('shadow reports the phase-filtered wouldCancel list without cancelling', async () => {
+    process.env.FUTURES_ORDER_HYGIENE = 'shadow';
+    const cancelOpenOrder = vi.fn();
+    const r = await runOrderHygieneForPair({
+      pair: 'B-BTC_USDT', phase: 'post-flat',
+      deps: { listOpenOrders: async () => ({ ok: true, orders: mixedOrders() }), cancelOpenOrder },
+    });
+    expect(r.shadow).toBe(true);
+    expect(r.wouldCancel.sort()).toEqual(['e1', 'p1', 'p2', 'p3']);
+    expect(cancelOpenOrder).not.toHaveBeenCalled();
+  });
+
+  it('flat confirmation is true only on a successful read with no active row', async () => {
+    const flat = await confirmFuturesFlatForPair('B-BTC_USDT', {
+      deps: {
+        listPositions: async () => [
+          { pair: 'B-ETH_USDT', activePos: 2 },
+          { pair: 'B-BTC_USDT', activePos: 0 },
+        ],
+      },
+    });
+    expect(flat).toEqual({ flat: true, pair: 'B-BTC_USDT' });
+
+    const active = await confirmFuturesFlatForPair('B-BTC_USDT', {
+      deps: { listPositions: async () => [{ pair: 'B-BTC_USDT', activePos: -1.5 }] },
+    });
+    expect(active.flat).toBe(false);
+    expect(active.activePos).toBe(-1.5);
+
+    const unknown = await confirmFuturesFlatForPair('B-BTC_USDT', {
+      deps: { listPositions: async () => { throw new Error('positions unreachable'); } },
+    });
+    expect(unknown.flat).toBeNull();
+    expect(unknown.reason).toMatch(/unreachable/);
+
+    expect((await confirmFuturesFlatForPair('', { deps: {} })).flat).toBeNull();
   });
 });
 

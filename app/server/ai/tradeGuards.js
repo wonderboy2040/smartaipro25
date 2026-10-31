@@ -22,6 +22,7 @@
 // decision backed by data, not a guess.
 // ============================================================
 import { normalizeSide } from './directionCertificate.js';
+import { classifyRowRegime } from './mtfRegime.js';
 
 export const GUARD_MODES = Object.freeze(['off', 'shadow', 'enforce']);
 
@@ -120,7 +121,7 @@ export function evaluateClusterGuard({
 // ------------------------------------------------------------
 // R5 — regime filter
 // ------------------------------------------------------------
-export const REGIMES = Object.freeze(['TREND_UP', 'TREND_DOWN', 'CHOP', 'HIGH_VOL', 'UNKNOWN']);
+export const REGIMES = Object.freeze(['TREND_UP', 'TREND_DOWN', 'CHOP', 'HIGH_VOL', 'SQUEEZE', 'TRANSITION', 'UNKNOWN']);
 
 export function regimeOf(row = {}) {
   const explicit = String(row.regime?.label ?? row.regime ?? row.context?.regime ?? '').trim().toUpperCase();
@@ -129,8 +130,14 @@ export function regimeOf(row = {}) {
     BEAR: 'TREND_DOWN', BEARISH: 'TREND_DOWN', DOWNTREND: 'TREND_DOWN', TREND_DOWN: 'TREND_DOWN',
     RANGE: 'CHOP', RANGING: 'CHOP', SIDEWAYS: 'CHOP', CHOP: 'CHOP', CHOPPY: 'CHOP',
     VOLATILE: 'HIGH_VOL', HIGH_VOL: 'HIGH_VOL', HIGHVOL: 'HIGH_VOL', EXPANSION: 'HIGH_VOL',
+    SQUEEZE: 'SQUEEZE', COMPRESSION: 'SQUEEZE', COILED: 'SQUEEZE',
+    TRANSITION: 'TRANSITION', MIXED: 'TRANSITION', UNSTABLE: 'TRANSITION',
   };
   if (aliases[explicit]) return aliases[explicit];
+  // v21.30.0 [S5]: pure ADX/ATR/squeeze classifier before the legacy
+  // dir/atr fallbacks. It returns UNKNOWN only when there is no evidence.
+  const classified = classifyRowRegime(row);
+  if (classified !== 'UNKNOWN') return classified;
   const dir = Number(row.context?.dir ?? row.dir ?? row.triggerDir);
   if (Number.isFinite(dir) && dir !== 0) return dir > 0 ? 'TREND_UP' : 'TREND_DOWN';
   const atrPct = Number(row.context?.atrPct ?? row.atrPct);

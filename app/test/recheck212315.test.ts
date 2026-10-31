@@ -144,7 +144,7 @@ describe('v21.23.15 recheck — India live lifecycle', () => {
 
   it('UI arm guard + stale-status green-off + India label', () => {
     const ui = read('src/components/aitrading/MTFDualBoardPanel.tsx');
-    expect(ui).toContain('deskArmable?.armable === false');
+    expect(ui).toContain('deskPrereq?.armable === false');
     expect(ui).toContain('!autoFresh');
     expect(ui).toContain('LIVE DHAN');
     expect(ui).toContain('hydratedRef');

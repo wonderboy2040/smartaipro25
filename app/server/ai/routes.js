@@ -225,7 +225,7 @@ import { isNseOpen, fetchYahooQuotes, fetchTVIndiaBatch } from './data.js';
 import { getDualMtfBoard, buildDualRow, dualAutoCandidates, mtfProEntryGate, peekDualMtfBoards, TOP_DEEP_TREND_LIMIT } from './mtfDualBoard.js';
 import { mtfAutoTick, mtfAutoStatus, mtfAutoRiskArmState, loadMtfAutoConfig, updateMtfAutoConfig, setMtfAutoEnabled, mtfAutoEnabled, MTF_AUTO_TICK_SEC, normalizeLinkSymbol, recordLiveMtfBoardTrade, recordPaperMtfBoardTrade, getActiveAutoTradesDeepMonitor, syncCoinDcxActivePositionsToDeepMonitor, isLiveAttemptBackoffActive, mtfAutoOpenCount, mtfAutoOpenRows, markAutoTradeTpSynced, markAutoTradeSlSynced, markAutoTradeSlRetry, getAutoTradeSuperAgentOpenTrades, getAutoTradeSuperAgentCloseReason } from './mtfAutoLink.js';
 // v21.29.0 [R2 RISK ARM] — arm blockers / typed override / SAFE preset.
-import { RISK_ACK_PHRASE, evaluateLiveArmRisk, evaluateLiveArmConfigPatch } from './riskArm.js';
+import { RISK_ACK_PHRASE, evaluateLiveArmRisk, evaluateLiveArmConfigPatch, describeDeskArmState } from './riskArm.js';
 // v21.26.0 AI SUPER INTELLIGENCE — per-trade tick agent. Owns only routing /
 // registry / stream holds; every trade decision is mtfAutoLink's
 // mtfAutoSuperAgentManage (same gates as the 15s/60s sweeps).
@@ -1584,11 +1584,12 @@ export function registerAITradingRoutes(app, deps) {
       india: Boolean(desks.india && !killSwitch && tcfg.indiaMode === 'live'),
     };
     const siteLiveActive = siteLiveByDesk.crypto || siteLiveByDesk.india;
-    const cryptoWhy = !desks.crypto ? 'Crypto desk is OFF in Auto Trade config'
+    const cryptoPrereqWhy = !desks.crypto ? 'Crypto desk is OFF in Auto Trade config'
       : killSwitch ? 'Global kill switch is ON — trading disabled'
       : !hasCreds ? 'CoinDCX API keys not connected — add COINDCX_API_KEY + COINDCX_SECRET in .env or connect in Portfolio tab'
-      : tcfg.mode !== 'live' ? 'Crypto site live is not armed — arm crypto LIVE (or click LIVE here)'
       : null;
+    const cryptoWhy = cryptoPrereqWhy
+      || (tcfg.mode !== 'live' ? 'Crypto site live is not armed — arm crypto LIVE (or click LIVE here)' : null);
     const indiaWhy = !desks.india ? 'India desk is OFF in Auto Trade config'
       : killSwitch ? 'Global kill switch is ON — trading disabled'
       : tcfg.indiaMode !== 'live' ? 'India LIVE mode is not armed — type LIVE in the India console first (separate from crypto)'
@@ -1597,6 +1598,21 @@ export function registerAITradingRoutes(app, deps) {
     // The preset is returned for the UI to DISPLAY; this route never writes it.
     const riskArm = evaluateLiveArmRisk(cfg || {});
     const riskWhy = riskArm.ok ? null : (riskArm.blockers[0] || 'LIVE risk caps missing');
+    // v21.30.0 [LIVE-ARM UX] — the explicit LIVE click patches the caps
+    // itself, so expose the prerequisites separately from the caps-only
+    // block. `deskArmable` keeps its strict (caps included) meaning.
+    const cryptoArm = describeDeskArmState({
+      cfg: cfg || {},
+      prereqOk: !killSwitch && desks.crypto && hasCreds,
+      prereqWhy: cryptoPrereqWhy,
+      riskArm,
+    });
+    const indiaArm = describeDeskArmState({
+      cfg: cfg || {},
+      prereqOk: !killSwitch && desks.india && tcfg.indiaMode === 'live',
+      prereqWhy: indiaWhy,
+      riskArm: { ok: true, missing: [], blockers: [] },
+    });
     return {
       tcfg,
       hasCreds,
@@ -1605,13 +1621,30 @@ export function registerAITradingRoutes(app, deps) {
       siteLiveByDesk,
       siteLiveActive,
       riskArm,
+      riskCapsMissing: riskArm.missing,
+      prereqArmable: {
+        crypto: { armable: cryptoArm.prereqArmable, why: cryptoArm.prereqArmable ? null : cryptoArm.why },
+        india: { armable: indiaArm.prereqArmable, why: indiaArm.prereqArmable ? null : indiaArm.why },
+      },
+      armableWithCaps: {
+        crypto: cryptoArm.armableWithCaps,
+        india: indiaArm.armable,
+      },
+      needsRiskCaps: {
+        crypto: cryptoArm.needsRiskCaps,
+        india: false,
+      },
+      capsOnlyBlock: {
+        crypto: cryptoArm.capsOnlyBlock,
+        india: false,
+      },
       deskReady: {
         crypto: { ready: hasCreds && siteLiveByDesk.crypto && riskArm.ok, why: cryptoWhy || riskWhy },
         india: { ready: siteLiveByDesk.india, why: indiaWhy },
       },
       deskArmable: {
-        crypto: { armable: !killSwitch && desks.crypto && hasCreds && riskArm.ok, why: cryptoWhy || riskWhy },
-        india: { armable: !killSwitch && desks.india && tcfg.indiaMode === 'live', why: indiaWhy },
+        crypto: { armable: cryptoArm.armable, why: cryptoArm.why },
+        india: { armable: indiaArm.armable, why: indiaArm.why },
       },
     };
   };
@@ -1936,6 +1969,11 @@ export function registerAITradingRoutes(app, deps) {
         deskArmable: ready.deskArmable,
         killSwitch: ready.killSwitch,
         riskArm: ready.riskArm,
+        riskCapsMissing: ready.riskCapsMissing,
+        prereqArmable: ready.prereqArmable,
+        armableWithCaps: ready.armableWithCaps,
+        needsRiskCaps: ready.needsRiskCaps,
+        capsOnlyBlock: ready.capsOnlyBlock,
         coindcxConnected: ready.hasCreds,
         // v21.26.0: dedicated per-trade tick agent health + live states
         // (ARMED / MONITORING / TP1_SECURED / FLIPPED / PAUSED / IDLE).
@@ -2003,6 +2041,11 @@ export function registerAITradingRoutes(app, deps) {
         killSwitch: ready.killSwitch,
         // v21.29.0 [R2] — post-save arm state (never auto-applies the preset).
         riskArm: ready.riskArm,
+        riskCapsMissing: ready.riskCapsMissing,
+        prereqArmable: ready.prereqArmable,
+        armableWithCaps: ready.armableWithCaps,
+        needsRiskCaps: ready.needsRiskCaps,
+        capsOnlyBlock: ready.capsOnlyBlock,
       });
     } catch (e) {
       jsonError(res, 400, 'mtf auto config failed', e);
@@ -2055,6 +2098,11 @@ export function registerAITradingRoutes(app, deps) {
         deskArmable: ready.deskArmable,
         killSwitch: ready.killSwitch,
         riskArm: ready.riskArm,
+        riskCapsMissing: ready.riskCapsMissing,
+        prereqArmable: ready.prereqArmable,
+        armableWithCaps: ready.armableWithCaps,
+        needsRiskCaps: ready.needsRiskCaps,
+        capsOnlyBlock: ready.capsOnlyBlock,
       });
     } catch (e) {
       jsonError(res, 400, 'mtf auto toggle failed', e);

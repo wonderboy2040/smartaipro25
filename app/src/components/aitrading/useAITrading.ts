@@ -1247,6 +1247,19 @@ export interface MtfAutoStatus {
     crypto?: { armable: boolean; why: string | null };
     india?: { armable: boolean; why: string | null };
   };
+  /**
+   * v21.30.0: prerequisites WITHOUT the money caps. The explicit LIVE click
+   * applies the caps itself, so it must gate on this + `armableWithCaps`,
+   * never on `deskArmable` (which stays strict).
+   */
+  prereqArmable?: {
+    crypto?: { armable: boolean; why: string | null };
+    india?: { armable: boolean; why: string | null };
+  };
+  armableWithCaps?: { crypto?: boolean; india?: boolean };
+  needsRiskCaps?: { crypto?: boolean; india?: boolean };
+  capsOnlyBlock?: { crypto?: boolean; india?: boolean };
+  riskCapsMissing?: Array<{ key: string; label?: string; min?: number; value?: unknown; hint?: string }>;
   killSwitch?: boolean;
   coindcxConnected?: boolean;
   /** Phase-3 persistence provenance (status endpoint). */

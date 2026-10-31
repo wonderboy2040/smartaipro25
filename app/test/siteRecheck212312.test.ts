@@ -258,7 +258,7 @@ describe('v21.23.12 S11 — cert pass-semantics honesty (all-UNREACHABLE ≠ PAS
   it('payload shape: verifiedChains/unverifiedChains/wireAbsorb fields + current stamp', async () => {
     const r = await runLiveDirectionCertificate();
     // v21.27.2 honest pin bump: cert ab release version ke saath stamped hai.
-    expect(r.version).toBe('v21.29.1');
+    expect(r.version).toBe('v21.30.0');
     expect(typeof r.verifiedChains).toBe('number');
     expect(typeof r.unverifiedChains).toBe('number');
     expect(Array.isArray(r.wireAbsorb)).toBe(true);
@@ -523,7 +523,7 @@ describe('v21.23.12 S23 — /api/chart ms-unit + watchdog stamps + NaN-vote filt
   it('watchdog bat teeno stamps current version (REM + title + banner)', () => {
     const bat = read('Start-SmartAI-Watchdog.bat');
     // v21.27.2 honest pin bump: bat ab v21.27.2 stamped hai.
-    expect(bat).toContain('v21.29.1');
+    expect(bat).toContain('v21.30.0');
     expect(bat).not.toContain('v21.23.12');
     expect(bat).not.toContain('v21.23.11');
     expect(bat).not.toContain('v21.23.10');

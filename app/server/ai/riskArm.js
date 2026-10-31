@@ -84,6 +84,38 @@ export function evaluateLiveArmRisk(cfg = {}, { acknowledged = false, phrase = '
 }
 
 /**
+ * v21.30.0 [LIVE-ARM UX] — separate "can this desk ever arm?" from "are the
+ * money caps missing?". The UI's explicit LIVE click sends the four caps in
+ * the same config PATCH, so a caps-only block must not abort that click
+ * before the patch is sent (the old bug: `deskArmable.crypto.armable`
+ * included `riskArm.ok`, so the button refused to run the very request
+ * that would make it armable).
+ *
+ * `armable` keeps the old strict meaning (prerequisites AND caps present).
+ * `armableWithCaps` is true when the caller's patch supplies the caps.
+ * `capsOnlyBlock` is true only when nothing else blocks. `why` stays the
+ * actionable reason for the strict state.
+ */
+export function describeDeskArmState({
+  cfg = {}, prereqOk = false, prereqWhy = null, riskArm = null,
+} = {}) {
+  const ra = riskArm || evaluateLiveArmRisk(cfg);
+  const capsMissing = ra?.ok !== true;
+  const ok = prereqOk === true;
+  return {
+    armable: ok && !capsMissing,
+    prereqArmable: ok,
+    armableWithCaps: ok,
+    needsRiskCaps: capsMissing,
+    capsOnlyBlock: ok && capsMissing,
+    riskCapsMissing: Array.isArray(ra?.missing) ? ra.missing : [],
+    why: !ok
+      ? (prereqWhy || 'LIVE prerequisites are not met')
+      : (capsMissing ? (ra?.blockers?.[0] || 'LIVE risk caps missing') : null),
+  };
+}
+
+/**
  * Validate a config PATCH before it is persisted. Pure: the route uses the
  * verdict, this module never writes config.
  *   • a malformed typed acknowledgement is rejected outright

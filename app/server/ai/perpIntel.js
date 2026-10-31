@@ -83,8 +83,14 @@ export async function getPerpIntel(base) {
       };
     }
     const markPrice = num(prem.value?.markPrice);
+    const indexPrice = num(prem.value?.indexPrice);
     const fundingRate8h = num(prem.value?.lastFundingRate);
     const fundingBps8h = fundingRate8h != null ? r2(fundingRate8h * 10_000) : null;
+    // v21.30.0 [S4 BASIS]: perp premium over index. Missing index/f mark →
+    // null (honest), never a fabricated 0.
+    const basisPct = markPrice != null && indexPrice != null && indexPrice > 0
+      ? r2(((markPrice - indexPrice) / indexPrice) * 100)
+      : null;
 
     // open interest (current, contracts)
     const openInterest = oi.status === 'fulfilled' ? num(oi.value?.openInterest) : null;
@@ -135,6 +141,7 @@ export async function getPerpIntel(base) {
     const intel = {
       ok: true, base: String(base).toUpperCase(), pair, at: Date.now(),
       markPrice, fundingRate8h, fundingBps8h, nextFundingTs: num(prem.value?.nextFundingTime) || null,
+      indexPrice, basisPct,
       openInterest, oiValueUSDT, oi24hAgo, oiChangePct24h, price24hAgo, change24hPct,
       topLongShortRatio, topLongShortDelta24h, takerRatio24h, takerNow,
       sources: {
@@ -243,6 +250,8 @@ export function perpIntelWire(intel) {
   return {
     pair: i.pair,
     markPrice: i.markPrice ?? null,
+    indexPrice: i.indexPrice ?? null,
+    basisPct: i.basisPct ?? null,
     fundingBps8h: i.fundingBps8h ?? null,
     nextFundingTs: i.nextFundingTs ?? null,
     openInterest: i.openInterest ?? null,
@@ -269,10 +278,35 @@ export function perpIntelWire(intel) {
  * @returns {Promise<Map<string, object>>} base → intel record
  */
 export async function getPerpIntelFor(bases, deadlineMs) {
-  void deadlineMs; // accepted for signature compat; per-call timeouts bound the batch
   const list = (Array.isArray(bases) ? bases : []).map(String).filter(Boolean).slice(0, 40);
-  const entries = await Promise.allSettled(list.map(b => getPerpIntel(b)));
+  const batch = Promise.allSettled(list.map(b => getPerpIntel(b)));
+  const limit = Number(deadlineMs);
+  let entries = null;
+  if (Number.isFinite(limit) && limit > 0) {
+    // v21.30.0 [S4 HARD DEADLINE]: the caller gets an answer within the
+    // budget. In-flight fetches keep running and land in `_cache` for the
+    // next tick; this branch returns only already-cached values.
+    let timer = null;
+    entries = await Promise.race([
+      batch,
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve(null), limit);
+        timer.unref?.();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+  } else {
+    entries = await batch;
+  }
   const out = new Map();
+  if (!entries) {
+    for (const b of list) {
+      const pair = `${String(b).toUpperCase().replace(/[^A-Z0-9]/g, '')}USDT`;
+      const hit = _cache.get(pair);
+      if (hit && Date.now() - hit.at < CACHE_TTL_MS) out.set(String(b).toUpperCase(), hit.val);
+    }
+    return out;
+  }
   list.forEach((b, idx) => {
     const r = entries[idx];
     if (r?.status === 'fulfilled' && r.value) out.set(String(b).toUpperCase(), r.value);

@@ -93,6 +93,8 @@ import {
 } from './tradeGuards.js';
 // v21.29.0 [R11 VALIDATION HARNESS] — shadow evidence + acceptance gates.
 import { recordShadowDecision, shadowHarnessView } from './shadowHarness.js';
+import { evaluateEntryTiming } from './mtfEntryTiming.js';
+import { getPerpIntelFor, perpIntelEnabled } from './perpIntel.js';
 import { eventGuardCheck } from './eventGuard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -167,6 +169,10 @@ export const MTF_AUTO_DEFAULTS = {
   proExitPolicy: true,
   // v21.28.0 F1: closed-bar stability auto/manual gate (default OFF = shadow).
   closedBarConfirm: false,
+  // v21.30.0 [SIGNAL TIMING + DIRECTION]: fail-open entry-timing guard.
+  // `enforce` (default) blocks clear late/reversal/direction-disagreement
+  // entries; `shadow` records only; `off` disables. Env: ENTRY_TIMING_GUARD.
+  entryTimingGuard: 'enforce',
   // v21.28.0 F2: LIVE TP1 partial parity with the paper engine. Default OFF
   // until CoinDCX reduce-only/partial behavior is verified on a small position.
   liveTp1Partial: false,
@@ -417,6 +423,8 @@ function _sanitizeCfg(cfg) {
   //     baad hi enable karna — [VERIFY-LIVE]).
   out.closedBarConfirm = cfg.closedBarConfirm === true;
   out.liveTp1Partial = cfg.liveTp1Partial === true;
+  // v21.30.0: timing guard default enforce (this is the late-reversal fix).
+  out.entryTimingGuard = normalizeGuardMode(cfg.entryTimingGuard, 'enforce');
   // v21.29.0 [R3–R9] mode allowlist. Unknown/legacy values never silently
   // become enforce — each falls back to its documented default.
   out.reversalGuardV2 = normalizeGuardMode(cfg.reversalGuardV2, 'shadow');
@@ -572,6 +580,7 @@ export function mtfAutoGuardTelemetry(cfg = loadMtfAutoConfig()) {
       scoreCalibration: scoreCalibrationMode(),
       runnerAfterTp2: runnerAfterTp2Mode(),
       stallExit: stallExitMode(),
+      entryTimingGuard: entryTimingGuardMode(),
       exitPolicyV3: exitPolicyV3Mode(),
       tp1ConfirmFallback: tp1ConfirmFallbackMode(),
     },
@@ -813,6 +822,7 @@ export function clusterGuardMode() { return _guardMode('clusterGuard', 'CLUSTER_
 export function scoreCalibrationMode() { return _guardMode('scoreCalibration', 'SCORE_CALIBRATION', 'off'); }
 export function runnerAfterTp2Mode() { return _guardMode('runnerAfterTp2', 'RUNNER_AFTER_TP2', 'off'); }
 export function stallExitMode() { return _guardMode('stallExit', 'STALL_EXIT', 'off'); }
+export function entryTimingGuardMode() { return _guardMode('entryTimingGuard', 'ENTRY_TIMING_GUARD', 'enforce'); }
 
 /** Pure TP1 close-confirmation check. `closedCandles` MUST contain only closed
  *  bars (caller drops the forming bar). Returns null when there is no usable
@@ -3538,6 +3548,29 @@ export async function mtfAutoTick(p = {}) {
       continue;
     }
 
+    // v21.30.0 [S4 PERP COVERAGE]: enrich crypto/FUTURES candidates with
+    // funding / top-trader L/S / basis BEFORE the guard ladder. The batch has
+    // a hard 1.5s deadline; missing data is reported, never fabricated. The
+    // guard reads `row.fundingBps8h` etc., which board rows did not populate.
+    const perpBases = [...new Set(eligible
+      .filter(r => {
+        if (market === 'INDIA') return false;
+        return String(r.market || '').toUpperCase() !== 'GLOBALFUTURES';
+      })
+      .map(r => normalizeLinkSymbol(r.symbol, market))
+      .filter(Boolean))].slice(0, 24);
+    let perpIntelMap = p.perpIntel instanceof Map ? p.perpIntel : null;
+    if (!perpIntelMap && perpBases.length > 0 && perpIntelEnabled()) {
+      perpIntelMap = await getPerpIntelFor(perpBases, 1500).catch(() => new Map());
+    }
+    out.perpCoverage = {
+      candidates: perpBases.length,
+      enriched: 0,
+      unavailable: 0,
+      requested: Boolean(perpIntelMap),
+      byField: { funding: 0, positioning: 0, basis: 0 },
+    };
+
     let openedThisDesk = 0;
     for (const row of eligible) { // v21.22.0: strictly 1 trade at a time per session — never open 2 trades simultaneously!
       if (openedThisDesk >= 1 || out.opened.length >= 1) break;
@@ -3545,6 +3578,43 @@ export async function mtfAutoTick(p = {}) {
       if (sessionOpen().length >= effectiveMaxOpenPositions) break;
       const sym = normalizeLinkSymbol(row.symbol, market);
       if (!sym || openSymbols.has(sym)) { out.skipped.push(`${sym}: already open`); continue; }
+      // v21.30.0 [S4 PERP ENRICHMENT] — add the missing positioning fields
+      // without mutating the cached board row. `dataStatus` makes coverage
+      // explicit so a shadow veto can be distinguished from missing data.
+      const rowDesk = String(row.market || '').toUpperCase();
+      const isPerpRow = market !== 'INDIA' && rowDesk !== 'GLOBALFUTURES';
+      const perpIntel = isPerpRow && perpIntelMap ? perpIntelMap.get(String(sym).toUpperCase()) : null;
+      const perpOk = perpIntel?.ok === true;
+      if (isPerpRow && perpIntelMap) {
+        if (perpOk) out.perpCoverage.enriched += 1;
+        else out.perpCoverage.unavailable += 1;
+      }
+      if (perpOk) {
+        if (perpIntel.fundingBps8h != null) out.perpCoverage.byField.funding += 1;
+        if (perpIntel.topLongShortRatio != null) out.perpCoverage.byField.positioning += 1;
+        if (perpIntel.basisPct != null) out.perpCoverage.byField.basis += 1;
+      }
+      const guardRow = {
+        ...row,
+        ...(perpOk ? {
+          fundingBps8h: perpIntel.fundingBps8h ?? null,
+          longShortRatio: perpIntel.topLongShortRatio ?? null,
+          basisPct: perpIntel.basisPct ?? null,
+          perpIntelAt: perpIntel.at ?? null,
+          dataStatus: {
+            ...(row.dataStatus && typeof row.dataStatus === 'object' ? row.dataStatus : {}),
+            perp: 'ok',
+            funding: perpIntel.fundingBps8h != null ? 'ok' : 'missing',
+            positioning: perpIntel.topLongShortRatio != null ? 'ok' : 'missing',
+            basis: perpIntel.basisPct != null ? 'ok' : 'missing',
+          },
+        } : {
+          dataStatus: {
+            ...(row.dataStatus && typeof row.dataStatus === 'object' ? row.dataStatus : {}),
+            perp: isPerpRow ? (perpIntelMap ? 'unavailable' : 'not-requested') : 'not-applicable',
+          },
+        }),
+      };
       const dirLock = checkDirectionLock(sym, row.side, { now });
       if (dirLock && !dirLock.allowed) {
         out.skipped.push(`${sym}: ${dirLock.reason}`);
@@ -3564,9 +3634,48 @@ export async function mtfAutoTick(p = {}) {
         ? 'INDIA'
         : (String(row.market || '').toUpperCase() === 'GLOBALFUTURES' ? 'GLOBALFUTURES' : 'FUTURES');
       const guardState = _loadState();
+      // ---------- v21.30.0 [SIGNAL TIMING + DIRECTION] ----------
+      // The board row is a snapshot; price may have already reversed or run
+      // past the entry. Block only clear contradictions (fail-open on missing
+      // data). This runs BEFORE the R3-R9 guards so a stale/reversal signal
+      // never even reaches the sizing stage.
+      const timingMode = entryTimingGuardMode();
+      const timingQuote = (() => {
+        if (market === 'CRYPTO' && p.usdtQuotes) {
+          const q = p.usdtQuotes instanceof Map ? p.usdtQuotes.get(sym) : p.usdtQuotes[sym];
+          if (Number(q) > 0) return Number(q);
+        }
+        const qObj = p.quotes?.[`${String(row.market || '').toUpperCase()}|${sym}`] ?? p.quotes?.[sym];
+        const qPrice = typeof qObj === 'object' ? Number(qObj?.price ?? qObj?.ltp) : Number(qObj);
+        if (Number(qPrice) > 0) return qPrice;
+        return Number(row.ltp) > 0 ? Number(row.ltp) : null;
+      })();
+      const timingEval = evaluateEntryTiming({
+        row, side: row.side, livePrice: timingQuote, now,
+      });
+      if (timingMode !== 'off' && timingEval.ok !== true) {
+        for (const reason of timingEval.blockers) {
+          recordShadowDecision(guardState.shadowStats, {
+            filter: 'entryTiming', mode: timingMode, wouldBlock: true,
+            reason, symbol: sym, market: guardDesk, at: now,
+          });
+        }
+        if (timingMode === 'shadow') {
+          out.shadow.push({
+            symbol: sym, market: guardDesk,
+            warnings: timingEval.blockers.map(reason => ({ filter: 'entryTiming', mode: timingMode, wouldBlock: true, reason })),
+          });
+          _logEvent('entry-timing-shadow', `${sym}: would-block — ${timingEval.blockers.join(' | ')}`);
+        } else {
+          const why = timingEval.blockers.join(' | ');
+          out.skipped.push(`${sym}: entry timing blocked — ${why}`);
+          _logEvent('entry-timing-block', `${sym}: ${why}`);
+          continue;
+        }
+      }
       const guardEval = evaluateEntryGuards({
         cfg,
-        row: { ...row, execMarket: guardDesk },
+        row: { ...guardRow, execMarket: guardDesk },
         openRows: _openLinked(),
         closedRows: guardState.book,
         now,
@@ -3614,19 +3723,19 @@ export async function mtfAutoTick(p = {}) {
         const q = p.usdtQuotes instanceof Map ? p.usdtQuotes.get(sym) : p.usdtQuotes[sym];
         if (!(Number(q) > 0)) { out.skipped.push(`${sym}: no live USDT perp quote (feed coverage)`); continue; }
         // Real-time Pre-Execution Anti-Reversal & Anti-Chase Guard:
-        // 1) If live price has already moved >= 25% of risk distance against signal (toward SL), block entry!
-        // 2) If live price has already run >= 55% of risk distance past entry (late chase after wave), block entry!
+        // 1) If live price has already moved >= 15% of risk distance against signal (toward SL), block entry!
+        // 2) If live price has already run >= 35% of risk distance past entry (late chase after wave), block entry!
         const livePx = Number(q);
         const adverseTick = row.side === 'LONG'
-          ? (livePx < entry - 0.25 * riskPerUnit)
-          : (livePx > entry + 0.25 * riskPerUnit);
+          ? (livePx < entry - 0.15 * riskPerUnit)
+          : (livePx > entry + 0.15 * riskPerUnit);
         if (adverseTick) {
           out.skipped.push(`${sym}: live price (${livePx}) reversing against ${row.side} entry (${entry}) — anti-reversal guard blocked entry`);
           continue;
         }
         const chasedTick = row.side === 'LONG'
-          ? (livePx > entry + 0.55 * riskPerUnit)
-          : (livePx < entry - 0.55 * riskPerUnit);
+          ? (livePx > entry + 0.35 * riskPerUnit)
+          : (livePx < entry - 0.35 * riskPerUnit);
         if (chasedTick) {
           out.skipped.push(`${sym}: live price (${livePx}) already ran past ${row.side} entry (${entry}) — anti-late-chase guard blocked entry`);
           continue;
@@ -3639,15 +3748,15 @@ export async function mtfAutoTick(p = {}) {
         const livePx = Number(row.ltp) || 0;
         if (!(livePx > 0)) { out.skipped.push(`${sym}: no live USDC sim quote (equity-sim feed coverage)`); continue; }
         const adverseTick = row.side === 'LONG'
-          ? (livePx < entry - 0.25 * riskPerUnit)
-          : (livePx > entry + 0.25 * riskPerUnit);
+          ? (livePx < entry - 0.15 * riskPerUnit)
+          : (livePx > entry + 0.15 * riskPerUnit);
         if (adverseTick) {
           out.skipped.push(`${sym}: sim price (${livePx}) reversing against ${row.side} entry (${entry}) — anti-reversal guard blocked entry`);
           continue;
         }
         const chasedTick = row.side === 'LONG'
-          ? (livePx > entry + 0.55 * riskPerUnit)
-          : (livePx < entry - 0.55 * riskPerUnit);
+          ? (livePx > entry + 0.35 * riskPerUnit)
+          : (livePx < entry - 0.35 * riskPerUnit);
         if (chasedTick) {
           out.skipped.push(`${sym}: sim price (${livePx}) already ran past ${row.side} entry (${entry}) — anti-late-chase guard blocked entry`);
           continue;

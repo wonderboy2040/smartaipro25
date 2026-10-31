@@ -1959,27 +1959,141 @@ export function orderHygieneMode() {
 }
 
 /**
- * Close-path order hygiene: remove resting orders for the pair BEFORE the
- * position exit so a stale limit cannot re-open/flip the book after close.
- * Best-effort by design: a hygiene failure is reported in the close verdict
- * but must never block the exit itself.
+ * v21.30.0 [S1 ORDER CLASSIFICATION]
+ * ------------------------------------------------------------
+ * Resting orders are not all safe to cancel at the same moment:
+ *   • ENTRY      — plain LIMIT/MARKET/IOC/FOK order that can open/re-open.
+ *   • PROTECTIVE — STOP / SL / TP / TRAIL / reduce-only order. It must stay
+ *                  until the position is actually flat, otherwise the live
+ *                  position can be left naked during the exit call.
+ *   • UNKNOWN    — unrecognised type/shape. NEVER auto-cancelled.
+ * A missing type is treated as ENTRY for backward compatibility with the
+ * R1 list rows (pre-S1 rows carried no type).
  */
-export async function runOrderHygieneForPair({ pair, deps = null } = {}) {
+const PROTECTIVE_ORDER_RE = /(^|[^A-Z])(STOP|SL|TP|TAKE[_ -]?PROFIT|TRAIL|TRIGGER|LIQUIDATION)([^A-Z]|$)/;
+const ENTRY_ORDER_RE = /(LIMIT|MARKET|IOC|FOK|GTC|POST[_ -]?ONLY|ENTRY)/;
+
+export function classifyOpenOrder(order = {}) {
+  const raw = order?.raw && typeof order.raw === 'object' ? order.raw : {};
+  const type = String(order?.type || raw.order_type || raw.type || '').toUpperCase().trim();
+  const stopPrice = num(
+    raw.stop_price ?? raw.trigger_price ?? raw.stopPrice ?? raw.triggerPrice
+    ?? raw.sl_trigger_price ?? raw.tp_trigger_price,
+  );
+  const protectiveFlag = raw.is_stop_order === true || raw.stop_order === true
+    || raw.is_sl === true || raw.is_tp === true
+    || raw.reduce_only === true || raw.reduceOnly === true;
+  if ((type && PROTECTIVE_ORDER_RE.test(type)) || stopPrice > 0 || protectiveFlag) return 'PROTECTIVE';
+  if (ENTRY_ORDER_RE.test(type) || raw.limit_price != null) return 'ENTRY';
+  if (!type) return 'ENTRY'; // legacy R1 row without a type
+  return 'UNKNOWN';
+}
+
+/** `entry-only` (default) keeps protective orders until post-flat; `all`
+ *  also cancels them pre-close. UNKNOWN is never included by either. */
+export function orderHygieneScope() {
+  const raw = String(process.env.FUTURES_HYGIENE_SCOPE ?? 'entry-only').trim().toLowerCase();
+  return raw === 'all' ? 'all' : 'entry-only';
+}
+
+function _hygieneTargets(phase, scope) {
+  const p = String(phase || 'pre-close').toLowerCase();
+  if (p === 'rearm') return ['ENTRY'];
+  if (p === 'post-flat') return ['ENTRY', 'PROTECTIVE'];
+  return scope === 'all' ? ['ENTRY', 'PROTECTIVE'] : ['ENTRY'];
+}
+
+function _classifyCounts(orders = []) {
+  const out = { ENTRY: 0, PROTECTIVE: 0, UNKNOWN: 0 };
+  for (const o of orders) out[classifyOpenOrder(o)] += 1;
+  return out;
+}
+
+/**
+ * Close-path order hygiene. Phase-aware since v21.30.0:
+ *   pre-close  → ENTRY only (protective stays so the position is never naked)
+ *   post-flat  → ENTRY + PROTECTIVE (nothing can re-open / re-trigger)
+ *   rearm      → ENTRY only (before a fresh entry; never touch protection)
+ * UNKNOWN is reported in `kept[]` and never cancelled. Best-effort by
+ * design: a hygiene failure is reported in the close verdict but must never
+ * block the exit itself.
+ */
+export async function runOrderHygieneForPair({ pair, phase = 'pre-close', scope = null, deps = null } = {}) {
   const p = String(pair || '').toUpperCase();
   const mode = orderHygieneMode();
-  if (!p || mode === 'off') return { ok: true, skipped: true, mode, pair: p || null };
+  const resolvedScope = scope === 'all' || scope === 'entry-only'
+    ? scope
+    : orderHygieneScope();
+  const resolvedPhase = String(phase || 'pre-close').toLowerCase();
+  const targetClasses = _hygieneTargets(resolvedPhase, resolvedScope);
+  const base = { mode, phase: resolvedPhase, scope: resolvedScope, pair: p || null, targetClasses };
+  if (!p || mode === 'off') return { ...base, ok: true, skipped: true };
   if (mode === 'shadow') {
     const listed = await listFuturesOpenOrders({ pair: p, deps }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+    const rows = listed?.ok === true ? listed.orders : [];
     return {
-      ok: true, shadow: true, mode, pair: p,
-      listed: listed?.ok === true ? listed.orders.length : null,
-      wouldCancel: listed?.ok === true ? listed.orders.map(o => o.orderId) : [],
+      ...base,
+      ok: true, shadow: true,
+      listed: listed?.ok === true ? rows.length : null,
+      classified: listed?.ok === true ? _classifyCounts(rows) : null,
+      wouldCancel: rows.filter(o => targetClasses.includes(classifyOpenOrder(o))).map(o => o.orderId),
+      kept: rows
+        .filter(o => !targetClasses.includes(classifyOpenOrder(o)))
+        .map(o => ({ orderId: o.orderId, class: classifyOpenOrder(o) })),
       unsupported: listed?.unsupported === true,
       error: listed?.ok === true ? undefined : String(listed?.error || 'list failed'),
     };
   }
-  const res = await cancelFuturesOpenOrdersForPair({ pair: p, deps }).catch(e => ({ ok: false, error: String(e?.message || e) }));
-  return { ...res, mode, pair: p };
+  const listed = await listFuturesOpenOrders({ pair: p, deps }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+  if (!listed.ok) {
+    return {
+      ...base,
+      ok: false, unsupported: listed.unsupported === true,
+      error: listed.error || 'open-order list failed',
+    };
+  }
+  const mine = listed.orders.filter(o => !o.pair || o.pair === p);
+  const classified = _classifyCounts(mine);
+  const targets = mine.filter(o => targetClasses.includes(classifyOpenOrder(o)));
+  const kept = mine
+    .filter(o => !targetClasses.includes(classifyOpenOrder(o)))
+    .map(o => ({ orderId: o.orderId, class: classifyOpenOrder(o) }));
+  const cancelled = [];
+  const failed = [];
+  for (const o of targets) {
+    const r = await cancelFuturesOpenOrder({ orderId: o.orderId, pair: p, deps });
+    if (r.ok) cancelled.push(o.orderId);
+    else failed.push({ orderId: o.orderId, error: r.error, ambiguous: r.ambiguous === true });
+  }
+  return {
+    ...base,
+    ok: failed.length === 0, listed: mine.length, classified,
+    cancelled, failed, kept,
+    error: failed.length ? `${failed.length}/${targets.length} cancel(s) rejected` : undefined,
+  };
+}
+
+/**
+ * v21.30.0 [S1 FLAT CONFIRMATION] — the exchange's own flat verdict for a
+ * pair. `flat:true` only when a successful position read contains no active
+ * row for that pair. A failed read returns `flat:null` (unknown), NEVER true.
+ * The close paths use this before sweeping PROTECTIVE orders: cancelling a
+ * stop while any position is still open would leave it naked.
+ */
+export async function confirmFuturesFlatForPair(pair, { deps = null } = {}) {
+  const p = String(pair || '').toUpperCase();
+  if (!p) return { flat: null, reason: 'pair required' };
+  const list = deps?.listPositions || listFuturesPositions;
+  try {
+    const rows = await list();
+    const active = (Array.isArray(rows) ? rows : []).find(r =>
+      String(r?.pair || '').toUpperCase() === p && num(r?.activePos) !== 0);
+    return active
+      ? { flat: false, pair: p, activePos: num(active.activePos) }
+      : { flat: true, pair: p };
+  } catch (e) {
+    return { flat: null, pair: p, reason: String(e?.message || e) };
+  }
 }
 
 /** NATIVE exchange TP/SL — the safety net that keeps working even when
@@ -2944,6 +3058,12 @@ async function _executeMtfDualLiveOrderInner(opts = {}) {
       if (journalDirty) saveJournalFresh(j);
     }
 
+    // v21.30.0 [S1 REARM SAFETY NET]: a flat book can still carry a stale
+    // ENTRY limit from a previous session. Cancel ENTRY only (protection is
+    // never touched before an entry) and never block on hygiene failure.
+    const orderHygieneRearm = await runOrderHygieneForPair({ pair, phase: 'rearm' })
+      .catch(e => ({ ok: false, error: String(e?.message || e) }));
+
     const mkPosition = (extra = {}) => ({
       id: crypto.randomUUID(),
       pair, symbol: base, market: 'FUTURES', side: reqSide, mode: 'live', source,
@@ -3100,6 +3220,7 @@ async function _executeMtfDualLiveOrderInner(opts = {}) {
           leverage: lev, marginUSDT: marginUsed, stopLoss: sl, t1: tp1, t2: tp2,
         },
         ...(walletNote || tpslNote ? { fitted: [walletNote, tpslNote].filter(Boolean).join(' · ') } : {}),
+        ...(orderHygieneRearm ? { orderHygieneRearm } : {}),
       };
     } catch (e) {
       const msg = String(e?.message || e);
@@ -3473,10 +3594,11 @@ export async function closeCoinDcxActivePosition({ positionId, symbol, pair } = 
       ? `B-${String(symbol).toUpperCase().replace(/USDT$/i, '')}_USDT`
       : null;
 
-  // v21.29.0 [R1]: resting-order hygiene BEFORE the exit — a stale limit
-  // order on the same pair must not survive/re-fill after a close.
+  // v21.30.0 [S1 PRE-CLOSE]: cancel ENTRY orders only — a resting limit can
+  // re-open after the close, but protective SL/TP must stay armed until the
+  // position is actually flat. UNKNOWN orders are never auto-cancelled.
   const orderHygiene = normPair
-    ? await runOrderHygieneForPair({ pair: normPair }).catch(e => ({ ok: false, error: String(e?.message || e) }))
+    ? await runOrderHygieneForPair({ pair: normPair, phase: 'pre-close' }).catch(e => ({ ok: false, error: String(e?.message || e) }))
     : { ok: true, skipped: true };
 
   const j = loadJournalFresh();
@@ -3501,6 +3623,23 @@ export async function closeCoinDcxActivePosition({ positionId, symbol, pair } = 
     if (row?.id) exchPosId = row.id;
   }
   if (exchPosId && loadCredsForOrder()) {
+    const postFlatHygiene = async () => {
+      if (!normPair) return { ok: true, skipped: true, phase: 'post-flat' };
+      // v21.30.0 [S1 FLAT CONFIRMATION]: never cancel PROTECTIVE orders on an
+      // exit ACK alone. Sweep only when the exchange's own position read says
+      // this pair is flat; otherwise keep protection (the flat watcher will
+      // run the post-flat pass once it observes the close).
+      const flat = await confirmFuturesFlatForPair(normPair);
+      if (flat.flat !== true) {
+        return {
+          ok: true, skipped: true, phase: 'post-flat',
+          reason: flat.flat === false
+            ? `protective sweep deferred — ${normPair} still active (activePos ${flat.activePos})`
+            : `protective sweep deferred — flat unverified (${flat.reason || 'position read failed'})`,
+        };
+      }
+      return runOrderHygieneForPair({ pair: normPair, phase: 'post-flat' }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+    };
     const out1 = await exitFuturesPosition(exchPosId).catch(e => ({ ok: false, error: String(e?.message || e) }));
     // v21.23.10 [UUID-RESCUE]: internal-UUID id fail ho to pair-based
     // re-resolve + EK retry (SL-sync twin fix — warna ye position kabhi
@@ -3509,12 +3648,15 @@ export async function closeCoinDcxActivePosition({ positionId, symbol, pair } = 
       const exchList = await listFuturesPositions().catch(() => []);
       const row = exchList.find(p => p.pair === normPair && p.activePos !== 0);
       if (row?.id && String(row.id) !== String(exchPosId)) {
-        return exitFuturesPosition(row.id)
-          .then(r => ({ ...r, orderHygiene }))
-          .catch(e => ({ ok: false, error: String(e?.message || e), orderHygiene }));
+        try {
+          const retried = await exitFuturesPosition(row.id);
+          return { ...retried, orderHygiene, orderHygienePost: retried?.ok ? await postFlatHygiene() : null };
+        } catch (e) {
+          return { ok: false, error: String(e?.message || e), orderHygiene };
+        }
       }
     }
-    return { ...out1, orderHygiene };
+    return { ...out1, orderHygiene, orderHygienePost: out1?.ok ? await postFlatHygiene() : null };
   }
   return { ok: false, error: 'Active CoinDCX position not found', orderHygiene };
 }
@@ -3761,10 +3903,9 @@ export async function watchFuturesPositions({ sendTelegram, getDeepSignal } = {}
           const long = p.side === 'LONG';
           let exitPrice = null, reason = 'Exchange closed (reconciled)';
           const ltp = byPair.get(p.pair);
-          // v21.29.0 [R1]: the exchange closed the position (native SL/TP or
-          // app) — sweep any resting orders for the pair so they cannot
-          // re-open a position the engine believes is flat.
-          const orderHygiene = await runOrderHygieneForPair({ pair: p.pair }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+          // v21.30.0 [S1 POST-FLAT]: the exchange is already flat — sweep
+          // ENTRY + PROTECTIVE orders so a leftover trigger cannot re-open.
+          const orderHygiene = await runOrderHygieneForPair({ pair: p.pair, phase: 'post-flat' }).catch(e => ({ ok: false, error: String(e?.message || e) }));
           if (orderHygiene && orderHygiene.ok !== true && orderHygiene.unsupported !== true) {
             pushEntry(j, {
               kind: 'WATCH_ERROR', day: todayIST(), pair: p.pair, market: 'FUTURES',
@@ -4234,10 +4375,10 @@ export async function closeFuturesPosition(positionId, reason = 'Manual close') 
       return { ok: false, error: 'LIVE position without exchange connection/id — reconcile ho raha hai, kuch second baad retry karo' };
     }
     let orderHygiene = null;
+    let orderHygienePost = null;
     if (p.mode === 'live' && p.exchangePositionId && coindcxConnected()) {
-      // v21.29.0 [R1]: cancel resting orders before the exit (best-effort,
-      // never blocks the close). Verdict is returned for the journal/UI.
-      orderHygiene = await runOrderHygieneForPair({ pair: p.pair }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+      // v21.30.0 [S1 PRE-CLOSE]: ENTRY only — protectives stay armed until flat.
+      orderHygiene = await runOrderHygieneForPair({ pair: p.pair, phase: 'pre-close' }).catch(e => ({ ok: false, error: String(e?.message || e) }));
       try {
         const xr = await exitFuturesPosition(p.exchangePositionId);
         // v20.9.1 [H1]: wrapped rejection pehle silently pass hota tha —
@@ -4245,6 +4386,21 @@ export async function closeFuturesPosition(positionId, reason = 'Manual close') 
         if (!xr?.ok) return { ok: false, error: `Exchange close failed: ${xr?.error || 'wrapped rejection (200 body)'}` };
       }
       catch (e) { return { ok: false, error: `Exchange close failed: ${e?.message || e}` }; }
+      // v21.30.0 [S1 POST-FLAT]: sweep the protectives only after the
+      // exchange itself confirms the pair is flat. An ACK on the exit order is
+      // not proof of a fill — cancelling a stop on a still-open position would
+      // leave it naked. A failed read defers to the flat watcher.
+      const flat = await confirmFuturesFlatForPair(p.pair);
+      if (flat.flat === true) {
+        orderHygienePost = await runOrderHygieneForPair({ pair: p.pair, phase: 'post-flat' }).catch(e => ({ ok: false, error: String(e?.message || e) }));
+      } else {
+        orderHygienePost = {
+          ok: true, skipped: true, phase: 'post-flat',
+          reason: flat.flat === false
+            ? `protective sweep deferred — ${p.pair} still active (activePos ${flat.activePos})`
+            : `protective sweep deferred — flat unverified (${flat.reason || 'position read failed'})`,
+        };
+      }
     }
     const long = p.side === 'LONG';
     const usdInr = await fetchUsdInr();
@@ -4255,7 +4411,7 @@ export async function closeFuturesPosition(positionId, reason = 'Manual close') 
     try { settlePositionOutcome(p, reason); } catch { /* best-effort */ }
     pushEntry(j, { kind: 'CLOSE', day: todayIST(), pair: p.pair, market: 'FUTURES', mode: p.mode, source: p.source, qty: p.qty, entryPrice: p.entryPrice, closePrice: ltp, pnlUSDT: p.pnlUSDT, pnlINR: p.pnlINR, reason });
     saveJournalFresh(j);
-    return { ok: true, position: p, ...(orderHygiene ? { orderHygiene } : {}) };
+    return { ok: true, position: p, ...(orderHygiene ? { orderHygiene } : {}), ...(orderHygienePost ? { orderHygienePost } : {}) };
   });
 }
 

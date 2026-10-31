@@ -49,6 +49,7 @@ import { ollamaStatus, evaluateMtfRowWithOllamaTrio, getOllamaTrioModels } from 
 import { feeBreakevenFloor, defaultRoundTripFeePct } from '../exec/sizing.js';
 import { fetchFuturesPrices } from './futures.js';
 import { resolveDirection, checkDirectionLock } from './directionLock.js';
+import { classifyRowRegime } from './mtfRegime.js';
 // v21.25.0 DIRECTION CERTIFICATE — one strict shared contract for signal side
 // → exchange order side, SL/target geometry and activePos mismatch.
 import {
@@ -463,6 +464,7 @@ export function fuseDualTf({ symbol, market, boardSig = null, plan = null, snap 
 
   return {
     symbol, market, mode: modeId,
+    builtAt: Date.now(),
     superScore: score, tier,
     scoreBand: tier,
     winRatePct,
@@ -845,9 +847,14 @@ export async function buildDualRow({ symbol, market, boardSig = null, modeId = '
       barsInTrend: plan.context.barsInTrend, exhausted: plan.context.exhausted,
       atrPct: plan.context.atrPct, supertrend: plan.context.supertrend, note: plan.context.note,
     } : null,
+    // v21.30.0 [S5]: explicit regime label for the R5 filter / UI.
+    regime: plan?.ok
+      ? classifyRowRegime({ context: plan.context, dir: fuse.dir, trendDir: fuse.trendDir })
+      : null,
     trigger: plan?.ok ? {
       dir: plan.trigger.dir, score: plan.trigger.score, broke: plan.trigger.broke,
       opposingFlow: plan.trigger.opposingFlow, reversalRisk: plan.trigger.reversalRisk,
+      overextended: Boolean(plan.trigger.overextended),
       postPeakTrap: Boolean(plan.trigger.postPeakTrap), rangePct: plan.trigger.rangePct ?? null,
       pullbackReclaim: plan.trigger.pullbackReclaim,
       roc1: plan.trigger.roc1, roc2: plan.trigger.roc2, roc3: plan.trigger.roc3,
@@ -1333,6 +1340,7 @@ export async function getDualMtfBoard({ market = 'INDIA', mode = 'INTRADAY', hol
       checklist: undefined,
     })),
     asOf: Date.now(),
+    builtAt: Date.now(),
     notes: [
       isUsdtPerpDesk
         ? 'Crypto & Gold/Silver (XAU/XAG) rows USDT domain me hain (24×7 Direct CoinDCX Perp Candlesticks + Real-Time Live Tick Stamp) — ₹ equivalent chhote text me.'

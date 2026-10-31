@@ -25,10 +25,11 @@ describe('v21.27.2 MTF LIVE button arms crypto LIVE', () => {
   const routes = read('server/ai/routes.js');
   const coindcx = read('server/ai/coindcxOrders.js');
 
-  it('button is enabled when the server says the crypto desk is armable', () => {
+  it('button is enabled when the server says the crypto desk prerequisites are met', () => {
     expect(ui).toContain("const cryptoClickArmable = deskKey === 'crypto'");
     expect(ui).toContain("&& market !== 'GLOBALFUTURES'");
-    expect(ui).toContain('&& deskArmable?.armable === true;');
+    // v21.30.0: gate on prereqArmable (caps are patched by the same click).
+    expect(ui).toContain('&& deskPrereq?.armable === true;');
     expect(ui).toContain('&& (liveExecEnabled || cryptoClickArmable);');
     // The old hard pre-arm block no longer sits at the top of the handler.
     expect(ui).not.toContain("if (!liveExecEnabled) {\n      notify(false, '⛔ LIVE execution is not enabled");

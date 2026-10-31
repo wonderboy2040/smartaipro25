@@ -1238,11 +1238,13 @@ describe('v21.22.0 — 9-Point Superintelligence Upgrade', () => {
         getPaperSummary: () => ({ open: [] }),
         openPaperTrade: () => ({ ok: true, trade: { id: 'T-SHOULD-NOT-OPEN' } }),
       },
-      // Entry = 20.0, SL = 19.6 (risk = 0.40); live quote = 19.85 (dropped 0.15 > 25% of 0.40 toward SL!)
+      // Entry = 20.0, SL = 19.6 (risk = 0.40); live quote = 19.85 (dropped
+      // 0.15 = 37.5% of risk toward SL). v21.30.0: the pre-guard timing filter
+      // blocks first (max adverse 15% of risk), so the skip names entry timing.
       usdtQuotes: { LINK: 19.85 },
     });
     expect(tickRev.opened.length).toBe(0);
-    expect(tickRev.skipped.some((s: string) => s.includes('anti-reversal guard blocked entry'))).toBe(true);
+    expect(tickRev.skipped.some((s: string) => s.includes('entry timing blocked') && s.includes('reversal'))).toBe(true);
   });
 
   // ------------------------------------------------------------

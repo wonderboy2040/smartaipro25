@@ -1,5 +1,58 @@
 # Changelog
 
+## v21.30.0 — SIGNAL TIMING + DIRECTION HARDENING, LIVE-ARM UX, PHASE-AWARE ORDER HYGIENE (2026-10-31)
+
+**User ask: site ka poora code deep-check karke late-reversal entries aur stated direction ke against jaane wale signals fix karo; site load hone par LIVE button arm na hone ka bug fix karo; S1–S11 plan accurately apply karo (safe order me). Direction certificate (LONG→BUY / SHORT→SELL), 1-active-trade lock aur paper-first safety preserve rahe.**
+
+Minor release. Koi profit guarantee nahi; leveraged futures liquidation risk real hai. Is release me koi real live order place nahi hua aur live server boot nahi kiya gaya. Naye behaviour flags ke peeche hain; direction certificate aur 1-session/1-open-trade lock ko koi raasta bypass nahi karta.
+
+### Signal timing + direction agreement (default `enforce`)
+- New `server/ai/mtfEntryTiming.js`: pure, deterministic pre-entry gate. Clear contradictions block; missing data fail-open (no fabricated block).
+- Blocks: row side vs execution side mismatch; direction-certificate `ok:false`, side mismatch or wrong order side (`LONG→buy`, `SHORT→sell`); LONG against bearish deep-TF/trigger dir (and mirror); fresh closed-bar reversal (`sideStable:false`); unstable trigger without closed-bar confirmation; overextended chase; stale row; live quote already too far.
+- Tightened live-quote thresholds from 25% adverse / 55% chase to **15% adverse / 35% chase of per-unit risk**. The older in-loop anti-reversal/anti-chase checks now use the same numbers, so both layers agree.
+- Runs **before** the R3–R9 guard ladder, so a late/reversal row never reaches sizing. Rejections now surface as `entry timing blocked — …` (the old anti-reversal message remains only as a second layer).
+- `entryTimingGuard: 'enforce'` default; env `ENTRY_TIMING_GUARD=shadow|off` for rehearsal. Shadow decisions feed the R11 shadow harness.
+- Board rows now carry `builtAt`, and the board payload carries top-level `builtAt`, enabling 90s staleness checks without guessing.
+- Locks: `test/mtfEntryTimingV21300.test.ts` (11), updated `test/v2122NinePointSuperUpgrade.test.ts`.
+
+### LIVE button arm fix (site-load regressions)
+- Root cause: `deskArmable.crypto.armable` bundled the R2 money-cap check. The UI aborted the LIVE click **before** sending the same config PATCH that supplies those caps — a deadlock after a fresh site load.
+- `riskArm.js`: new pure `describeDeskArmState()` separates prerequisites (desk on + kill switch off + CoinDCX creds; India typed-LIVE) from caps-only blocking. `armable` keeps its strict meaning; `prereqArmable`, `armableWithCaps`, `needsRiskCaps`, `capsOnlyBlock`, `riskCapsMissing` are exposed.
+- `routes.js`: status/config/toggle now return the split. `deskArmable` stays strict, so nothing silently weakens LIVE gating.
+- `MTFDualBoardPanel.tsx`: button enablement/click gates on `prereqArmable` (fallback to `deskArmable` for older servers) and still sends the caps patch. The confirmation text says when missing caps will be applied by the click.
+- Locks: `test/liveArmReadinessV21300.test.ts` (6), updated `test/mtfLiveArm21272.test.ts`, `test/riskArmR2V21290.test.ts`.
+
+### S1 — phase-aware futures order hygiene (`FUTURES_ORDER_HYGIENE=on`)
+- New `classifyOpenOrder()`: `ENTRY` (LIMIT/MARKET/IOC/FOK, legacy typeless rows), `PROTECTIVE` (STOP/SL/TP/TRAIL/trigger/reduce-only), `UNKNOWN` (never auto-cancelled).
+- `runOrderHygieneForPair({ phase })`:
+  - `pre-close` → cancel `ENTRY` only; protective stays armed so the live position is never naked during exit.
+  - `post-flat` → cancel `ENTRY` + `PROTECTIVE`; nothing can re-open/re-trigger after the book is flat. **Only after `confirmFuturesFlatForPair()` re-reads the exchange and finds no active row** — an exit ACK alone is not proof of a fill. Failed/still-active reads keep protection and defer the sweep to the flat watcher.
+  - `rearm` → cancel `ENTRY` only before a fresh entry; protection is never touched.
+- `FUTURES_HYGIENE_SCOPE=entry-only|all` (default `entry-only`). UNKNOWN is reported in `kept[]`, never cancelled.
+- Wired into `closeCoinDcxActivePosition`, `closeFuturesPosition`, the exchange-flat watcher, and pre-entry rearm. Verdicts returned as `orderHygiene`, `orderHygienePost`, `orderHygieneRearm`; hygiene never blocks an exit.
+- `[VERIFY-DOCS]` exact CoinDCX derivatives open-order/cancel endpoint shapes remain docs/live verification items; `shadow` lists only.
+- Locks: `test/orderHygieneR1.test.ts` (20).
+
+### S4 — real perp basis + deadline-bounded coverage
+- `perpIntel.js`: computes `indexPrice` and `basisPct = (mark − index) / index × 100`; negative basis preserved, missing leg → `null` (never fabricated 0). Wire payload includes both.
+- `getPerpIntelFor(bases, deadlineMs)` now honours a hard deadline: returns cached values when the budget expires; in-flight fetches still land in the 60s cache for the next tick.
+- `mtfAutoLink.js`: crypto/FUTURES candidates enriched with `fundingBps8h`, `longShortRatio`, `basisPct` **before** the guard ladder (1.5s budget), via a non-mutating `guardRow`. Explicit `dataStatus.perp/funding/positioning/basis` plus `out.perpCoverage` (`candidates`, `enriched`, `unavailable`, `byField`).
+- R6 perp veto remains `shadow` by default — enrichment alone never blocks.
+- `[VERIFY-DOCS]` Binance fapi is a reference feed, not the execution venue; CoinDCX publishes no public positioning endpoint.
+- Locks: `test/perpIntelS4V21300.test.ts` (8), existing `test/perpIntel.test.ts`.
+
+### S5 — ADX/ATR/squeeze regime classifier
+- New `server/ai/mtfRegime.js`: pure `classifyMarketRegime()` / `classifyRowRegime()` producing `TREND_UP`, `TREND_DOWN`, `CHOP`, `HIGH_VOL`, `SQUEEZE`, `TRANSITION`, `UNKNOWN` from ADX, ATR%, band width, explicit squeeze and direction. No exchange calls; no evidence → `UNKNOWN`.
+- `tradeGuards.js` `regimeOf()` now resolves explicit labels/aliases first, then the classifier, then the legacy dir/ATR fallback. `SQUEEZE`/`TRANSITION` aliases added to the regime vocabulary.
+- MTF board rows carry the classifier `regime` label. R5 remains `REGIME_FILTER=shadow` with `regimeBlockChop:true` / `regimeBlockHighVol:false` unless promoted after evidence.
+- Locks: `test/mtfRegimeV21300.test.ts` (14), updated `test/tradeGuardsR3R11V21290.test.ts`.
+
+### Safety / operator notes
+- Direction certificate, 1-active-trade lock, paper-default execution and R2 caps are unchanged and still enforced.
+- New rejection wording: a quote that has moved >15% of risk against the signal now says `entry timing blocked — reversal…`; >35% past entry says `late chase…`. This is intentional (tighter than v21.29.x).
+- `ENTRY_TIMING_GUARD=shadow` records would-blocks without blocking; `off` disables. `FUTURES_HYGIENE_SCOPE=all` widens pre-close hygiene to protectives (not recommended while a position is still open).
+- S2 (exact CoinDCX futures open-order/cancel endpoints), S3 (live-small execution parity), S7 (position-attached TP/SL cleanup), S9 (LIVE proof-run soak) and S10 (data-driven correlations) remain verification-gated: `[VERIFY-DOCS]` / `[VERIFY-LIVE]`. No live claims are made.
+
 ## v21.29.1 — COINDCX MANDATORY IP BINDING (28 OCT 2026) CONNECT FIX (2026-10-30)
 
 **User ask: CoinDCX wallet/account connect ho aur LIVE execution phir se kaam kare — CoinDCX ne 28 Oct 2026 se API-key IP binding mandatory kar di, purani plain key+secret ab 401 deti hai.**

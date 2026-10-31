@@ -68,6 +68,16 @@ process.env.AI_ACCURACY_SUITE ??= 'false';
 process.env.AI_ENABLE_META_ENSEMBLE ??= 'false';
 
 // ============================================================
+// v21.30.0 TEST-STABILITY PIN (external feeds): the S4 perp enrichment
+// calls Binance fapi on every crypto tick. A test gate must never depend
+// on the live network (unreliable + it overwrote deterministic fixture
+// values such as context.fundingBps8h). Pin the kill switch here; the
+// perpIntel suites call getPerpIntel() directly with a mocked fetch and
+// are unaffected. Production default remains ON.
+// ============================================================
+process.env.AI_DISABLE_PERP_INTEL ??= 'true';
+
+// ============================================================
 // v21.11 TEST-LEAK CLEANUP (permanent) — 34 suites app/ root me
 // `.test-data-*` dirs chhod jaati thi (user ke box pe 15 dirs / 260KB
 // junk jam gaya tha). vitest 4 me globalTeardown option nahi hai, isliye
