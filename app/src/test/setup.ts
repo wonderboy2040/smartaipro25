@@ -4,6 +4,39 @@ import os from 'node:os';
 import { mkdtempSync } from 'node:fs';
 
 // ============================================================
+// TEST-INFRA COMPAT (Node 26): Node 26 exposes a global
+// `localStorage` accessor that is `undefined` unless the process is
+// started with `--localstorage-file`. That accessor shadows jsdom's
+// Storage implementation, so every suite touching localStorage failed
+// with "Cannot read properties of undefined (reading 'getItem')".
+// Install a normal in-memory Storage only when the environment did not
+// provide a working one — jsdom on Node 20/22 is left untouched.
+// ============================================================
+function __memoryStorage(): Storage {
+  const map = new Map<string, string>();
+  return {
+    get length() { return map.size; },
+    key(index: number) { return Array.from(map.keys())[index] ?? null; },
+    getItem(key: string) { return map.has(String(key)) ? map.get(String(key))! : null; },
+    setItem(key: string, value: string) { map.set(String(key), String(value)); },
+    removeItem(key: string) { map.delete(String(key)); },
+    clear() { map.clear(); },
+  };
+}
+for (const name of ['localStorage', 'sessionStorage'] as const) {
+  try {
+    const current = (globalThis as Record<string, unknown>)[name] as Storage | undefined;
+    if (!current || typeof current.getItem !== 'function') {
+      Object.defineProperty(globalThis, name, {
+        value: __memoryStorage(),
+        configurable: true,
+        writable: true,
+      });
+    }
+  } catch { /* environment-owned accessor — leave it alone */ }
+}
+
+// ============================================================
 // v20.3 TEST-INFRA HYGIENE: one hermetic data dir for EVERY suite.
 // ------------------------------------------------------------
 // 8 test files (futures, mandateFreeze, trailing, v70-pro-trader,

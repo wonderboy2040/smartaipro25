@@ -33,6 +33,39 @@ npm start
 
 ---
 
+## Deploy (Vercel frontend + Node backend)
+
+The UI can be hosted on **Vercel**; the Express API must run on a Node host
+(Render / Railway / VPS) because it needs WebSockets, SSE, cron jobs, child
+processes, and persistent runtime state.
+
+Vercel build fix (repo already contains the config):
+
+- **Root Directory = repository root** → root `vercel.json` installs/builds
+  `app/` and publishes `app/dist/`.
+- **Root Directory = `app`** → `app/vercel.json` publishes `dist/`.
+- Framework preset: **Other** (the config sets `framework: null`).
+- Clear any **Build Command / Output Directory** overrides saved in the Vercel
+  dashboard — dashboard values win over `vercel.json`.
+- Do **not** change the output directory to `dist` when the root is the repo
+  root — that is the most common "No Output Directory named dist" failure.
+- For a custom domain (anything other than `*.vercel.app`), set
+  `VITE_API_PROXY=https://<your-backend-host>` in Vercel → Project Settings →
+  Environment Variables, then redeploy. Without it the frontend uses
+  same-origin `/api` and the backend will not be found.
+- `*.vercel.app` previews default to `https://smartai1.onrender.com`
+  (`app/src/utils/api.ts`). Change that default there if your backend lives
+  elsewhere.
+- On the **Node backend**, add every frontend origin to
+  `ALLOWED_ORIGINS` (comma-separated, e.g.
+  `https://smartaipro25.vercel.app,https://your-custom-domain`), otherwise
+  fail-closed CORS blocks the browser even though `/api/ping` works from curl.
+
+Vercel is static-only for this app: API/SSE/WS routes intentionally stay on the
+Node backend. A full-backend Vercel deployment is not supported.
+
+---
+
 ## Project layout
 
 ```

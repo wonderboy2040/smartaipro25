@@ -17,23 +17,6 @@
     <meta name="twitter:description" content="India Intraday + CoinDCX + JEV Bot Lab three-desk AI trading terminal." />
     <title>SmartAI Pro v21 — Trading Terminal</title>
 
-    <!-- Static-mirror guard: Vercel (and similar static-only hosts) deploy the
-         frontend WITHOUT the Express API server — every /api/* call would 404
-         ("Connect failed (404)" etc). Bounce such visits to the real,
-         API-backed deployment before the app even boots. -->
-    <script>
-      (function () {
-        try {
-          if (/\.vercel\.app$/i.test(window.location.hostname)) {
-            window.location.replace(
-              'https://smartai1.onrender.com' +
-              window.location.pathname + window.location.search + window.location.hash
-            );
-          }
-        } catch (e) { /* never block boot */ }
-      })();
-    </script>
-
     <link rel="preconnect" href="https://scanner.tradingview.com" crossorigin />
     <link rel="preconnect" href="https://api.coindcx.com" crossorigin />
     <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin />
