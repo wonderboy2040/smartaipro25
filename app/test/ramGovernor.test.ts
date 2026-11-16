@@ -76,10 +76,12 @@ describe('v20.6 ramGovernor — state transitions', () => {
   });
 
   it('RSS floor hit (process RSS alone exceeds total-reserve) → YELLOW even if free is high', () => {
-    // totalmem default 16GB; reserve 600MB → if RSS > 16GB-600MB = 15.4GB,
-    // the rss-floor hit triggers. (real-world swap scenario)
+    // Drive a 16GB box explicitly; reserve 600MB → RSS above 15.4GB hits
+    // the floor. Passing totalMB is essential: a GitHub runner can report
+    // 64GB+ and the same 15GB RSS would otherwise look safe (CI regression).
+    const totalMB = 16 * 1024;
     initRamGovernor({ env: { RAM_RSS_RESERVE_MB: '600' } });
-    __driveRamTickForTests(8 * 1024, 15 * 1024); // 8GB free BUT 15GB RSS → YELLOW
+    __driveRamTickForTests(8 * 1024, totalMB - 100, totalMB); // 8GB free BUT ~16GB RSS → YELLOW
     expect(ramState().state).toBe('YELLOW');
   });
 

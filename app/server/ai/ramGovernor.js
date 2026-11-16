@@ -152,10 +152,13 @@ export function __resetRamGovernorForTests() {
   _state._alertSink = null;
 }
 
-// Test hooks — drive a tick with injected free/rss values
-export function __driveRamTickForTests(freeMB, rssMB) {
+// Test hooks — drive a tick with injected free/rss values.
+// totalMB is injectable too: the RSS-floor assertion must not depend on the
+// CI runner's real RAM (a 64GB runner made a 15GB RSS look safe).
+export function __driveRamTickForTests(freeMB, rssMB, totalMB = null) {
   _state.freeMB = Math.max(0, Math.round(freeMB));
   _state.rssMB = Math.max(0, Math.round(rssMB));
+  if (Number.isFinite(totalMB) && totalMB > 0) _state.totalMB = Math.round(totalMB);
   _state.totalMB = _state.totalMB || 16 * 1024; // default 16GB box
   // re-evaluate state using the same logic as _tick
   const rssFloorHit = _state.rssMB > (_state.totalMB - _state.cfg.rssReserveMB) && _state.totalMB > 1024;
